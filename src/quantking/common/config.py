@@ -15,7 +15,17 @@ from quantking.common.paths import RuntimePaths
 _EXPECTED_KEYS: Mapping[str, frozenset[str]] = {
     "paths": frozenset({"code_root", "data_root", "offsite_backup_root"}),
     "web": frozenset({"host", "port"}),
-    "sqlite": frozenset({"busy_timeout_ms"}),
+    "sqlite": frozenset(
+        {
+            "busy_timeout_ms",
+            "max_attempts",
+            "retry_base_delay_ms",
+            "retry_cap_delay_ms",
+            "retry_jitter_ratio",
+            "heartbeat_min_interval_ms",
+            "progress_min_interval_ms",
+        }
+    ),
 }
 _ENV_FIELDS: Mapping[str, tuple[str, str]] = {
     "QUANTKING_CODE_ROOT": ("paths", "code_root"),
@@ -24,6 +34,12 @@ _ENV_FIELDS: Mapping[str, tuple[str, str]] = {
     "QUANTKING_WEB_HOST": ("web", "host"),
     "QUANTKING_WEB_PORT": ("web", "port"),
     "QUANTKING_SQLITE_BUSY_TIMEOUT_MS": ("sqlite", "busy_timeout_ms"),
+    "QUANTKING_SQLITE_MAX_ATTEMPTS": ("sqlite", "max_attempts"),
+    "QUANTKING_SQLITE_RETRY_BASE_DELAY_MS": ("sqlite", "retry_base_delay_ms"),
+    "QUANTKING_SQLITE_RETRY_CAP_DELAY_MS": ("sqlite", "retry_cap_delay_ms"),
+    "QUANTKING_SQLITE_RETRY_JITTER_RATIO": ("sqlite", "retry_jitter_ratio"),
+    "QUANTKING_JOB_HEARTBEAT_MIN_INTERVAL_MS": ("sqlite", "heartbeat_min_interval_ms"),
+    "QUANTKING_JOB_PROGRESS_MIN_INTERVAL_MS": ("sqlite", "progress_min_interval_ms"),
 }
 
 
@@ -35,6 +51,12 @@ class AppSettings:
     web_host: str
     web_port: int
     sqlite_busy_timeout_ms: int
+    sqlite_max_attempts: int
+    sqlite_retry_base_delay_ms: int
+    sqlite_retry_cap_delay_ms: int
+    sqlite_retry_jitter_ratio: float
+    job_heartbeat_min_interval_ms: int
+    job_progress_min_interval_ms: int
 
     def __post_init__(self) -> None:
         if not isinstance(self.paths, RuntimePaths):
@@ -63,6 +85,34 @@ class AppSettings:
             raise ConfigurationError(
                 "sqlite_busy_timeout_ms must be between 1 and 60000",
                 context={"field": "sqlite_busy_timeout_ms"},
+            )
+        if not 1 <= self.sqlite_max_attempts <= 20:
+            raise ConfigurationError(
+                "sqlite_max_attempts must be between 1 and 20",
+                context={"field": "sqlite_max_attempts"},
+            )
+        if (
+            not 0 <= self.sqlite_retry_base_delay_ms <= 5000
+            or not self.sqlite_retry_base_delay_ms <= self.sqlite_retry_cap_delay_ms <= 5000
+        ):
+            raise ConfigurationError(
+                "SQLite retry delay bounds are invalid",
+                context={"field": "sqlite_retry_cap_delay_ms"},
+            )
+        if not 0.0 <= self.sqlite_retry_jitter_ratio <= 1.0:
+            raise ConfigurationError(
+                "sqlite_retry_jitter_ratio must be between 0 and 1",
+                context={"field": "sqlite_retry_jitter_ratio"},
+            )
+        if not 1 <= self.job_heartbeat_min_interval_ms <= 60_000:
+            raise ConfigurationError(
+                "job_heartbeat_min_interval_ms must be between 1 and 60000",
+                context={"field": "job_heartbeat_min_interval_ms"},
+            )
+        if not 1 <= self.job_progress_min_interval_ms <= 60_000:
+            raise ConfigurationError(
+                "job_progress_min_interval_ms must be between 1 and 60000",
+                context={"field": "job_progress_min_interval_ms"},
             )
 
 
@@ -127,6 +177,14 @@ def _text(value: object, *, field: str) -> str:
     return value
 
 
+def _number(value: object, *, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a number")
+    if isinstance(value, (int, float, str)):
+        return float(value)
+    raise ValueError(f"{field} must be a number")
+
+
 def load_settings(default_config: Path, *, environ: Mapping[str, str] | None = None) -> AppSettings:
     """Load explicit non-secret defaults, then apply known process environment values."""
     try:
@@ -155,6 +213,29 @@ def load_settings(default_config: Path, *, environ: Mapping[str, str] | None = N
             web_port=_integer(document["web"]["port"], field="web_port"),
             sqlite_busy_timeout_ms=_integer(
                 document["sqlite"]["busy_timeout_ms"], field="sqlite_busy_timeout_ms"
+            ),
+            sqlite_max_attempts=_integer(
+                document["sqlite"]["max_attempts"], field="sqlite_max_attempts"
+            ),
+            sqlite_retry_base_delay_ms=_integer(
+                document["sqlite"]["retry_base_delay_ms"],
+                field="sqlite_retry_base_delay_ms",
+            ),
+            sqlite_retry_cap_delay_ms=_integer(
+                document["sqlite"]["retry_cap_delay_ms"],
+                field="sqlite_retry_cap_delay_ms",
+            ),
+            sqlite_retry_jitter_ratio=_number(
+                document["sqlite"]["retry_jitter_ratio"],
+                field="sqlite_retry_jitter_ratio",
+            ),
+            job_heartbeat_min_interval_ms=_integer(
+                document["sqlite"]["heartbeat_min_interval_ms"],
+                field="job_heartbeat_min_interval_ms",
+            ),
+            job_progress_min_interval_ms=_integer(
+                document["sqlite"]["progress_min_interval_ms"],
+                field="job_progress_min_interval_ms",
             ),
         )
     except InvalidPathError as error:

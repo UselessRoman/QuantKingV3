@@ -8,4 +8,10 @@ host = "127.0.0.1"
 port = 8765
 
 [sqlite]
-busy_timeout_ms = 5000
+busy_timeout_ms = 250
+max_attempts = 7
+retry_base_delay_ms = 10
+retry_cap_delay_ms = 160
+retry_jitter_ratio = 0.25
+heartbeat_min_interval_ms = 1000
+progress_min_interval_ms = 250

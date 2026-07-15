@@ -5,10 +5,16 @@ import pytest
 from quantking.common.errors import (
     ConfigurationError,
     ErrorCode,
+    IdempotencyConflictError,
     InvalidIdError,
+    InvalidJobTransitionError,
     InvalidPathError,
     InvalidTimeError,
+    JobNotFoundError,
+    PersistenceBusyError,
     QuantKingError,
+    UnknownJobTypeError,
+    UpstreamJobNotReadyError,
 )
 
 
@@ -35,6 +41,12 @@ def test_error_has_stable_code_message_and_read_only_string_context() -> None:
         (InvalidIdError, ErrorCode.INVALID_ID),
         (InvalidTimeError, ErrorCode.INVALID_TIME),
         (InvalidPathError, ErrorCode.INVALID_PATH),
+        (InvalidJobTransitionError, ErrorCode.INVALID_JOB_TRANSITION),
+        (IdempotencyConflictError, ErrorCode.IDEMPOTENCY_CONFLICT),
+        (JobNotFoundError, ErrorCode.JOB_NOT_FOUND),
+        (PersistenceBusyError, ErrorCode.PERSISTENCE_BUSY),
+        (UnknownJobTypeError, ErrorCode.UNKNOWN_JOB_TYPE),
+        (UpstreamJobNotReadyError, ErrorCode.UPSTREAM_JOB_NOT_READY),
     ],
 )
 def test_public_error_subclasses_have_fixed_codes(
