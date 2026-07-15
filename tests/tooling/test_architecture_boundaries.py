@@ -32,6 +32,7 @@ def test_checker_accepts_every_explicit_adapter_and_entry_boundary(tmp_path: Pat
             "from sqlalchemy.orm import Session\nfrom alembic import command\n"
         ),
         "data/adapters/query.py": "import duckdb\nfrom pyarrow import Table\n",
+        "web/adapters/compatibility.py": "from fastapi import FastAPI\n",
         "web/app.py": "from fastapi import FastAPI, Request\n",
         "web/schemas.py": "from fastapi import HTTPException\n",
     }

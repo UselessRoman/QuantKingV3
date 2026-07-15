@@ -24,6 +24,9 @@ S0-02～S0-06 全部完成 → S0-07 全量验收与状态收口
 ```
 
 详细范围见 [任务卡](TASKS.md)。完成条件与证据见 [验收矩阵](ACCEPTANCE.md)。
+S0-03 固化的 schema、状态机、锁参数和 S0-04 消费边界见 [持久化契约](PERSISTENCE.md)。
+S0-02 的离线结果、Qlib 扩展点和经授权的 XTQuant 最小只读证据见
+[联合兼容性报告](COMPATIBILITY.md)。
 
 ## 全阶段禁止项
 

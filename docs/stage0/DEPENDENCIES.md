@@ -1,23 +1,24 @@
 # S0-01 锁定依赖记录
 
 状态：2026-07-15 已按 `uv.lock`、`frontend/package-lock.json` 和本机已安装包元数据记录。
-版本表是 S0-01 的锁定结果，不代表 S0-02 联合兼容性探针已经通过。升级任何直接依赖时，
-必须重新锁定、更新本表并重跑完整质量门。
+版本表是 S0-01 的锁定结果。S0-02 的六项离线联合探针和经明确授权的 XTQuant 最小
+只读探针均已通过，实际命令、范围与证据见[联合兼容性报告](COMPATIBILITY.md)。升级任何
+直接依赖时，必须重新锁定、更新本表并重跑完整质量门；XTQuant 复跑仍须重新授权。
 
 ## Python 运行依赖
 
 下表各版本均已安装在 Windows x86-64 / Python 3.12.13 的统一 `.venv`；Qlib、
-LightGBM、Backtrader、DuckDB 和 FastAPI 的功能级联合探针仍属于 S0-02。
+LightGBM、Backtrader、DuckDB 和 FastAPI 的 S0-02 离线功能级联合探针已通过。
 
 | 依赖 | 锁定版本 | 用途 | 维护状态与许可证 | Windows/Python 3.12 | 离线影响 | 替代方案 |
 |---|---:|---|---|---|---|---|
 | Alembic | 1.18.5 | SQLite schema 迁移 | 活跃稳定；MIT | 已锁定安装 | 首次安装需 wheel；运行迁移离线 | SQLAlchemy 手写迁移（可审计性较弱） |
-| Backtrader | 1.9.78.123 | 正式事件驱动回测验收 | 成熟、发布频率低；GPL-3.0+ | 纯 Python 包已安装，S0-02 探针待做 | 包缓存后离线 | 自研事件引擎（成本高） |
+| Backtrader | 1.9.78.123 | 正式事件驱动回测验收 | 成熟、发布频率低；GPL-3.0+ | 纯 Python 包已安装，S0-02 离线探针通过 | 包缓存后离线 | 自研事件引擎（成本高） |
 | DuckDB | 1.5.4 | 本地批量查询 | 活跃稳定；MIT | Windows wheel 已安装 | wheel 较大，运行离线 | PyArrow/Pandas 查询（能力或性能不同） |
 | FastAPI | 0.139.0 | 本机同源 API 入口 | 活跃稳定；MIT | 已安装 | 运行离线 | Starlette（需要更多自建 schema/文档） |
 | LightGBM | 4.6.0 | Stage 3 模型基线，Stage 0 兼容性探针 | 活跃稳定；MIT | Windows wheel 已安装 | 原生 wheel 较大，训练离线 | scikit-learn HistGradientBoosting |
 | pydantic-settings | 2.14.2 | 显式配置模型支持 | 活跃稳定；MIT | 已安装 | 运行离线 | 标准库 TOML + dataclass 手工校验 |
-| pyqlib | 0.9.7 | 研究数据、模型和快速回测适配器 | 稳定发行版；MIT | 已安装，S0-02 扩展点探针待做 | 传递依赖多、离线缓存体积大 | 自有研究管线（不满足已确认 Qlib 决策） |
+| pyqlib | 0.9.7 | 研究数据、模型和快速回测适配器 | 稳定发行版；MIT | 已安装，S0-02 `WeightStrategyBase` 扩展点探针通过 | 传递依赖多、离线缓存体积大 | 自有研究管线（不满足已确认 Qlib 决策） |
 | SQLAlchemy | 2.0.51 | SQLite 持久化实现 | 活跃稳定；MIT | 已安装 | 运行离线 | `sqlite3` 手写仓储（迁移/类型成本更高） |
 | Uvicorn | 0.51.0 | 仅回环地址的 ASGI 入口 | 活跃稳定；BSD-3-Clause | 已安装 | 运行离线 | Hypercorn |
 

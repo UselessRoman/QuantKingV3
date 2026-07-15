@@ -1,5 +1,12 @@
 """Stable shared contracts that do not depend on external adapters."""
 
+from quantking.common.compatibility import (
+    CompatibilityProbeError,
+    ProbeErrorCode,
+    ProbeReport,
+    ProbeResult,
+    ProbeStatus,
+)
 from quantking.common.config import AppSettings, load_settings
 from quantking.common.errors import (
     ConfigurationError,
@@ -15,12 +22,17 @@ from quantking.common.time import TradingDate, UtcTimestamp, utc_now
 
 __all__ = [
     "AppSettings",
+    "CompatibilityProbeError",
     "ConfigurationError",
     "EntityId",
     "ErrorCode",
     "InvalidIdError",
     "InvalidPathError",
     "InvalidTimeError",
+    "ProbeErrorCode",
+    "ProbeReport",
+    "ProbeResult",
+    "ProbeStatus",
     "QuantKingError",
     "RuntimePaths",
     "TradingDate",

@@ -38,7 +38,15 @@ def _fastapi_allowed(parts: tuple[str, ...]) -> bool:
         return False
     relative = "/".join(parts)
     return (
-        relative in {"web/api.py", "web/app.py", "web/main.py", "web/routes.py", "web/schemas.py"}
+        relative
+        in {
+            "web/adapters/compatibility.py",
+            "web/api.py",
+            "web/app.py",
+            "web/main.py",
+            "web/routes.py",
+            "web/schemas.py",
+        }
         or _starts_with(parts, ("web", "api"))
         or _starts_with(parts, ("web", "schemas"))
     )

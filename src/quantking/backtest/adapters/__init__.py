@@ -1,0 +1,1 @@
+"""External backtest-engine adapters."""
