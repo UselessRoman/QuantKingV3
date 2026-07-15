@@ -11,7 +11,7 @@ from unittest.mock import patch
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     create_sqlite_engine,
-    upgrade_database,
+    initialize_database,
 )
 from quantking.jobs.models import JobStatus
 from quantking.jobs.services import CreateJob, JobService
@@ -35,7 +35,7 @@ def main() -> int:
 
     with TemporaryDirectory(prefix="quantking-web-e2e-") as temporary:
         database = Path(temporary) / "e2e.db"
-        upgrade_database(database)
+        initialize_database(database)
         engine = create_sqlite_engine(database, busy_timeout_ms=250)
         service = JobService(SqliteUnitOfWorkFactory(engine), clock=lambda: fixed_now)
         with patch("quantking.jobs.services.new_entity_id", return_value=FIXED_JOB_ID):

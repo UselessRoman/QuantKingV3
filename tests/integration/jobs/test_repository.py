@@ -18,7 +18,7 @@ from quantking.common.time import UtcTimestamp
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     create_sqlite_engine,
-    upgrade_database,
+    initialize_database,
 )
 from quantking.jobs.models import JobStatus
 from quantking.jobs.services import CreateJob, JobService, RetryPolicy
@@ -47,7 +47,7 @@ def _create(service: JobService, *, key: str = "same-key", upstream: tuple[str, 
 
 def test_idempotent_create_returns_same_job_without_duplicate_event(tmp_path: Path) -> None:
     database = tmp_path / "idempotent.db"
-    upgrade_database(database)
+    initialize_database(database)
     service = _service(database)
 
     first = _create(service)
@@ -60,7 +60,7 @@ def test_idempotent_create_returns_same_job_without_duplicate_event(tmp_path: Pa
 
 def test_idempotency_key_rejects_a_different_command_without_new_event(tmp_path: Path) -> None:
     database = tmp_path / "idempotency-conflict.db"
-    upgrade_database(database)
+    initialize_database(database)
     service = _service(database)
     first = _create(service)
 
@@ -85,7 +85,7 @@ def test_idempotency_key_rejects_a_different_command_without_new_event(tmp_path:
 
 def test_transition_and_event_are_atomic_and_cursor_is_strictly_bounded(tmp_path: Path) -> None:
     database = tmp_path / "events.db"
-    upgrade_database(database)
+    initialize_database(database)
     service = _service(database)
     job_id = _create(service)
 
@@ -106,7 +106,7 @@ def test_transition_and_event_are_atomic_and_cursor_is_strictly_bounded(tmp_path
 
 def test_event_cursor_is_never_reused_after_cascade_deletes_all_events(tmp_path: Path) -> None:
     database = tmp_path / "monotonic-cursor.db"
-    upgrade_database(database)
+    initialize_database(database)
     service = _service(database)
     first_job = _create(service, key="first")
     service.transition(first_job, JobStatus.RUNNING, worker_id="worker-1")
@@ -130,7 +130,7 @@ def test_event_cursor_is_never_reused_after_cascade_deletes_all_events(tmp_path:
 
 def test_append_only_audit_is_protected_by_database(tmp_path: Path) -> None:
     database = tmp_path / "audit.db"
-    upgrade_database(database)
+    initialize_database(database)
     service = _service(database)
     service.append_audit(
         actor="pytest",
@@ -149,7 +149,7 @@ def test_append_only_audit_is_protected_by_database(tmp_path: Path) -> None:
 
 def test_recovery_interrupts_legacy_running_jobs_and_emits_event(tmp_path: Path) -> None:
     database = tmp_path / "recovery.db"
-    upgrade_database(database)
+    initialize_database(database)
     service = _service(database)
     job_id = _create(service)
     service.transition(job_id, JobStatus.RUNNING, worker_id="dead-worker", summary="claimed")
@@ -165,7 +165,7 @@ def test_recovery_interrupts_legacy_running_jobs_and_emits_event(tmp_path: Path)
 
 def test_heartbeat_and_duplicate_progress_are_rate_limited(tmp_path: Path) -> None:
     database = tmp_path / "rate-limit.db"
-    upgrade_database(database)
+    initialize_database(database)
     service = _service(database)
     job_id = _create(service)
     base = UtcTimestamp(datetime(2026, 7, 15, 1, 0, tzinfo=UTC))
@@ -185,7 +185,7 @@ def test_heartbeat_and_duplicate_progress_are_rate_limited(tmp_path: Path) -> No
 
 def test_explicit_write_lock_exhausts_retry_and_raises_stable_error(tmp_path: Path) -> None:
     database = tmp_path / "locked.db"
-    upgrade_database(database)
+    initialize_database(database)
     policy = RetryPolicy(
         max_attempts=3,
         base_delay_ms=5,
@@ -216,7 +216,7 @@ def test_explicit_write_lock_exhausts_retry_and_raises_stable_error(tmp_path: Pa
 
 def test_non_lock_operational_error_is_not_retried_or_rewritten(tmp_path: Path) -> None:
     database = tmp_path / "non-lock.db"
-    upgrade_database(database)
+    initialize_database(database)
     engine = create_sqlite_engine(database, busy_timeout_ms=250)
     service = JobService(SqliteUnitOfWorkFactory(engine))
     with engine.begin() as connection:

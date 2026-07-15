@@ -10,7 +10,7 @@ import pytest
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     create_sqlite_engine,
-    upgrade_database,
+    initialize_database,
 )
 from quantking.jobs.models import JobStatus
 from quantking.jobs.services import CreateJob, JobService
@@ -69,7 +69,7 @@ def _cleanup_processes(processes: list[multiprocessing.Process]) -> None:
 @pytest.mark.timeout(30)
 def test_spawn_processes_commit_100_short_transactions_without_loss(tmp_path: Path) -> None:
     database = tmp_path / "concurrency.db"
-    upgrade_database(database)
+    initialize_database(database)
     engine = create_sqlite_engine(database, busy_timeout_ms=250)
     service = JobService(SqliteUnitOfWorkFactory(engine))
     job = service.create_job(
@@ -143,7 +143,7 @@ def test_spawn_processes_commit_100_short_transactions_without_loss(tmp_path: Pa
 @pytest.mark.timeout(30)
 def test_two_spawn_workers_cannot_claim_the_same_pending_job(tmp_path: Path) -> None:
     database = tmp_path / "claim.db"
-    upgrade_database(database)
+    initialize_database(database)
     engine = create_sqlite_engine(database, busy_timeout_ms=250)
     service = JobService(SqliteUnitOfWorkFactory(engine))
     job = service.create_job(

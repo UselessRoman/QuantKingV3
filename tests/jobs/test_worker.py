@@ -9,7 +9,7 @@ from quantking.common.errors import UpstreamJobNotReadyError
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     create_sqlite_engine,
-    upgrade_database,
+    initialize_database,
 )
 from quantking.jobs.models import JobStatus
 from quantking.jobs.services import CreateJob, JobService
@@ -18,7 +18,7 @@ from quantking.jobs.worker import JobCancelledAtCheckpoint, Worker, WorkerContex
 
 def _service(tmp_path: Path) -> JobService:
     database = tmp_path / "worker.db"
-    upgrade_database(database)
+    initialize_database(database)
     return JobService(SqliteUnitOfWorkFactory(create_sqlite_engine(database, busy_timeout_ms=250)))
 
 

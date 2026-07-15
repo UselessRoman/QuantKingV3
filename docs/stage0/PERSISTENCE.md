@@ -44,7 +44,11 @@ RUNNING -> SUCCEEDED | FAILED | CANCELLED | INTERRUPTED
 - 状态转换以当前状态和 `row_version` 做 compare-and-swap；两个 Worker 竞争同一 `PENDING` 任务时只有一个能够提交 `RUNNING` 和领取事件。
 - 心跳、重复进度按下述最小间隔合并；完整日志不进入 SQLite。
 
-生产数据库迁移前的一致性备份由 S0-05 集成。本任务的 `upgrade_database` 只允许用于 pytest 临时空库和隔离迁移验证，不代表生产迁移已经具备备份能力。
+Stage 0 不提供既有数据库升级入口。`initialize_database` 只初始化此前不存在的新文件：调用方必须给出绝对路径，父目录必须已经存在且整条路径不能经过 symbolic link/junction，目标即使只是一个零字节文件也会在打开 SQLite 连接或执行 Alembic 前被拒绝。函数以排他创建原子保留目标，因此并发出现的同名文件也不会被迁移。pytest、并发门和 Web E2E 入口均只在各自新建的临时目录中调用该函数。
+
+Alembic 中途失败时，新建的失败数据库作为诊断证据保留；它不会被删除或回退成可用路径，同一路径的下一次初始化会因目标已存在而拒绝。该失败产物不是已初始化数据库，后续尝试必须使用新路径。
+
+未来对任何既有库实施正式 schema 迁移前，必须先取得“已完成且验证通过”的 S0-05 一致性快照凭证，并在隔离临时副本上通过迁移验证后，才允许打开原库执行迁移。凭证类型、正式迁移入口和既有库变更流程均未在 Stage 0 实现，也不得以 `initialize_database` 绕过。
 
 ## 已固化 SQLite 参数
 

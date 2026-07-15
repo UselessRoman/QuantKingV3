@@ -12,7 +12,7 @@ from quantking.common.time import Clock
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     create_sqlite_engine,
-    upgrade_database,
+    initialize_database,
 )
 from quantking.jobs.models import JobStatus
 from quantking.jobs.services import CreateJob, JobService
@@ -48,7 +48,7 @@ def fixed_clock() -> Clock:
 @pytest.fixture
 def job_service(tmp_path: Path, fixed_clock: Clock) -> JobService:
     database = tmp_path / "web.db"
-    upgrade_database(database)
+    initialize_database(database)
     engine = create_sqlite_engine(database, busy_timeout_ms=250)
     return JobService(SqliteUnitOfWorkFactory(engine), clock=fixed_clock)
 

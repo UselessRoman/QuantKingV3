@@ -22,6 +22,7 @@ from sqlalchemy.pool import NullPool
 from quantking.common.errors import (
     IdempotencyConflictError,
     InvalidJobTransitionError,
+    InvalidPathError,
     JobNotFoundError,
     PersistenceBusyError,
 )
@@ -45,6 +46,62 @@ from quantking.jobs.ports import JobRepository
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 ResultT = TypeVar("ResultT")
+
+
+def _is_reparse_point(path: Path) -> bool:
+    return path.is_symlink() or path.is_junction()
+
+
+def _reserve_new_database(database: Path) -> None:
+    """Atomically reserve a never-before-existing database at an explicit safe path."""
+    if not isinstance(database, Path) or not database.is_absolute():
+        raise InvalidPathError(
+            "SQLite initialization path must be absolute",
+            context={"path": str(database)},
+        )
+    if ".." in database.parts:
+        raise InvalidPathError(
+            "SQLite initialization path must not contain parent traversal",
+            context={"path": str(database)},
+        )
+
+    parent = database.parent
+    if not parent.is_dir():
+        raise InvalidPathError(
+            "SQLite initialization parent must already exist as a directory",
+            context={"parent": str(parent)},
+        )
+    try:
+        for component in (parent, *parent.parents):
+            if _is_reparse_point(component):
+                raise InvalidPathError(
+                    "SQLite initialization path cannot contain a symbolic link or junction",
+                    context={"path": str(database)},
+                )
+    except OSError as error:
+        raise InvalidPathError(
+            "SQLite initialization path could not be inspected safely",
+            context={"path": str(database)},
+        ) from error
+
+    if database.exists() or _is_reparse_point(database):
+        raise InvalidPathError(
+            "SQLite initialization target must not already exist",
+            context={"path": str(database)},
+        )
+    try:
+        with database.open("xb"):
+            pass
+    except FileExistsError as error:
+        raise InvalidPathError(
+            "SQLite initialization target must not already exist",
+            context={"path": str(database)},
+        ) from error
+    except OSError as error:
+        raise InvalidPathError(
+            "SQLite initialization target could not be reserved safely",
+            context={"path": str(database)},
+        ) from error
 
 
 def create_sqlite_engine(database: Path, *, busy_timeout_ms: int) -> Engine:
@@ -77,8 +134,16 @@ def create_sqlite_engine(database: Path, *, busy_timeout_ms: int) -> Engine:
     return engine
 
 
-def upgrade_database(database: Path, *, busy_timeout_ms: int = 250) -> None:
-    """Upgrade an isolated database to head; production backup belongs to S0-05."""
+def initialize_database(database: Path, *, busy_timeout_ms: int = 250) -> None:
+    """Initialize Alembic head only in a brand-new, explicitly safe database file.
+
+    This Stage 0 helper is intentionally not an existing-database migration entry point.
+    A future migration of an existing database must require a completed, verified S0-05
+    snapshot credential before any database connection is opened.
+    """
+    if not 1 <= busy_timeout_ms <= 60_000:
+        raise ValueError("busy_timeout_ms must be between 1 and 60000")
+    _reserve_new_database(database)
     engine = create_sqlite_engine(database, busy_timeout_ms=busy_timeout_ms)
     configuration = Config(str(_REPOSITORY_ROOT / "alembic.ini"))
     configuration.set_main_option("script_location", str(_REPOSITORY_ROOT / "migrations"))
