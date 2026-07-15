@@ -1,0 +1,11 @@
+[paths]
+code_root = "E:\\QuantKingV3"
+data_root = "E:\\QuantKingV3Data"
+offsite_backup_root = "F:\\QuantKingV3Backups"
+
+[web]
+host = "127.0.0.1"
+port = 8765
+
+[sqlite]
+busy_timeout_ms = 5000

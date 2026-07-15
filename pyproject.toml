@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quantking"
+version = "0.0.0"
+description = "QuantKing V3 local quantitative research platform"
+readme = "README.md"
+requires-python = "==3.12.13"
+dependencies = [
+    "alembic>=1.15,<2",
+    "backtrader==1.9.78.123",
+    "duckdb>=1.2,<2",
+    "fastapi>=0.115,<1",
+    "lightgbm>=4.6,<5",
+    "pydantic-settings>=2.8,<3",
+    "pyqlib==0.9.7",
+    "sqlalchemy>=2.0,<3",
+    "uvicorn>=0.34,<1",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28,<1",
+    "mypy>=1.15,<2",
+    "pytest>=8.3,<9",
+    "pytest-timeout>=2.3,<3",
+    "ruff>=0.11,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quantking"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+testpaths = ["tests"]
+markers = [
+    "real_xtquant: accesses the real XTQuant/QMT runtime",
+    "real_backup: writes a real data or backup root",
+    "simulation_account: reads a real QMT simulation account",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "SIM", "UP"]
+
+[tool.ruff.format]
+line-ending = "lf"
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+pretty = true
+show_error_codes = true
+files = ["src/quantking"]
