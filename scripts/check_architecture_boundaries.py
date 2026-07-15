@@ -119,6 +119,20 @@ def check_boundaries(root: Path) -> list[Violation]:
             continue
 
         for line, module, imports_request in _imports(tree):
+            if (
+                parts
+                and parts[0] == "web"
+                and module.startswith("quantking.jobs.adapters.persistence")
+            ):
+                violations.append(
+                    Violation(
+                        display,
+                        line,
+                        "jobs.persistence",
+                        "injected Web application port",
+                    )
+                )
+                continue
             top_level = module.split(".", maxsplit=1)[0]
             if top_level == "fastapi" and imports_request:
                 if not _request_allowed(parts):

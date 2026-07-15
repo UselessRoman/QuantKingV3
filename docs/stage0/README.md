@@ -29,6 +29,8 @@ S0-02 的离线结果、Qlib 扩展点和经授权的 XTQuant 最小只读证据
 [联合兼容性报告](COMPATIBILITY.md)。
 S0-03 的 SQLite schema、任务状态机、锁重试、并发门和 JSON Lines 契约见
 [持久化与任务报告](PERSISTENCE.md)。
+S0-04 的应用端口、API/SSE 游标恢复、同源静态托管和最小中文前端见
+[本地 Web 壳契约](WEB_SHELL.md)。
 S0-05 的快照格式、增量复制、隔离恢复、运维基线和真实演练授权边界见
 [备份与恢复契约](BACKUP_AND_RESTORE.md)。
 

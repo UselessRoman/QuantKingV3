@@ -77,3 +77,17 @@ def test_fastapi_request_is_not_allowed_in_schema_or_web_business_module(tmp_pat
     assert "web/api/orders.py" not in result.stdout
     assert "web/schemas.py:1: forbidden import fastapi.Request" in result.stdout
     assert "web/services.py:1: forbidden import fastapi" in result.stdout
+
+
+def test_web_must_consume_an_injected_port_instead_of_persistence(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "web/api.py",
+        "from quantking.jobs.adapters.persistence.sqlite import create_sqlite_engine\n",
+    )
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 1
+    assert "web/api.py:1: forbidden import jobs.persistence" in result.stdout
+    assert "allowed: injected Web application port" in result.stdout
