@@ -22,6 +22,25 @@ def test_synthetic_acceptance_success_persists_incremental_and_restore_evidence(
     assert evidence["initial"]["copied"] == evidence["initial"]["total_objects"]
     assert evidence["repeated"]["skipped"] == evidence["repeated"]["total_objects"]
     assert evidence["changed"]["copied"] == 1
+    assert evidence["zero_deletes"] is True
+    audit = evidence["preservation_audit"]
+    assert audit["scope"] == "offsite_run/store"
+    assert audit["before"]
+    assert audit["added"]
+    assert audit["deleted"] == []
+    assert audit["modified"] == []
+    assert audit["zero_deletes"] is True
+    assert audit["zero_modifications"] is True
+    before_paths = {item["relative_path"] for item in audit["before"]}
+    assert {
+        "do-not-delete.txt",
+        "restore_points/synthetic-failed.incomplete/failure.json",
+        "restore_points/synthetic-history/HISTORY",
+    }.issubset(before_paths)
+    assert all(
+        set(item) == {"relative_path", "sha256", "size"}
+        for item in audit["before"] + audit["after"]
+    )
     result = tmp_path / "data" / "acceptance" / "offline-success" / "acceptance-result.json"
     assert json.loads(result.read_text(encoding="utf-8"))["status"] == "passed"
 

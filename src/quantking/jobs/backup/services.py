@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from contextlib import closing
 from pathlib import Path, PurePosixPath
 
+from quantking.common.errors import InvalidTimeError
 from quantking.common.time import UtcTimestamp
 from quantking.jobs.backup.adapters.filesystem import (
     LocalStableFileCopier,
@@ -45,7 +46,10 @@ _FAILURE_FILE = "failure.json"
 _VERIFIED_FILE = "VERIFIED"
 _RESTORE_REQUEST_FILE = "restore-request.json"
 _SOURCE_COMPLETE_FILE = "source-complete.json"
+_SOURCE_REPLICATION_REPORT_FILE = "source-replication-report.json"
 _REPLICATION_REPORT_FILE = "replication-report.json"
+_LOCAL_SNAPSHOT_KIND = "local_snapshot"
+_OFFSITE_RESTORE_POINT_KIND = "offsite_restore_point"
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
 _HEX_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _RestoreSource = tuple[
@@ -53,6 +57,7 @@ _RestoreSource = tuple[
     bytes,
     bytes,
     bytes,
+    bytes | None,
     Callable[[FileEntry], Path],
 ]
 _RestoreSourceLoader = Callable[[], _RestoreSource]
@@ -139,7 +144,12 @@ class BackupService:
             _verify_local_tree(staging, require_complete=False)
             _write_new(
                 staging / _COMPLETE_FILE,
-                _json_bytes({"manifest_sha256": _sha256_bytes(manifest_bytes)}),
+                _completion_marker_bytes(
+                    artifact_kind=_LOCAL_SNAPSHOT_KIND,
+                    restore_point_id=request.run_id,
+                    manifest_bytes=manifest_bytes,
+                    input_bytes=input_bytes,
+                ),
             )
             _verify_local_tree(staging, require_complete=True)
             _rename_new(staging, final)
@@ -245,6 +255,7 @@ class BackupService:
                     "one or more content-addressed objects conflicted with their digest",
                 )
             report = ReplicationReport(
+                schema_version=_SCHEMA_VERSION,
                 restore_point_id=restore_point_id,
                 created_at=created_at,
                 total_objects=len(unique_entries),
@@ -253,17 +264,36 @@ class BackupService:
                 conflicted=conflicted,
                 state=ArtifactState.COMPLETE,
             )
-            _write_new(staging / _REPLICATION_REPORT_FILE, _json_bytes(report.to_dict()))
-            _verify_offsite_point(staging, offsite, require_complete=False)
+            report_bytes = _json_bytes(report.to_dict())
+            _write_new(staging / _REPLICATION_REPORT_FILE, report_bytes)
+            _verify_offsite_point(
+                staging,
+                offsite,
+                expected_restore_point_id=restore_point_id,
+                require_complete=False,
+            )
             _write_new(
                 staging / _COMPLETE_FILE,
-                _json_bytes({"manifest_sha256": _sha256_bytes(manifest_bytes)}),
+                _completion_marker_bytes(
+                    artifact_kind=_OFFSITE_RESTORE_POINT_KIND,
+                    restore_point_id=restore_point_id,
+                    source_restore_point_id=manifest.restore_point_id,
+                    manifest_bytes=manifest_bytes,
+                    input_bytes=input_bytes,
+                    replication_report_bytes=report_bytes,
+                ),
             )
-            _verify_offsite_point(staging, offsite, require_complete=True)
+            _verify_offsite_point(
+                staging,
+                offsite,
+                expected_restore_point_id=restore_point_id,
+                require_complete=True,
+            )
             _rename_new(staging, final)
             return report
         except BackupError as error:
             report = ReplicationReport(
+                schema_version=_SCHEMA_VERSION,
                 restore_point_id=restore_point_id,
                 created_at=created_at,
                 total_objects=len(unique_entries),
@@ -281,6 +311,7 @@ class BackupService:
                 "offsite replication operation failed",
             )
             report = ReplicationReport(
+                schema_version=_SCHEMA_VERSION,
                 restore_point_id=restore_point_id,
                 created_at=created_at,
                 total_objects=len(unique_entries),
@@ -308,6 +339,7 @@ class BackupService:
             restore_id=restore_id,
             verified_at=verified_at,
             source_kind="local",
+            source_restore_point_id=snapshot_root.name,
             load_source=lambda: _local_restore_source(snapshot_root),
         )
 
@@ -328,6 +360,7 @@ class BackupService:
             restore_id=restore_id,
             verified_at=verified_at,
             source_kind="offsite",
+            source_restore_point_id=restore_point_id,
             load_source=lambda: _offsite_restore_source(offsite, restore_point_id),
         )
 
@@ -339,6 +372,7 @@ class BackupService:
         restore_id: str,
         verified_at: UtcTimestamp,
         source_kind: str,
+        source_restore_point_id: str,
         load_source: _RestoreSourceLoader,
     ) -> RestoreResult:
         _validate_run_id(restore_id)
@@ -352,17 +386,24 @@ class BackupService:
         destination_root.mkdir(parents=True, exist_ok=True)
         staging.mkdir()
         try:
-            _write_new(
-                staging / _RESTORE_REQUEST_FILE,
-                _json_bytes(
-                    {
-                        "restore_id": restore_id,
-                        "source_kind": source_kind,
-                        "verified_at": verified_at.to_iso(),
-                    }
-                ),
+            restore_request_bytes = _json_bytes(
+                {
+                    "schema_version": _SCHEMA_VERSION,
+                    "restore_id": restore_id,
+                    "source_kind": source_kind,
+                    "source_restore_point_id": source_restore_point_id,
+                    "verified_at": verified_at.to_iso(),
+                }
             )
-            manifest, input_bytes, manifest_bytes, complete_bytes, resolver = load_source()
+            _write_new(staging / _RESTORE_REQUEST_FILE, restore_request_bytes)
+            (
+                manifest,
+                input_bytes,
+                manifest_bytes,
+                complete_bytes,
+                replication_report_bytes,
+                resolver,
+            ) = load_source()
             required = sum(entry.size for entry in manifest.files)
             if self._disk_space.free_bytes(destination_root) < required:
                 raise BackupError(
@@ -372,6 +413,11 @@ class BackupService:
             _write_new(staging / _INPUT_FILE, input_bytes)
             _write_new(staging / _MANIFEST_FILE, manifest_bytes)
             _write_new(staging / _SOURCE_COMPLETE_FILE, complete_bytes)
+            if replication_report_bytes is not None:
+                _write_new(
+                    staging / _SOURCE_REPLICATION_REPORT_FILE,
+                    replication_report_bytes,
+                )
             for entry in manifest.files:
                 source = resolver(entry)
                 target = staging / "payload" / _path_from_posix(entry.relative_path)
@@ -384,20 +430,37 @@ class BackupService:
                     )
             if self._before_restore_verify is not None:
                 self._before_restore_verify(staging)
-            _verify_materialized_restore(staging, require_verified=False)
+            _verify_materialized_restore(
+                staging,
+                require_verified=False,
+                expected_restore_id=restore_id,
+            )
+            verified_marker: dict[str, object] = {
+                "schema_version": _SCHEMA_VERSION,
+                "restore_id": restore_id,
+                "source_kind": source_kind,
+                "source_restore_point_id": source_restore_point_id,
+                "source_snapshot_id": manifest.restore_point_id,
+                "verified_at": verified_at.to_iso(),
+                "quick_check": "ok",
+                "restore_request_sha256": _sha256_bytes(restore_request_bytes),
+                "input_sha256": _sha256_bytes(input_bytes),
+                "manifest_sha256": _sha256_bytes(manifest_bytes),
+                "source_complete_sha256": _sha256_bytes(complete_bytes),
+            }
+            if replication_report_bytes is not None:
+                verified_marker["source_replication_report_sha256"] = _sha256_bytes(
+                    replication_report_bytes
+                )
             _write_new(
                 staging / _VERIFIED_FILE,
-                _json_bytes(
-                    {
-                        "manifest_sha256": _sha256_bytes(manifest_bytes),
-                        "quick_check": "ok",
-                        "restore_id": restore_id,
-                        "source_kind": source_kind,
-                        "verified_at": verified_at.to_iso(),
-                    }
-                ),
+                _json_bytes(verified_marker),
             )
-            _verify_materialized_restore(staging, require_verified=True)
+            _verify_materialized_restore(
+                staging,
+                require_verified=True,
+                expected_restore_id=restore_id,
+            )
             _rename_new(staging, final)
             return RestoreResult(path=final, state=ArtifactState.VERIFIED, manifest=manifest)
         except BackupError as error:
@@ -421,6 +484,22 @@ def verify_local_snapshot(snapshot: Path) -> VerificationResult:
         )
     manifest = _verify_local_tree(root, require_complete=True)
     return VerificationResult(state=ArtifactState.COMPLETE, manifest=manifest)
+
+
+def verify_materialized_restore(restore: Path) -> VerificationResult:
+    """Re-verify one published isolated restore and every bound metadata document."""
+    root = _absolute_existing_directory(restore, "materialized restore")
+    if root.name.endswith(".incomplete"):
+        raise BackupError(
+            BackupFailureCode.MANIFEST_INVALID,
+            "incomplete directories are not published verified restores",
+        )
+    manifest = _verify_materialized_restore(
+        root,
+        require_verified=True,
+        expected_restore_id=root.name,
+    )
+    return VerificationResult(state=ArtifactState.VERIFIED, manifest=manifest)
 
 
 def load_snapshot_manifest(snapshot: Path) -> SnapshotManifest:
@@ -489,32 +568,18 @@ def _verify_local_tree(root: Path, *, require_complete: bool) -> SnapshotManifes
     input_bytes = _read_bytes(root / _INPUT_FILE, BackupFailureCode.MANIFEST_INVALID)
     manifest = _parse_manifest(manifest_bytes)
     input_manifest = _parse_input_manifest(input_bytes)
-    if (
-        manifest.schema_version != _SCHEMA_VERSION
-        or input_manifest.schema_version != _SCHEMA_VERSION
-    ):
-        raise BackupError(
-            BackupFailureCode.MANIFEST_INVALID,
-            "backup manifest schema version is unsupported",
-        )
-    if (
-        manifest.restore_point_id != input_manifest.run_id
-        or manifest.inputs != input_manifest.inputs
-    ):
-        raise BackupError(
-            BackupFailureCode.MANIFEST_INVALID,
-            "input manifest does not match snapshot manifest",
-        )
-    if manifest.input_manifest_sha256 != _sha256_bytes(input_bytes):
-        raise BackupError(
-            BackupFailureCode.MANIFEST_INVALID,
-            "input manifest checksum does not match snapshot manifest",
-        )
+    _validate_snapshot_metadata(manifest, input_manifest, input_bytes)
     expected = {_INPUT_FILE, _MANIFEST_FILE}
     expected.update(f"payload/{entry.relative_path}" for entry in manifest.files)
     if require_complete:
         expected.add(_COMPLETE_FILE)
-        _verify_complete_marker(root / _COMPLETE_FILE, manifest_bytes)
+        _verify_complete_marker(
+            root / _COMPLETE_FILE,
+            artifact_kind=_LOCAL_SNAPSHOT_KIND,
+            expected_restore_point_id=manifest.restore_point_id,
+            manifest_bytes=manifest_bytes,
+            input_bytes=input_bytes,
+        )
     _verify_exact_file_set(root, expected)
     _verify_entries(root / "payload", manifest)
     _verify_sqlite_payload(root / "payload", manifest)
@@ -522,32 +587,90 @@ def _verify_local_tree(root: Path, *, require_complete: bool) -> SnapshotManifes
     return manifest
 
 
-def _verify_materialized_restore(root: Path, *, require_verified: bool) -> SnapshotManifest:
+def _verify_materialized_restore(
+    root: Path,
+    *,
+    require_verified: bool,
+    expected_restore_id: str,
+) -> SnapshotManifest:
+    restore_request_bytes = _read_bytes(
+        root / _RESTORE_REQUEST_FILE, BackupFailureCode.MANIFEST_INVALID
+    )
     manifest_bytes = _read_bytes(root / _MANIFEST_FILE, BackupFailureCode.MANIFEST_INVALID)
     input_bytes = _read_bytes(root / _INPUT_FILE, BackupFailureCode.MANIFEST_INVALID)
     manifest = _parse_manifest(manifest_bytes)
     input_manifest = _parse_input_manifest(input_bytes)
-    if manifest.inputs != input_manifest.inputs:
+    _validate_snapshot_metadata(manifest, input_manifest, input_bytes)
+    request = _parse_restore_request(restore_request_bytes)
+    if request["restore_id"] != expected_restore_id:
         raise BackupError(
             BackupFailureCode.MANIFEST_INVALID,
-            "restored input manifest does not match snapshot manifest",
+            "restore request ID does not match its directory",
         )
-    if manifest.input_manifest_sha256 != _sha256_bytes(input_bytes):
-        raise BackupError(
-            BackupFailureCode.MANIFEST_INVALID,
-            "restored input manifest checksum is invalid",
-        )
+    source_kind = request["source_kind"]
+    source_restore_point_id = request["source_restore_point_id"]
     source_complete = _read_bytes(root / _SOURCE_COMPLETE_FILE, BackupFailureCode.MANIFEST_INVALID)
-    _verify_complete_bytes(source_complete, manifest_bytes)
     expected = {
         _RESTORE_REQUEST_FILE,
         _INPUT_FILE,
         _MANIFEST_FILE,
         _SOURCE_COMPLETE_FILE,
     }
+    replication_report_bytes: bytes | None = None
+    if source_kind == "local":
+        if source_restore_point_id != manifest.restore_point_id:
+            raise BackupError(
+                BackupFailureCode.MANIFEST_INVALID,
+                "local source ID does not match the snapshot manifest",
+            )
+        _verify_complete_bytes(
+            source_complete,
+            artifact_kind=_LOCAL_SNAPSHOT_KIND,
+            expected_restore_point_id=source_restore_point_id,
+            manifest_bytes=manifest_bytes,
+            input_bytes=input_bytes,
+        )
+    elif source_kind == "offsite":
+        replication_report_bytes = _read_bytes(
+            root / _SOURCE_REPLICATION_REPORT_FILE,
+            BackupFailureCode.MANIFEST_INVALID,
+        )
+        expected.add(_SOURCE_REPLICATION_REPORT_FILE)
+        report = _parse_replication_report(replication_report_bytes)
+        _validate_complete_replication_report(
+            report,
+            expected_restore_point_id=source_restore_point_id,
+            manifest=manifest,
+        )
+        _verify_complete_bytes(
+            source_complete,
+            artifact_kind=_OFFSITE_RESTORE_POINT_KIND,
+            expected_restore_point_id=source_restore_point_id,
+            source_restore_point_id=manifest.restore_point_id,
+            manifest_bytes=manifest_bytes,
+            input_bytes=input_bytes,
+            replication_report_bytes=replication_report_bytes,
+        )
+    else:
+        raise BackupError(
+            BackupFailureCode.MANIFEST_INVALID,
+            "restore source kind is unsupported",
+        )
     expected.update(f"payload/{entry.relative_path}" for entry in manifest.files)
     if require_verified:
         expected.add(_VERIFIED_FILE)
+        verified_bytes = _read_bytes(root / _VERIFIED_FILE, BackupFailureCode.MANIFEST_INVALID)
+        _verify_verified_marker(
+            verified_bytes,
+            restore_request=request,
+            expected_restore_id=expected_restore_id,
+            manifest=manifest,
+            restore_request_bytes=restore_request_bytes,
+            input_bytes=input_bytes,
+            manifest_bytes=manifest_bytes,
+            source_complete_bytes=source_complete,
+            replication_report_bytes=replication_report_bytes,
+        )
     _verify_exact_file_set(root, expected)
     _verify_entries(root / "payload", manifest)
     _verify_sqlite_payload(root / "payload", manifest)
@@ -556,7 +679,11 @@ def _verify_materialized_restore(root: Path, *, require_verified: bool) -> Snaps
 
 
 def _verify_offsite_point(
-    point: Path, offsite_root: Path, *, require_complete: bool
+    point: Path,
+    offsite_root: Path,
+    *,
+    expected_restore_point_id: str,
+    require_complete: bool,
 ) -> SnapshotManifest:
     _validate_managed_path(offsite_root, point)
     if _is_reparse_point(point):
@@ -566,19 +693,28 @@ def _verify_offsite_point(
         )
     manifest_bytes = _read_bytes(point / _MANIFEST_FILE, BackupFailureCode.MANIFEST_INVALID)
     input_bytes = _read_bytes(point / _INPUT_FILE, BackupFailureCode.MANIFEST_INVALID)
+    report_bytes = _read_bytes(point / _REPLICATION_REPORT_FILE, BackupFailureCode.MANIFEST_INVALID)
     manifest = _parse_manifest(manifest_bytes)
     input_manifest = _parse_input_manifest(input_bytes)
-    if manifest.inputs != input_manifest.inputs or manifest.input_manifest_sha256 != _sha256_bytes(
-        input_bytes
-    ):
-        raise BackupError(
-            BackupFailureCode.MANIFEST_INVALID,
-            "offsite input and snapshot manifests disagree",
-        )
+    _validate_snapshot_metadata(manifest, input_manifest, input_bytes)
+    report = _parse_replication_report(report_bytes)
+    _validate_complete_replication_report(
+        report,
+        expected_restore_point_id=expected_restore_point_id,
+        manifest=manifest,
+    )
     expected = {_INPUT_FILE, _MANIFEST_FILE, _REPLICATION_REPORT_FILE}
     if require_complete:
         expected.add(_COMPLETE_FILE)
-        _verify_complete_marker(point / _COMPLETE_FILE, manifest_bytes)
+        _verify_complete_marker(
+            point / _COMPLETE_FILE,
+            artifact_kind=_OFFSITE_RESTORE_POINT_KIND,
+            expected_restore_point_id=expected_restore_point_id,
+            source_restore_point_id=manifest.restore_point_id,
+            manifest_bytes=manifest_bytes,
+            input_bytes=input_bytes,
+            replication_report_bytes=report_bytes,
+        )
     _verify_exact_file_set(point, expected)
     for entry in _unique_objects(manifest.files).values():
         candidate = object_path(offsite_root, entry.sha256)
@@ -594,20 +730,19 @@ def _verify_offsite_point(
 
 def _local_restore_source(
     snapshot: Path,
-) -> tuple[SnapshotManifest, bytes, bytes, bytes, Callable[[FileEntry], Path]]:
+) -> _RestoreSource:
     manifest = verify_local_snapshot(snapshot).manifest
     return (
         manifest,
         (snapshot / _INPUT_FILE).read_bytes(),
         (snapshot / _MANIFEST_FILE).read_bytes(),
         (snapshot / _COMPLETE_FILE).read_bytes(),
+        None,
         lambda entry: snapshot / "payload" / _path_from_posix(entry.relative_path),
     )
 
 
-def _offsite_restore_source(
-    offsite: Path, restore_point_id: str
-) -> tuple[SnapshotManifest, bytes, bytes, bytes, Callable[[FileEntry], Path]]:
+def _offsite_restore_source(offsite: Path, restore_point_id: str) -> _RestoreSource:
     point = offsite / "restore_points" / restore_point_id
     _validate_managed_path(offsite, point)
     if not point.is_dir():
@@ -615,12 +750,18 @@ def _offsite_restore_source(
             BackupFailureCode.MANIFEST_INVALID,
             "offsite restore point does not exist",
         )
-    manifest = _verify_offsite_point(point, offsite, require_complete=True)
+    manifest = _verify_offsite_point(
+        point,
+        offsite,
+        expected_restore_point_id=restore_point_id,
+        require_complete=True,
+    )
     return (
         manifest,
         (point / _INPUT_FILE).read_bytes(),
         (point / _MANIFEST_FILE).read_bytes(),
         (point / _COMPLETE_FILE).read_bytes(),
+        (point / _REPLICATION_REPORT_FILE).read_bytes(),
         lambda entry: _validated_offsite_object(offsite, entry),
     )
 
@@ -720,23 +861,252 @@ def _verify_exact_file_set(root: Path, expected: set[str]) -> None:
         )
 
 
-def _verify_complete_marker(path: Path, manifest_bytes: bytes) -> None:
-    _verify_complete_bytes(_read_bytes(path, BackupFailureCode.MANIFEST_INVALID), manifest_bytes)
+def _completion_marker_bytes(
+    *,
+    artifact_kind: str,
+    restore_point_id: str,
+    manifest_bytes: bytes,
+    input_bytes: bytes,
+    source_restore_point_id: str | None = None,
+    replication_report_bytes: bytes | None = None,
+) -> bytes:
+    marker: dict[str, object] = {
+        "schema_version": _SCHEMA_VERSION,
+        "artifact_kind": artifact_kind,
+        "restore_point_id": restore_point_id,
+        "manifest_sha256": _sha256_bytes(manifest_bytes),
+        "input_sha256": _sha256_bytes(input_bytes),
+    }
+    if artifact_kind == _OFFSITE_RESTORE_POINT_KIND:
+        if source_restore_point_id is None or replication_report_bytes is None:
+            raise ValueError("offsite completion marker requires source ID and report")
+        marker["source_restore_point_id"] = source_restore_point_id
+        marker["replication_report_sha256"] = _sha256_bytes(replication_report_bytes)
+    elif artifact_kind != _LOCAL_SNAPSHOT_KIND:
+        raise ValueError("unsupported completion marker kind")
+    return _json_bytes(marker)
 
 
-def _verify_complete_bytes(marker_bytes: bytes, manifest_bytes: bytes) -> None:
+def _verify_complete_marker(
+    path: Path,
+    *,
+    artifact_kind: str,
+    expected_restore_point_id: str,
+    manifest_bytes: bytes,
+    input_bytes: bytes,
+    source_restore_point_id: str | None = None,
+    replication_report_bytes: bytes | None = None,
+) -> None:
+    _verify_complete_bytes(
+        _read_bytes(path, BackupFailureCode.MANIFEST_INVALID),
+        artifact_kind=artifact_kind,
+        expected_restore_point_id=expected_restore_point_id,
+        manifest_bytes=manifest_bytes,
+        input_bytes=input_bytes,
+        source_restore_point_id=source_restore_point_id,
+        replication_report_bytes=replication_report_bytes,
+    )
+
+
+def _verify_complete_bytes(
+    marker_bytes: bytes,
+    *,
+    artifact_kind: str,
+    expected_restore_point_id: str,
+    manifest_bytes: bytes,
+    input_bytes: bytes,
+    source_restore_point_id: str | None = None,
+    replication_report_bytes: bytes | None = None,
+) -> None:
+    expected = json.loads(
+        _completion_marker_bytes(
+            artifact_kind=artifact_kind,
+            restore_point_id=expected_restore_point_id,
+            manifest_bytes=manifest_bytes,
+            input_bytes=input_bytes,
+            source_restore_point_id=source_restore_point_id,
+            replication_report_bytes=replication_report_bytes,
+        )
+    )
+    raw = _parse_strict_mapping(
+        marker_bytes,
+        expected_fields=set(expected),
+        document="completion marker",
+    )
+    if raw != expected:
+        raise BackupError(
+            BackupFailureCode.MANIFEST_INVALID,
+            "completion marker does not bind the expected metadata and IDs",
+        )
+
+
+def _validate_snapshot_metadata(
+    manifest: SnapshotManifest,
+    input_manifest: InputManifest,
+    input_bytes: bytes,
+) -> None:
+    if (
+        manifest.schema_version != _SCHEMA_VERSION
+        or input_manifest.schema_version != _SCHEMA_VERSION
+    ):
+        raise BackupError(
+            BackupFailureCode.MANIFEST_INVALID,
+            "backup manifest schema version is unsupported",
+        )
+    if (
+        manifest.restore_point_id != input_manifest.run_id
+        or manifest.inputs != input_manifest.inputs
+    ):
+        raise BackupError(
+            BackupFailureCode.MANIFEST_INVALID,
+            "input manifest does not match snapshot manifest",
+        )
+    if manifest.input_manifest_sha256 != _sha256_bytes(input_bytes):
+        raise BackupError(
+            BackupFailureCode.MANIFEST_INVALID,
+            "input manifest checksum does not match snapshot manifest",
+        )
+
+
+def _parse_replication_report(payload: bytes) -> ReplicationReport:
     try:
-        raw = json.loads(marker_bytes)
+        raw = json.loads(payload)
+        if not isinstance(raw, Mapping):
+            raise ValueError("replication report must be an object")
+        return ReplicationReport.from_dict(raw)
+    except (
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        InvalidTimeError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise BackupError(
+            BackupFailureCode.MANIFEST_INVALID,
+            "replication report is invalid",
+        ) from error
+
+
+def _validate_complete_replication_report(
+    report: ReplicationReport,
+    *,
+    expected_restore_point_id: str,
+    manifest: SnapshotManifest,
+) -> None:
+    total = len(_unique_objects(manifest.files))
+    if (
+        report.schema_version != _SCHEMA_VERSION
+        or report.restore_point_id != expected_restore_point_id
+        or report.state is not ArtifactState.COMPLETE
+        or report.total_objects != total
+        or report.copied + report.skipped + report.conflicted != report.total_objects
+        or report.conflicted != 0
+    ):
+        raise BackupError(
+            BackupFailureCode.MANIFEST_INVALID,
+            "completed replication report is inconsistent with its point and manifest",
+        )
+
+
+def _parse_restore_request(payload: bytes) -> dict[str, str]:
+    raw = _parse_strict_mapping(
+        payload,
+        expected_fields={
+            "schema_version",
+            "restore_id",
+            "source_kind",
+            "source_restore_point_id",
+            "verified_at",
+        },
+        document="restore request",
+    )
+    values: dict[str, str] = {}
+    for key in raw:
+        value = raw[key]
+        if not isinstance(value, str) or not value:
+            raise BackupError(
+                BackupFailureCode.MANIFEST_INVALID,
+                "restore request fields must be non-empty text",
+            )
+        values[key] = value
+    if values["schema_version"] != _SCHEMA_VERSION:
+        raise BackupError(
+            BackupFailureCode.MANIFEST_INVALID,
+            "restore request schema version is unsupported",
+        )
+    try:
+        timestamp = UtcTimestamp.from_iso(values["verified_at"])
+    except (InvalidTimeError, TypeError, ValueError) as error:
+        raise BackupError(
+            BackupFailureCode.MANIFEST_INVALID,
+            "restore request timestamp is invalid",
+        ) from error
+    if timestamp.to_iso() != values["verified_at"]:
+        raise BackupError(
+            BackupFailureCode.MANIFEST_INVALID,
+            "restore request timestamp is not canonical UTC",
+        )
+    return values
+
+
+def _verify_verified_marker(
+    payload: bytes,
+    *,
+    restore_request: Mapping[str, str],
+    expected_restore_id: str,
+    manifest: SnapshotManifest,
+    restore_request_bytes: bytes,
+    input_bytes: bytes,
+    manifest_bytes: bytes,
+    source_complete_bytes: bytes,
+    replication_report_bytes: bytes | None,
+) -> None:
+    expected: dict[str, object] = {
+        "schema_version": _SCHEMA_VERSION,
+        "restore_id": expected_restore_id,
+        "source_kind": restore_request["source_kind"],
+        "source_restore_point_id": restore_request["source_restore_point_id"],
+        "source_snapshot_id": manifest.restore_point_id,
+        "verified_at": restore_request["verified_at"],
+        "quick_check": "ok",
+        "restore_request_sha256": _sha256_bytes(restore_request_bytes),
+        "input_sha256": _sha256_bytes(input_bytes),
+        "manifest_sha256": _sha256_bytes(manifest_bytes),
+        "source_complete_sha256": _sha256_bytes(source_complete_bytes),
+    }
+    if replication_report_bytes is not None:
+        expected["source_replication_report_sha256"] = _sha256_bytes(replication_report_bytes)
+    raw = _parse_strict_mapping(
+        payload,
+        expected_fields=set(expected),
+        document="verified marker",
+    )
+    if raw != expected:
+        raise BackupError(
+            BackupFailureCode.MANIFEST_INVALID,
+            "verified marker does not bind the restore metadata and IDs",
+        )
+
+
+def _parse_strict_mapping(
+    payload: bytes,
+    *,
+    expected_fields: set[str],
+    document: str,
+) -> Mapping[str, object]:
+    try:
+        raw = json.loads(payload)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise BackupError(
             BackupFailureCode.MANIFEST_INVALID,
-            "completion marker is not valid JSON",
+            f"{document} is not valid JSON",
         ) from error
-    if not isinstance(raw, Mapping) or raw.get("manifest_sha256") != _sha256_bytes(manifest_bytes):
+    if not isinstance(raw, Mapping) or set(raw) != expected_fields:
         raise BackupError(
             BackupFailureCode.MANIFEST_INVALID,
-            "completion marker does not match the manifest",
+            f"{document} fields do not match the supported schema",
         )
+    return raw
 
 
 def _parse_manifest(payload: bytes) -> SnapshotManifest:
@@ -745,7 +1115,13 @@ def _parse_manifest(payload: bytes) -> SnapshotManifest:
         if not isinstance(raw, Mapping):
             raise ValueError("manifest must be an object")
         return SnapshotManifest.from_dict(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as error:
+    except (
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        InvalidTimeError,
+        TypeError,
+        ValueError,
+    ) as error:
         raise BackupError(
             BackupFailureCode.MANIFEST_INVALID,
             "snapshot manifest is invalid",
@@ -1111,4 +1487,5 @@ __all__ = [
     "load_snapshot_manifest",
     "object_path",
     "verify_local_snapshot",
+    "verify_materialized_restore",
 ]

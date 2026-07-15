@@ -39,7 +39,11 @@ Windows 本地临时目录已完成离线实测。F 盘的文件系统、ACL、�
 `input.json` 固定源相对路径、目标相对路径和类别，不记录绝对源路径。
 `manifest.json` 固定 schema 版本、恢复点 ID、UTC 创建时间、Git 代码版本、SQLite
 `user_version`、Alembic 版本，以及每个实际 payload 文件的类别、字节数和 SHA-256。
-`COMPLETE` 固定 `manifest.json` 的 SHA-256。
+所有 Stage 0 元数据和标记都使用严格解析的 `schema_version="1"`；字段缺失、未知字段、
+旧版仅含 manifest 哈希的标记和其他 schema 版本都明确拒绝，不做静默降级。
+本地 `COMPLETE` 的精确字段为 `schema_version`、`artifact_kind=local_snapshot`、
+`restore_point_id`、`manifest_sha256` 和 `input_sha256`，同时绑定恢复点 ID、
+`manifest.json` 与 `input.json`。
 
 验证要求实际文件集合与 manifest 完全相等；缺失文件和额外文件都失败。数据库只能由在线备份
 产生，完成后的检查使用 `mode=ro&immutable=1`，执行 `PRAGMA quick_check` 并核对
@@ -64,6 +68,14 @@ Windows 本地临时目录已完成离线实测。F 盘的文件系统、ACL、�
     COMPLETE
 ```
 
+`replication-report.json` 同样固定 `schema_version="1"`，其 `restore_point_id` 必须与
+恢复点目录和 `COMPLETE` 一致；`state=complete` 时
+`copied + skipped + conflicted = total_objects`、`conflicted=0`，且总数必须等于 manifest
+去重后的对象数。异盘 `COMPLETE` 的精确字段在本地字段基础上增加
+`source_restore_point_id` 和 `replication_report_sha256`，因此同时绑定 manifest、input、
+复制报告、异盘恢复点 ID 和源快照 ID。复制报告内容、计数或 ID 被篡改，即使重新签名
+`COMPLETE` 也会失败。
+
 复制前先完整验证本地恢复点。增量决策只使用 manifest 中的大小和 SHA-256：
 
 1. 对相同 SHA-256 去重，并按 digest 稳定排序。
@@ -86,8 +98,11 @@ Windows 本地临时目录已完成离线实测。F 盘的文件系统、ACL、�
 3. 流式复制到新隔离目录，重新验证精确文件集、大小和 SHA-256。
 4. 用不可变只读 SQLite 连接执行 `quick_check`，核对 schema/Alembic 版本，并确认没有
    WAL/SHM 副产物。
-5. 写入含 manifest 哈希、来源、恢复 ID、验证时间和 `quick_check=ok` 的 `VERIFIED`，
-   再次验证后原子发布。
+5. 异盘恢复还把被 `COMPLETE` 绑定的复制报告保存为
+   `source-replication-report.json`。写入版本化 `VERIFIED`，精确绑定恢复请求、input、
+   manifest、源 `COMPLETE`、可选源复制报告的 SHA-256，以及恢复 ID、源恢复点 ID、源快照
+   ID、来源、验证时间和 `quick_check=ok`；再次按精确字段、schema、ID、所有绑定哈希与
+   payload/SQLite 完整性验证后才原子发布。已发布隔离恢复可使用同一验证入口重新复核。
 
 任一检查失败只留下 `.incomplete`、`restore-request.json`、已有输入和
 `failure.json`，不得出现成功的 `VERIFIED`。
@@ -114,7 +129,7 @@ Windows 本地临时目录已完成离线实测。F 盘的文件系统、ACL、�
 .\.venv\Scripts\python.exe -m pytest tests\backup -m "not real_backup" -q -p no:cacheprovider
 ```
 
-2026-07-15 当前结果为 `29 passed, 1 deselected`；deselected 项是唯一
+2026-07-15 当前结果为 `42 passed, 1 deselected`；deselected 项是唯一
 `real_backup` 标记，没有访问正式根。
 
 只有重新取得明确授权后，才可执行以下命令；命令中的 run ID 必须全新：
@@ -131,6 +146,9 @@ Windows 本地临时目录已完成离线实测。F 盘的文件系统、ACL、�
 本地/异盘隔离恢复目录和
 `F:\QuantKingV3Backups\acceptance\<run-id>\store\restore_points`。报告必须证明首轮全复制、
 重复轮全跳过、单分区变化只复制一个对象、两种恢复均为 `VERIFIED`、历史/失败目录未删除。
+每个新 run 还会在自身异盘目录内预置人工历史恢复点、失败目录和无关哨兵；结果报告保存操作
+前后精确文件清单（相对路径、字节数、SHA-256）及新增、删除、修改、保留集合与计数。
+`zero_deletes` 和 `zero_modifications` 由该差异计算得出，不是常量；任一为假都会阻止成功报告。
 
 顶层失败固定写入该唯一数据 run 目录的 `acceptance-failure.json`；内部 snapshot、复制或恢复
 失败还保留各自 `.incomplete/failure.json`。任何失败都会阻止成功证据生成，重试必须再次授权并

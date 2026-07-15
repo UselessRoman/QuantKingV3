@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from quantking.common.time import UtcTimestamp
+from quantking.jobs.backup import services as backup_services
 from quantking.jobs.backup.models import ArtifactState, BackupError, BackupFailureCode
 from quantking.jobs.backup.services import BackupService, load_snapshot_manifest, object_path
 
@@ -20,11 +21,44 @@ class NoSpace:
 
 
 def _rewrite_complete(snapshot: Path) -> None:
-    digest = hashlib.sha256((snapshot / "manifest.json").read_bytes()).hexdigest()
-    (snapshot / "COMPLETE").write_text(
-        json.dumps({"manifest_sha256": digest}, sort_keys=True) + "\n",
+    manifest = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))
+    _write_json(
+        snapshot / "COMPLETE",
+        {
+            "artifact_kind": "local_snapshot",
+            "input_sha256": hashlib.sha256((snapshot / "input.json").read_bytes()).hexdigest(),
+            "manifest_sha256": hashlib.sha256(
+                (snapshot / "manifest.json").read_bytes()
+            ).hexdigest(),
+            "restore_point_id": manifest["restore_point_id"],
+            "schema_version": "1",
+        },
+    )
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
         newline="\n",
+    )
+
+
+def _resign_offsite_complete(point: Path) -> None:
+    manifest = json.loads((point / "manifest.json").read_text(encoding="utf-8"))
+    _write_json(
+        point / "COMPLETE",
+        {
+            "artifact_kind": "offsite_restore_point",
+            "input_sha256": hashlib.sha256((point / "input.json").read_bytes()).hexdigest(),
+            "manifest_sha256": hashlib.sha256((point / "manifest.json").read_bytes()).hexdigest(),
+            "replication_report_sha256": hashlib.sha256(
+                (point / "replication-report.json").read_bytes()
+            ).hexdigest(),
+            "restore_point_id": point.name,
+            "schema_version": "1",
+            "source_restore_point_id": manifest["restore_point_id"],
+        },
     )
 
 
@@ -59,6 +93,17 @@ def test_offsite_restore_materializes_exact_files_and_uses_immutable_sqlite(
 
     assert restored.state is ArtifactState.VERIFIED
     assert (restored.path / "VERIFIED").is_file()
+    backup_services.verify_materialized_restore(restored.path)
+    verified = json.loads((restored.path / "VERIFIED").read_text(encoding="utf-8"))
+    assert verified["source_kind"] == "offsite"
+    assert verified["source_restore_point_id"] == "offsite-001"
+    assert verified["source_snapshot_id"] == manifest.restore_point_id
+    assert (
+        verified["source_replication_report_sha256"]
+        == hashlib.sha256(
+            (restored.path / "source-replication-report.json").read_bytes()
+        ).hexdigest()
+    )
     actual_payload = sorted(
         path.relative_to(restored.path / "payload").as_posix()
         for path in (restored.path / "payload").rglob("*")
@@ -312,3 +357,207 @@ def test_offsite_restore_rejects_object_path_resolution_escape(
     assert captured.value.code is BackupFailureCode.INVALID_PATH
     assert (tmp_path / "restores" / "restore-escaped-object.incomplete" / "failure.json").is_file()
     assert not any(outside.iterdir())
+
+
+def test_offsite_restore_rejects_tampered_replication_report(
+    synthetic_source: SyntheticSource,
+    fixed_time: UtcTimestamp,
+    tmp_path: Path,
+) -> None:
+    service = BackupService()
+    snapshot = service.create_local_snapshot(
+        make_request(synthetic_source, tmp_path / "local", fixed_time)
+    )
+    offsite = tmp_path / "offsite"
+    service.replicate_to_offsite(snapshot.path, offsite, "offsite-001", created_at=fixed_time)
+    point = offsite / "restore_points" / "offsite-001"
+    _write_json(point / "replication-report.json", {})
+
+    with pytest.raises(BackupError) as captured:
+        service.restore_from_offsite(
+            offsite,
+            "offsite-001",
+            tmp_path / "restores",
+            "restore-report-tampered",
+            verified_at=fixed_time,
+        )
+
+    assert captured.value.code is BackupFailureCode.MANIFEST_INVALID
+
+
+@pytest.mark.parametrize("document", ("manifest", "input"))
+def test_offsite_restore_rejects_unsupported_metadata_schema_even_when_resigned(
+    document: str,
+    synthetic_source: SyntheticSource,
+    fixed_time: UtcTimestamp,
+    tmp_path: Path,
+) -> None:
+    service = BackupService()
+    snapshot = service.create_local_snapshot(
+        make_request(synthetic_source, tmp_path / "local", fixed_time)
+    )
+    offsite = tmp_path / "offsite"
+    service.replicate_to_offsite(snapshot.path, offsite, "offsite-001", created_at=fixed_time)
+    point = offsite / "restore_points" / "offsite-001"
+    manifest_path = point / "manifest.json"
+    input_path = point / "input.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if document == "manifest":
+        manifest["schema_version"] = "999"
+    else:
+        input_document = json.loads(input_path.read_text(encoding="utf-8"))
+        input_document["schema_version"] = "999"
+        _write_json(input_path, input_document)
+        manifest["input_manifest_sha256"] = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    _write_json(manifest_path, manifest)
+    _resign_offsite_complete(point)
+
+    with pytest.raises(BackupError) as captured:
+        service.restore_from_offsite(
+            offsite,
+            "offsite-001",
+            tmp_path / "restores",
+            f"restore-schema-{document}",
+            verified_at=fixed_time,
+        )
+
+    assert captured.value.code is BackupFailureCode.MANIFEST_INVALID
+
+
+def test_offsite_restore_rejects_report_id_that_disagrees_with_directory(
+    synthetic_source: SyntheticSource,
+    fixed_time: UtcTimestamp,
+    tmp_path: Path,
+) -> None:
+    service = BackupService()
+    snapshot = service.create_local_snapshot(
+        make_request(synthetic_source, tmp_path / "local", fixed_time)
+    )
+    offsite = tmp_path / "offsite"
+    service.replicate_to_offsite(snapshot.path, offsite, "offsite-001", created_at=fixed_time)
+    point = offsite / "restore_points" / "offsite-001"
+    report_path = point / "replication-report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["restore_point_id"] = "different-point"
+    _write_json(report_path, report)
+    _resign_offsite_complete(point)
+
+    with pytest.raises(BackupError) as captured:
+        service.restore_from_offsite(
+            offsite,
+            "offsite-001",
+            tmp_path / "restores",
+            "restore-id-mismatch",
+            verified_at=fixed_time,
+        )
+
+    assert captured.value.code is BackupFailureCode.MANIFEST_INVALID
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("schema_version", "999"),
+        ("state", "failed"),
+        ("total_objects", 999),
+        ("copied", 999),
+        ("skipped", 999),
+        ("conflicted", 1),
+    ),
+)
+def test_offsite_restore_rejects_inconsistent_resigned_replication_report(
+    field: str,
+    value: object,
+    synthetic_source: SyntheticSource,
+    fixed_time: UtcTimestamp,
+    tmp_path: Path,
+) -> None:
+    service = BackupService()
+    snapshot = service.create_local_snapshot(
+        make_request(synthetic_source, tmp_path / "local", fixed_time)
+    )
+    offsite = tmp_path / "offsite"
+    service.replicate_to_offsite(snapshot.path, offsite, "offsite-001", created_at=fixed_time)
+    point = offsite / "restore_points" / "offsite-001"
+    report_path = point / "replication-report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report[field] = value
+    _write_json(report_path, report)
+    _resign_offsite_complete(point)
+
+    with pytest.raises(BackupError) as captured:
+        service.restore_from_offsite(
+            offsite,
+            "offsite-001",
+            tmp_path / "restores",
+            f"restore-report-{field}",
+            verified_at=fixed_time,
+        )
+
+    assert captured.value.code is BackupFailureCode.MANIFEST_INVALID
+
+
+def test_offsite_completion_marker_rejects_unknown_fields(
+    synthetic_source: SyntheticSource,
+    fixed_time: UtcTimestamp,
+    tmp_path: Path,
+) -> None:
+    service = BackupService()
+    snapshot = service.create_local_snapshot(
+        make_request(synthetic_source, tmp_path / "local", fixed_time)
+    )
+    offsite = tmp_path / "offsite"
+    service.replicate_to_offsite(snapshot.path, offsite, "offsite-001", created_at=fixed_time)
+    point = offsite / "restore_points" / "offsite-001"
+    marker_path = point / "COMPLETE"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["unrecognized"] = "must-be-rejected"
+    _write_json(marker_path, marker)
+
+    with pytest.raises(BackupError) as captured:
+        service.restore_from_offsite(
+            offsite,
+            "offsite-001",
+            tmp_path / "restores",
+            "restore-extra-marker-field",
+            verified_at=fixed_time,
+        )
+
+    assert captured.value.code is BackupFailureCode.MANIFEST_INVALID
+
+
+def test_materialized_restore_verification_binds_all_metadata_and_ids(
+    synthetic_source: SyntheticSource,
+    fixed_time: UtcTimestamp,
+    tmp_path: Path,
+) -> None:
+    service = BackupService()
+    snapshot = service.create_local_snapshot(
+        make_request(synthetic_source, tmp_path / "local", fixed_time)
+    )
+    restored = service.restore_from_local(
+        snapshot.path,
+        tmp_path / "restores",
+        "restore-verified",
+        verified_at=fixed_time,
+    )
+
+    backup_services.verify_materialized_restore(restored.path)
+    marker_path = restored.path / "VERIFIED"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert marker["schema_version"] == "1"
+    assert marker["restore_id"] == restored.path.name
+    assert (
+        marker["input_sha256"]
+        == hashlib.sha256((restored.path / "input.json").read_bytes()).hexdigest()
+    )
+    assert (
+        marker["source_complete_sha256"]
+        == hashlib.sha256((restored.path / "source-complete.json").read_bytes()).hexdigest()
+    )
+    marker["unknown"] = "reject"
+    _write_json(marker_path, marker)
+
+    with pytest.raises(BackupError) as captured:
+        backup_services.verify_materialized_restore(restored.path)
+    assert captured.value.code is BackupFailureCode.MANIFEST_INVALID

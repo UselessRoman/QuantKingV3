@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -55,6 +56,8 @@ def run_synthetic_acceptance(
     data_run.mkdir(parents=True)
     try:
         source.mkdir()
+        _seed_preservation_artifacts(offsite_store)
+        preservation_before = _tree_inventory(offsite_store)
         database = source / "quantking.db"
         created_at = utc_now()
         connection = sqlite3.connect(database)
@@ -113,6 +116,16 @@ def run_synthetic_acceptance(
             connection.close()
 
         _validate_replication_reports(initial, repeated, changed)
+        preservation_after = _tree_inventory(offsite_store)
+        preservation_audit = _build_preservation_audit(
+            preservation_before,
+            preservation_after,
+        )
+        if not preservation_audit["zero_deletes"] or not preservation_audit["zero_modifications"]:
+            raise BackupError(
+                BackupFailureCode.INTEGRITY_FAILED,
+                "synthetic acceptance changed or deleted pre-existing run-scoped evidence",
+            )
         evidence: dict[str, object] = {
             "status": "passed",
             "run_id": run_id,
@@ -124,7 +137,8 @@ def run_synthetic_acceptance(
             "initial": initial.to_dict(),
             "repeated": repeated.to_dict(),
             "changed": changed.to_dict(),
-            "zero_deletes": True,
+            "zero_deletes": preservation_audit["zero_deletes"],
+            "preservation_audit": preservation_audit,
             "synthetic_data_only": True,
         }
         _write_acceptance_json(data_run / "acceptance-result.json", evidence)
@@ -178,6 +192,77 @@ def _write_synthetic_files(source: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("xb") as stream:
             stream.write(payload)
+
+
+def _seed_preservation_artifacts(offsite_store: Path) -> None:
+    files = {
+        "do-not-delete.txt": b"synthetic unrelated sentinel\n",
+        "restore_points/synthetic-history/HISTORY": b"synthetic historical restore point\n",
+        "restore_points/synthetic-failed.incomplete/failure.json": (
+            b'{"state":"failed","synthetic":true}\n'
+        ),
+    }
+    for relative, payload in files.items():
+        path = offsite_store / Path(*relative.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("xb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def _tree_inventory(root: Path) -> dict[str, dict[str, object]]:
+    inventory: dict[str, dict[str, object]] = {}
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(root).as_posix()
+        payload = path.read_bytes()
+        inventory[relative] = {
+            "relative_path": relative,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
+    return inventory
+
+
+def _build_preservation_audit(
+    before: dict[str, dict[str, object]],
+    after: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    before_paths = set(before)
+    after_paths = set(after)
+    added = [after[path] for path in sorted(after_paths - before_paths)]
+    deleted = [before[path] for path in sorted(before_paths - after_paths)]
+    modified = [
+        {
+            "relative_path": path,
+            "before": before[path],
+            "after": after[path],
+        }
+        for path in sorted(before_paths & after_paths)
+        if before[path] != after[path]
+    ]
+    preserved = [
+        before[path] for path in sorted(before_paths & after_paths) if before[path] == after[path]
+    ]
+    return {
+        "scope": "offsite_run/store",
+        "before": [before[path] for path in sorted(before)],
+        "after": [after[path] for path in sorted(after)],
+        "added": added,
+        "deleted": deleted,
+        "modified": modified,
+        "preserved": preserved,
+        "before_file_count": len(before),
+        "after_file_count": len(after),
+        "added_file_count": len(added),
+        "deleted_file_count": len(deleted),
+        "modified_file_count": len(modified),
+        "preserved_file_count": len(preserved),
+        "zero_deletes": not deleted,
+        "zero_modifications": not modified,
+    }
 
 
 def _preserve_acceptance_failure(data_run: Path, error: BackupError) -> None:

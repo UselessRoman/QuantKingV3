@@ -128,6 +128,11 @@ class InputItem:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, object]) -> InputItem:
+        _require_exact_keys(
+            raw,
+            {"source_relative_path", "payload_relative_path", "category"},
+            "input item",
+        )
         return cls(
             source_relative_path=_required_text(raw, "source_relative_path"),
             payload_relative_path=_required_text(raw, "payload_relative_path"),
@@ -156,6 +161,7 @@ class InputManifest:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, object]) -> InputManifest:
+        _require_exact_keys(raw, {"schema_version", "run_id", "inputs"}, "input manifest")
         return cls(
             schema_version=_required_text(raw, "schema_version"),
             run_id=_required_text(raw, "run_id"),
@@ -185,6 +191,11 @@ class FileEntry:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, object]) -> FileEntry:
+        _require_exact_keys(
+            raw,
+            {"relative_path", "size", "sha256", "category"},
+            "file entry",
+        )
         return cls(
             relative_path=_required_text(raw, "relative_path"),
             size=_required_int(raw, "size"),
@@ -232,6 +243,21 @@ class SnapshotManifest:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, object]) -> SnapshotManifest:
+        _require_exact_keys(
+            raw,
+            {
+                "schema_version",
+                "restore_point_id",
+                "created_at",
+                "code_version",
+                "db_user_version",
+                "alembic_version",
+                "input_manifest_sha256",
+                "inputs",
+                "files",
+            },
+            "snapshot manifest",
+        )
         return cls(
             schema_version=_required_text(raw, "schema_version"),
             restore_point_id=_required_text(raw, "restore_point_id"),
@@ -266,6 +292,7 @@ class VerificationResult:
 
 @dataclass(frozen=True, slots=True)
 class ReplicationReport:
+    schema_version: str
     restore_point_id: str
     created_at: UtcTimestamp
     total_objects: int
@@ -276,6 +303,7 @@ class ReplicationReport:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "schema_version": self.schema_version,
             "restore_point_id": self.restore_point_id,
             "created_at": self.created_at.to_iso(),
             "total_objects": self.total_objects,
@@ -284,6 +312,33 @@ class ReplicationReport:
             "conflicted": self.conflicted,
             "state": self.state.value,
         }
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, object]) -> ReplicationReport:
+        _require_exact_keys(
+            raw,
+            {
+                "schema_version",
+                "restore_point_id",
+                "created_at",
+                "total_objects",
+                "copied",
+                "skipped",
+                "conflicted",
+                "state",
+            },
+            "replication report",
+        )
+        return cls(
+            schema_version=_required_text(raw, "schema_version"),
+            restore_point_id=_required_text(raw, "restore_point_id"),
+            created_at=UtcTimestamp.from_iso(_required_text(raw, "created_at")),
+            total_objects=_required_int(raw, "total_objects"),
+            copied=_required_int(raw, "copied"),
+            skipped=_required_int(raw, "skipped"),
+            conflicted=_required_int(raw, "conflicted"),
+            state=ArtifactState(_required_text(raw, "state")),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,3 +391,8 @@ def _required_mapping(value: object) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError("manifest item must be an object")
     return value
+
+
+def _require_exact_keys(raw: Mapping[str, object], expected: set[str], document: str) -> None:
+    if set(raw) != expected:
+        raise ValueError(f"{document} fields do not match the supported schema")

@@ -222,6 +222,28 @@ def test_existing_completed_destination_is_rejected(
     assert sentinel.read_text(encoding="utf-8") == "keep"
 
 
+def test_legacy_manifest_only_completion_marker_is_explicitly_rejected(
+    synthetic_source: SyntheticSource,
+    fixed_time: UtcTimestamp,
+    tmp_path: Path,
+) -> None:
+    result = BackupService().create_local_snapshot(
+        make_request(synthetic_source, tmp_path / "local", fixed_time)
+    )
+    marker_path = result.path / "COMPLETE"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker_path.write_text(
+        json.dumps({"manifest_sha256": marker["manifest_sha256"]}) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(BackupError) as captured:
+        verify_local_snapshot(result.path)
+
+    assert captured.value.code is BackupFailureCode.MANIFEST_INVALID
+
+
 def test_symlink_escape_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
     synthetic_source: SyntheticSource,
