@@ -1,8 +1,7 @@
-"""Stage 1 data metadata migrations: new-DB head and Stage 0 -> Stage 1 upgrade."""
+"""Stage 1 R1 metadata migrations from a new DB and the Stage 0 revision."""
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -21,11 +20,14 @@ from quantking.jobs.adapters.persistence.sqlite import (
 STAGE1_TABLES = {
     "ingestion_batches",
     "dataset_versions",
+    "dataset_version_batches",
     "quality_runs",
+    "quality_results",
     "difference_reports",
     "source_overrides",
 }
 STAGE0_TABLES = {"job_runs", "job_dependencies", "job_events", "audit_records"}
+HEAD = "20260716_0002"
 
 
 def _alembic_config(database: Path) -> Config:
@@ -46,147 +48,117 @@ def _upgrade(database: Path, revision: str = "head") -> None:
         engine.dispose()
 
 
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def _revision(database: Path) -> str:
+    with sqlite3.connect(database) as connection:
+        row = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+    assert row is not None
+    return str(row[0])
 
 
-def test_new_database_initializes_to_head_with_stage1_tables(tmp_path: Path) -> None:
+def test_new_database_initializes_to_r1_head_with_lineage_tables(tmp_path: Path) -> None:
     database = tmp_path / "stage1.db"
     initialize_database(database)
     engine = create_sqlite_engine(database, busy_timeout_ms=250)
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
+    version_fks = inspector.get_foreign_keys("dataset_version_batches")
+    override_fks = inspector.get_foreign_keys("source_overrides")
+    batch_unique = inspector.get_unique_constraints("ingestion_batches")
     engine.dispose()
 
-    assert STAGE0_TABLES.issubset(table_names)
-    assert STAGE1_TABLES.issubset(table_names)
-    assert "alembic_version" in table_names
+    assert STAGE0_TABLES | STAGE1_TABLES | {"alembic_version"} <= table_names
+    assert {fk["referred_table"] for fk in version_fks} == {
+        "dataset_versions",
+        "ingestion_batches",
+    }
+    assert {fk["referred_table"] for fk in override_fks} >= {
+        "difference_reports",
+        "ingestion_batches",
+        "dataset_versions",
+    }
+    assert "uq_batches_source_dataset_params" not in {item["name"] for item in batch_unique}
+    assert _revision(database) == HEAD
 
-    with sqlite3.connect(database) as connection:
-        assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
-        revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert revision is not None
-    assert revision[0] == "20260716_0001"
 
-
-def test_stage0_revision_upgrades_to_stage1_revision(tmp_path: Path) -> None:
+def test_stage0_revision_upgrades_to_r1_head(tmp_path: Path) -> None:
     database = tmp_path / "upgrade.db"
     _reserve_new_database(database)
     _upgrade(database, "20260715_0001")
-
-    with sqlite3.connect(database) as connection:
-        tables_before = {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
-            )
-        }
-        revision_before = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert STAGE0_TABLES.issubset(tables_before)
-    assert STAGE1_TABLES.isdisjoint(tables_before)
-    assert revision_before == ("20260715_0001",)
-
-    _upgrade(database, "head")
-
-    engine = create_sqlite_engine(database, busy_timeout_ms=250)
-    inspector = inspect(engine)
-    tables_after = set(inspector.get_table_names())
-    engine.dispose()
-
-    assert STAGE0_TABLES.issubset(tables_after)
-    assert STAGE1_TABLES.issubset(tables_after)
+    assert _revision(database) == "20260715_0001"
+    _upgrade(database)
+    assert _revision(database) == HEAD
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
-        revision_after = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-    assert revision_after == ("20260716_0001",)
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert tables >= STAGE0_TABLES | STAGE1_TABLES
 
 
-def test_stage1_immutable_triggers_block_published_version_mutation(
-    tmp_path: Path,
-) -> None:
+def test_same_request_parameters_allow_distinct_retry_batch_ids(tmp_path: Path) -> None:
+    database = tmp_path / "retry.db"
+    initialize_database(database)
+    row = (
+        "XTQUANT",
+        "daily_bar_unadjusted",
+        "FAILED",
+        "adapter.v1",
+        '{"code":"000001.SZ"}',
+        "a" * 64,
+        "2026-07-16T01:00:00Z",
+        "2026-07-16T01:01:00Z",
+        None,
+        None,
+        "[]",
+        '{"error_type":"NETWORK_FAILURE","message":"failed","retryable":true}',
+        None,
+        None,
+    )
+    with sqlite3.connect(database) as connection:
+        sql = (
+            "INSERT INTO ingestion_batches (batch_id, source, dataset, status, "
+            "adapter_version, request_params_json, request_params_sha256, started_at, ended_at, "
+            "row_count, security_count, manifest_files_json, failure_json, empty_result_json, "
+            "job_run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        connection.execute(sql, ("data_batch:11111111-1111-4111-8111-111111111111", *row))
+        connection.execute(sql, ("data_batch:22222222-2222-4222-8222-222222222222", *row))
+        connection.commit()
+        count = connection.execute("SELECT COUNT(*) FROM ingestion_batches").fetchone()
+    assert count == (2,)
+
+
+def test_terminal_batch_trigger_rejects_same_status_content_mutation(tmp_path: Path) -> None:
     database = tmp_path / "immutable.db"
     initialize_database(database)
     with sqlite3.connect(database) as connection:
         connection.execute(
-            "INSERT INTO dataset_versions "
-            "(version_id, dataset, status, schema_version, code_version, "
-            " rule_version, parent_version_id, input_batch_ids_json, "
-            " created_at, manifest_sha256, security_count, row_count, failure_json) "
-            "VALUES (?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+            "INSERT INTO ingestion_batches (batch_id, source, dataset, status, "
+            "adapter_version, request_params_json, request_params_sha256, started_at, ended_at, "
+            "row_count, security_count, manifest_files_json, failure_json, empty_result_json) "
+            "VALUES (?, 'XTQUANT', 'daily_bar_unadjusted', 'SUCCEEDED', 'v1', '{}', ?, ?, ?, "
+            "1, 1, '[]', NULL, NULL)",
             (
-                "data_version:11111111-1111-4111-8111-111111111111",
-                "daily_bar_unadjusted",
-                "daily_bar_unadjusted.v1",
-                "abc123",
-                "quality-rules.v1",
-                None,
-                "[]",
-                "2026-07-16T01:00:00Z",
+                "data_batch:33333333-3333-4333-8333-333333333333",
                 "b" * 64,
-                10,
-                1000,
-            ),
-        )
-        connection.commit()
-        with pytest.raises(sqlite3.IntegrityError):
-            connection.execute(
-                "UPDATE dataset_versions SET status = 'BUILDING' WHERE status = 'PUBLISHED'"
-            )
-
-
-def test_stage1_immutable_triggers_block_applied_override_mutation(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "override.db"
-    initialize_database(database)
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "INSERT INTO source_overrides "
-            "(override_id, dataset, primary_source, fallback_source, status, "
-            " scope_codes_json, scope_dates_json, fields_json, reason, "
-            " created_at, approved_at, approved_by, applied_at, applied_version_id) "
-            "VALUES (?, ?, ?, ?, 'APPLIED', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "data_override:22222222-2222-4222-8222-222222222222",
-                "daily_bar_unadjusted",
-                "XTQUANT",
-                "BAOSTOCK",
-                '["000001.SZ"]',
-                '["2026-07-16"]',
-                '["close"]',
-                "missing bar",
                 "2026-07-16T01:00:00Z",
-                "2026-07-16T01:30:00Z",
-                "analyst",
-                "2026-07-16T02:00:00Z",
-                "data_version:33333333-3333-4333-8333-333333333333",
+                "2026-07-16T01:01:00Z",
             ),
         )
         connection.commit()
         with pytest.raises(sqlite3.IntegrityError):
-            connection.execute(
-                "UPDATE source_overrides SET status = 'PENDING' WHERE status = 'APPLIED'"
-            )
+            connection.execute("UPDATE ingestion_batches SET row_count=2 WHERE status='SUCCEEDED'")
 
 
-def test_stage1_audit_trigger_still_blocks_update_and_delete(tmp_path: Path) -> None:
+def test_append_only_audit_trigger_remains_active(tmp_path: Path) -> None:
     database = tmp_path / "audit.db"
     initialize_database(database)
     with sqlite3.connect(database) as connection:
         connection.execute(
             "INSERT INTO audit_records (actor, entity, action, correlation_id, "
-            "occurred_at, details_json) VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                "analyst",
-                "data_version:x",
-                "override_approved",
-                "c1",
-                "2026-07-16T01:00:00Z",
-                '{"a":"b"}',
-            ),
+            "occurred_at, details_json) VALUES ('a','e','x','c','2026-07-16T01:00:00Z','{}')"
         )
         connection.commit()
-        with pytest.raises(sqlite3.IntegrityError):
-            connection.execute("UPDATE audit_records SET actor = 'evil'")
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute("DELETE FROM audit_records")

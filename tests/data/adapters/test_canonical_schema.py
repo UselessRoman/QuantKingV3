@@ -13,6 +13,7 @@ from quantking.data.adapters.canonical_schema import (
     sort_key,
     validate_table,
 )
+from quantking.data.models import EmptyResultInfo, LegalEmptyClassification
 from quantking.data.schemas import DatasetSchemaDescriptor, canonical_code_pattern
 
 # ---------------------------------------------------------------------------
@@ -132,15 +133,55 @@ class TestDailyBarUnadjusted:
         assert not result.ok
         assert any("primary key" in i.message.lower() for i in result.issues)
 
-    def test_unsorted_output_is_sorted_and_reported(self) -> None:
+    def test_unsorted_output_is_rejected(self) -> None:
         rows = [
             self._row(code="600000.SH", trade_date=date(2026, 7, 15)),
             self._row(code="000001.SZ", trade_date=date(2026, 7, 15)),
         ]
         table = _tbl("d", rows, self.SCHEMA)
         result = validate_table("daily_bar_unadjusted", table)
-        # sorted table should pass once deduplicated/ordered
-        assert result.ok or any("sort" in i.message.lower() for i in result.issues)
+        assert not result.ok
+        assert any(issue.rule == "sort_order" for issue in result.issues)
+
+    def test_wrong_arrow_type_is_rejected_even_when_values_are_convertible(self) -> None:
+        fields = list(self.SCHEMA)
+        volume_index = self.SCHEMA.get_field_index("volume")
+        fields[volume_index] = pa.field("volume", pa.float64(), nullable=False)
+        attacked = pa.schema(fields)
+        table = _tbl("d", [self._row(volume=1_000_000.0)], attacked)
+        result = validate_table("daily_bar_unadjusted", table)
+        assert not result.ok
+        assert any(issue.rule == "field_type" for issue in result.issues)
+
+    def test_wrong_field_order_is_rejected(self) -> None:
+        table = _tbl("d", [self._row()], self.SCHEMA)
+        reordered = table.select(
+            ["trade_date", "code", "open", "high", "low", "close", "pre_close", "volume", "amount"]
+        )
+        result = validate_table("daily_bar_unadjusted", reordered)
+        assert not result.ok
+        assert any(issue.rule == "field_order" for issue in result.issues)
+
+    def test_wrong_declared_nullability_is_rejected_without_null_values(self) -> None:
+        fields = list(self.SCHEMA)
+        open_index = self.SCHEMA.get_field_index("open")
+        fields[open_index] = pa.field("open", pa.float64(), nullable=True)
+        table = _tbl("d", [self._row()], pa.schema(fields))
+        result = validate_table("daily_bar_unadjusted", table)
+        assert not result.ok
+        assert any(issue.rule == "nullability" for issue in result.issues)
+
+    def test_high_below_open_or_close_is_rejected(self) -> None:
+        table = _tbl("d", [self._row(high=10.25, close=10.5)], self.SCHEMA)
+        result = validate_table("daily_bar_unadjusted", table)
+        assert not result.ok
+        assert any(issue.rule == "ohlc_high" for issue in result.issues)
+
+    def test_low_above_open_or_close_is_rejected(self) -> None:
+        table = _tbl("d", [self._row(low=10.25, open=10.0)], self.SCHEMA)
+        result = validate_table("daily_bar_unadjusted", table)
+        assert not result.ok
+        assert any(issue.rule == "ohlc_low" for issue in result.issues)
 
 
 class TestTradingStatus:
@@ -178,6 +219,24 @@ class TestTradingStatus:
         row = self._row(limit_up_price=None, limit_down_price=None, status_reason=None)
         table = _tbl("t", [row], self.SCHEMA)
         assert validate_table("trading_status", table).ok
+
+    def test_trading_and_suspended_conflict_is_rejected(self) -> None:
+        table = _tbl("t", [self._row(is_trading=True, is_suspended=True)], self.SCHEMA)
+        result = validate_table("trading_status", table)
+        assert not result.ok
+        assert any(issue.rule == "trading_suspension_conflict" for issue in result.issues)
+
+    def test_star_st_without_st_is_rejected(self) -> None:
+        table = _tbl("t", [self._row(is_star_st=True, is_st=False)], self.SCHEMA)
+        result = validate_table("trading_status", table)
+        assert not result.ok
+        assert any(issue.rule == "star_st_consistency" for issue in result.issues)
+
+    def test_suspended_row_with_limit_prices_is_rejected(self) -> None:
+        table = _tbl("t", [self._row(is_trading=False, is_suspended=True)], self.SCHEMA)
+        result = validate_table("trading_status", table)
+        assert not result.ok
+        assert any(issue.rule == "suspended_limit_price" for issue in result.issues)
 
 
 class TestExchangeCalendar:
@@ -237,6 +296,24 @@ class TestSecurityMaster:
         table = _tbl("s", rows, self.SCHEMA)
         assert validate_table("security_master", table).ok
 
+    def test_exchange_must_match_code_suffix(self) -> None:
+        rows = [
+            {
+                "code": "000001.SZ",
+                "exchange": "SH",
+                "name": "x",
+                "board": "MAIN",
+                "listing_date": date(1991, 4, 3),
+                "delisting_date": None,
+                "effective_from": date(1991, 4, 3),
+                "effective_to": None,
+                "listing_status": "LISTED",
+            }
+        ]
+        result = validate_table("security_master", _tbl("s", rows, self.SCHEMA))
+        assert not result.ok
+        assert any(issue.rule == "exchange_code_suffix" for issue in result.issues)
+
 
 class TestAdjustmentFactor:
     SCHEMA = canonical_schema("adjustment_factor")
@@ -276,6 +353,24 @@ class TestBenchmarkIndexDaily:
         table = _tbl("b", rows, self.SCHEMA)
         assert validate_table("benchmark_index_daily", table).ok
 
+    def test_index_ohlc_attack_is_rejected(self) -> None:
+        rows = [
+            {
+                "code": "000300.SH",
+                "trade_date": date(2026, 7, 15),
+                "open": 4000.0,
+                "high": 3990.0,
+                "low": 3980.0,
+                "close": 4020.0,
+                "pre_close": 3990.0,
+                "volume": None,
+                "amount": None,
+            }
+        ]
+        result = validate_table("benchmark_index_daily", _tbl("b", rows, self.SCHEMA))
+        assert not result.ok
+        assert any(issue.rule == "ohlc_high" for issue in result.issues)
+
 
 class TestSortKey:
     def test_daily_bar_sort_key(self) -> None:
@@ -293,10 +388,40 @@ class TestCanonicalValidationIssue:
 
 
 class TestLegalVsIllegalEmpty:
-    def test_legal_empty_table_passes(self) -> None:
+    def test_unclassified_empty_table_is_rejected(self) -> None:
         schema = canonical_schema("daily_bar_unadjusted")
         empty = pa.Table.from_pylist([], schema=schema)
         result = validate_table("daily_bar_unadjusted", empty)
-        # A legal explicit-empty result (e.g. a date with no trades) is a zero-row table
-        # that still matches the schema; it passes structural validation.
+        assert not result.ok
+        assert any(issue.rule == "unexpected_empty" for issue in result.issues)
+
+    def test_explicit_legal_empty_classification_and_reason_pass(self) -> None:
+        schema = canonical_schema("daily_bar_unadjusted")
+        empty = pa.Table.from_pylist([], schema=schema)
+        result = validate_table(
+            "daily_bar_unadjusted",
+            empty,
+            empty_result=EmptyResultInfo(
+                classification=LegalEmptyClassification.NO_TRADING_SESSION,
+                reason="requested range contains no exchange trading session",
+            ),
+        )
         assert result.ok
+
+    def test_non_empty_table_cannot_carry_empty_result(self) -> None:
+        schema = canonical_schema("exchange_calendar")
+        table = _tbl(
+            "c",
+            [{"exchange": "SZ", "trade_date": date(2026, 7, 15), "is_open": True}],
+            schema,
+        )
+        result = validate_table(
+            "exchange_calendar",
+            table,
+            empty_result=EmptyResultInfo(
+                classification=LegalEmptyClassification.EMPTY_REQUEST_UNIVERSE,
+                reason="synthetic contradiction",
+            ),
+        )
+        assert not result.ok
+        assert any(issue.rule == "unexpected_empty_metadata" for issue in result.issues)

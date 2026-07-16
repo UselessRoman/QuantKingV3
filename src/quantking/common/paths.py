@@ -28,6 +28,22 @@ def _validate_absolute(path: Path, *, field: str) -> None:
             "managed roots must be absolute paths",
             context={"field": field, "path": str(path)},
         )
+    current = Path(path.anchor)
+    try:
+        for part in path.parts[1:]:
+            current /= part
+            if current.exists() and (current.is_symlink() or current.is_junction()):
+                raise InvalidPathError(
+                    "managed roots must not contain symbolic links or junctions",
+                    context={"field": field},
+                )
+    except InvalidPathError:
+        raise
+    except OSError as error:
+        raise InvalidPathError(
+            "managed root components could not be inspected",
+            context={"field": field},
+        ) from error
 
 
 @dataclass(frozen=True, slots=True)

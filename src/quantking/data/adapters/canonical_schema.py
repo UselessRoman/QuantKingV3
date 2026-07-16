@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 import pyarrow as pa
 
+from quantking.data.models import EmptyResultInfo
 from quantking.data.schemas import (
     DatasetSchemaDescriptor,
     FieldType,
@@ -73,21 +74,52 @@ def sort_key(dataset: str) -> tuple[str, ...]:
     return descriptor_for(dataset).sort_key
 
 
-def validate_table(dataset: str, table: pa.Table) -> CanonicalValidationResult:
+def validate_table(
+    dataset: str,
+    table: pa.Table,
+    *,
+    empty_result: EmptyResultInfo | None = None,
+) -> CanonicalValidationResult:
     """Validate a PyArrow table against the canonical contract for ``dataset``.
 
     The table is checked for schema field presence, nullability, primary-key
     uniqueness, canonical code form, no NaN/inf, and price/volume/amount value
-    invariants. A zero-row table that matches the schema passes structural
-    validation (a legal explicit-empty result); a table missing required columns
-    fails.
+    invariants. A zero-row table is successful only when the caller supplies an
+    explicit :class:`EmptyResultInfo`; transport, permission, parse and
+    unexpected-empty failures are batch outcomes and must never be represented
+    by a successful empty table.
     """
     descriptor = descriptor_for(dataset)
     issues: list[CanonicalValidationIssue] = _check_schema(descriptor, table)
-    if not issues and table.num_rows > 0:
+    if not issues and table.num_rows == 0:
+        if empty_result is None:
+            issues.append(
+                CanonicalValidationIssue(
+                    "unexpected_empty",
+                    "zero-row table requires an explicit legal empty classification and reason",
+                )
+            )
+        elif not isinstance(empty_result, EmptyResultInfo):
+            issues.append(
+                CanonicalValidationIssue(
+                    "empty_result_type", "empty_result must be an EmptyResultInfo"
+                )
+            )
+    elif not issues:
+        if empty_result is not None:
+            issues.append(
+                CanonicalValidationIssue(
+                    "unexpected_empty_metadata",
+                    "non-empty table cannot carry a legal empty result",
+                )
+            )
         issues.extend(_check_primary_key_unique(descriptor, table))
+        issues.extend(_check_sort_order(descriptor, table))
         issues.extend(_check_canonical_codes(descriptor, table))
+        issues.extend(_check_exchange_consistency(descriptor, table))
         issues.extend(_check_value_invariants(descriptor, table))
+        issues.extend(_check_ohlc_relationships(descriptor, table))
+        issues.extend(_check_trading_status_consistency(descriptor, table))
         issues.extend(_check_no_nan_inf(descriptor, table))
     return CanonicalValidationResult(
         dataset=dataset,
@@ -108,6 +140,14 @@ def _check_schema(
 ) -> list[CanonicalValidationIssue]:
     issues: list[CanonicalValidationIssue] = []
     schema = table.schema
+    expected_schema = canonical_schema(descriptor.name)
+    if tuple(schema.names) != tuple(expected_schema.names):
+        issues.append(
+            CanonicalValidationIssue(
+                "field_order",
+                f"field order must be {expected_schema.names!r}, got {schema.names!r}",
+            )
+        )
     expected = {field.name: field for field in descriptor.fields}
     actual_names = set(schema.names)
     for name, field in expected.items():
@@ -117,6 +157,14 @@ def _check_schema(
             )
             continue
         column = schema.field(name)
+        expected_type = _PYARROW_TYPE[field.field_type]
+        if not column.type.equals(expected_type):
+            issues.append(
+                CanonicalValidationIssue(
+                    "field_type",
+                    f"field {name!r} must have Arrow type {expected_type}, got {column.type}",
+                )
+            )
         if column.nullable and not field.nullable:
             issues.append(
                 CanonicalValidationIssue(
@@ -144,6 +192,25 @@ def _check_schema(
                 CanonicalValidationIssue("non_nullable_null", f"field {name!r} contains nulls")
             )
     return issues
+
+
+def _check_sort_order(
+    descriptor: DatasetSchemaDescriptor, table: pa.Table
+) -> list[CanonicalValidationIssue]:
+    columns = [table.column(name).to_pylist() for name in descriptor.sort_key]
+    previous: tuple[object, ...] | None = None
+    for index in range(table.num_rows):
+        current = tuple(column[index] for column in columns)
+        if previous is not None and current < previous:
+            return [
+                CanonicalValidationIssue(
+                    "sort_order",
+                    f"rows must be ascending by {descriptor.sort_key}",
+                    row_index=index,
+                )
+            ]
+        previous = current
+    return []
 
 
 def _check_primary_key_unique(
@@ -193,6 +260,38 @@ def _check_canonical_codes(
     return issues
 
 
+def _check_exchange_consistency(
+    descriptor: DatasetSchemaDescriptor, table: pa.Table
+) -> list[CanonicalValidationIssue]:
+    issues: list[CanonicalValidationIssue] = []
+    allowed = {"SZ", "SH", "BJ"}
+    if "exchange" in table.column_names:
+        exchanges = table.column("exchange").to_pylist()
+        for index, exchange in enumerate(exchanges):
+            if exchange not in allowed:
+                issues.append(
+                    CanonicalValidationIssue(
+                        "exchange_value",
+                        f"exchange must be one of {sorted(allowed)}, got {exchange!r}",
+                        row_index=index,
+                    )
+                )
+    if descriptor.name == "security_master":
+        codes = table.column("code").to_pylist()
+        exchanges = table.column("exchange").to_pylist()
+        for index, (code, exchange) in enumerate(zip(codes, exchanges, strict=True)):
+            suffix = str(code).rsplit(".", 1)[-1]
+            if suffix != exchange:
+                issues.append(
+                    CanonicalValidationIssue(
+                        "exchange_code_suffix",
+                        f"exchange {exchange!r} does not match code suffix {suffix!r}",
+                        row_index=index,
+                    )
+                )
+    return issues
+
+
 def _check_value_invariants(
     descriptor: DatasetSchemaDescriptor, table: pa.Table
 ) -> list[CanonicalValidationIssue]:
@@ -220,6 +319,98 @@ def _check_value_invariants(
                         row_index=index,
                     )
                 )
+    return issues
+
+
+def _check_ohlc_relationships(
+    descriptor: DatasetSchemaDescriptor, table: pa.Table
+) -> list[CanonicalValidationIssue]:
+    if descriptor.name not in {"daily_bar_unadjusted", "benchmark_index_daily"}:
+        return []
+    issues: list[CanonicalValidationIssue] = []
+    values = {name: table.column(name).to_pylist() for name in ("open", "high", "low", "close")}
+    for index in range(table.num_rows):
+        open_price = values["open"][index]
+        high = values["high"][index]
+        low = values["low"][index]
+        close = values["close"][index]
+        if any(value is None for value in (open_price, high, low, close)):
+            continue
+        if high < max(open_price, close, low):
+            issues.append(
+                CanonicalValidationIssue(
+                    "ohlc_high",
+                    "high must be greater than or equal to open, close and low",
+                    row_index=index,
+                )
+            )
+        if low > min(open_price, close, high):
+            issues.append(
+                CanonicalValidationIssue(
+                    "ohlc_low",
+                    "low must be less than or equal to open, close and high",
+                    row_index=index,
+                )
+            )
+    return issues
+
+
+def _check_trading_status_consistency(
+    descriptor: DatasetSchemaDescriptor, table: pa.Table
+) -> list[CanonicalValidationIssue]:
+    if descriptor.name != "trading_status":
+        return []
+    issues: list[CanonicalValidationIssue] = []
+    rows = table.to_pylist()
+    for index, row in enumerate(rows):
+        if row["is_trading"] and row["is_suspended"]:
+            issues.append(
+                CanonicalValidationIssue(
+                    "trading_suspension_conflict",
+                    "a row cannot be both trading and suspended",
+                    row_index=index,
+                )
+            )
+        if row["is_star_st"] and not row["is_st"]:
+            issues.append(
+                CanonicalValidationIssue(
+                    "star_st_consistency",
+                    "*ST status requires is_st=True",
+                    row_index=index,
+                )
+            )
+        if row["is_suspended"] and (
+            row["limit_up_price"] is not None or row["limit_down_price"] is not None
+        ):
+            issues.append(
+                CanonicalValidationIssue(
+                    "suspended_limit_price",
+                    "suspended rows must not carry limit prices",
+                    row_index=index,
+                )
+            )
+        if (
+            not row["is_trading"]
+            and not row["is_suspended"]
+            and not (row["is_delisting_period"] or row["status_reason"])
+        ):
+            issues.append(
+                CanonicalValidationIssue(
+                    "non_trading_reason",
+                    "non-trading non-suspended rows require a status reason",
+                    row_index=index,
+                )
+            )
+        up = row["limit_up_price"]
+        down = row["limit_down_price"]
+        if up is not None and down is not None and up < down:
+            issues.append(
+                CanonicalValidationIssue(
+                    "limit_price_order",
+                    "limit_up_price must not be below limit_down_price",
+                    row_index=index,
+                )
+            )
     return issues
 
 

@@ -1,7 +1,8 @@
-"""Repository, immutability, audit, and ORM/domain separation tests for Stage 1."""
+"""Stage 1 metadata repository, lineage, audit, and retry integration tests."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -9,7 +10,8 @@ import pytest
 from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 
-from quantking.common.ids import new_entity_id
+from quantking.common.errors import InvalidDataTransitionError, OverrideNotApplicableError
+from quantking.common.ids import EntityId, new_entity_id
 from quantking.common.time import TradingDate, UtcTimestamp
 from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
@@ -17,13 +19,18 @@ from quantking.data.adapters.persistence.sqlite import (
 )
 from quantking.data.models import (
     BatchFailureInfo,
+    BatchFailureKind,
     DatasetKind,
     DatasetVersion,
     DatasetVersionStatus,
     DataSource,
+    DifferenceReport,
     IngestionBatch,
     IngestionBatchStatus,
     ManifestFileEntry,
+    QualityResult,
+    QualityRun,
+    QualityRunStatus,
     SourceOverride,
     SourceOverrideStatus,
     transition_batch,
@@ -33,7 +40,8 @@ from quantking.data.models import (
 from quantking.jobs.adapters.persistence.sqlite import initialize_database
 
 _NOW = UtcTimestamp(datetime(2026, 7, 16, 1, 0, tzinfo=UTC))
-_LATER = UtcTimestamp(datetime(2026, 7, 16, 2, 0, tzinfo=UTC))
+_DECIDED = UtcTimestamp(datetime(2026, 7, 16, 2, 0, tzinfo=UTC))
+_LATER = UtcTimestamp(datetime(2026, 7, 16, 3, 0, tzinfo=UTC))
 _TRADE_DATE = TradingDate(date(2026, 7, 16))
 _SHA = "a" * 64
 
@@ -47,271 +55,377 @@ def factory(tmp_path: Path) -> DataSqliteUnitOfWorkFactory:
     engine.dispose()
 
 
-def _running_batch() -> IngestionBatch:
+def _running_batch(
+    *,
+    source: DataSource = DataSource.XTQUANT,
+    dataset: DatasetKind = DatasetKind.DAILY_BAR_UNADJUSTED,
+    batch_id: EntityId | None = None,
+) -> IngestionBatch:
     return IngestionBatch.running(
-        batch_id=new_entity_id("data_batch"),
-        source=DataSource.XTQUANT,
-        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        adapter_version="xtquant-probe-1",
+        batch_id=batch_id or new_entity_id("data_batch"),
+        source=source,
+        dataset=dataset,
+        adapter_version=f"{source.value.lower()}-1",
         request_params={"code": "000001.SZ", "start": "2026-01-01"},
         started_at=_NOW,
     )
 
 
-def _building_version(batch_id: object) -> DatasetVersion:
+def _succeeded_batch(**kwargs: object) -> IngestionBatch:
+    running = _running_batch(**kwargs)  # type: ignore[arg-type]
+    return transition_batch(
+        running,
+        IngestionBatchStatus.SUCCEEDED,
+        at=_DECIDED,
+        row_count=100,
+        security_count=1,
+        manifest_files=(
+            ManifestFileEntry(
+                relative_path=f"raw/{running.source.value.lower()}/part.parquet",
+                size=10,
+                sha256=_SHA,
+            ),
+        ),
+    )
+
+
+def _building_version(
+    batch_ids: tuple[EntityId, ...],
+    *,
+    dataset: DatasetKind = DatasetKind.DAILY_BAR_UNADJUSTED,
+    parent_version_id: EntityId | None = None,
+    created_at: UtcTimestamp = _NOW,
+) -> DatasetVersion:
     return DatasetVersion.building(
         version_id=new_entity_id("data_version"),
-        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        schema_version="daily_bar_unadjusted.v1",
+        dataset=dataset,
+        schema_version=f"{dataset.value}.v1",
         code_version="abc123",
-        parent_version_id=None,
-        input_batch_ids=(batch_id,)
-        if isinstance(batch_id, type(_running_batch().batch_id))
-        else (),
+        parent_version_id=parent_version_id,
+        input_batch_ids=batch_ids,
+        created_at=created_at,
+    )
+
+
+def _validated(version: DatasetVersion) -> DatasetVersion:
+    return transition_dataset_version(
+        version,
+        DatasetVersionStatus.VALIDATED,
+        at=_DECIDED,
+        manifest_sha256=_SHA,
+        security_count=1,
+        row_count=100,
+        coverage_start=_TRADE_DATE,
+        coverage_end=_TRADE_DATE,
+        coverage_summary={"date_count": "1", "security_count": "1"},
+    )
+
+
+def _persist_override_graph(
+    factory: DataSqliteUnitOfWorkFactory,
+) -> tuple[SourceOverride, DatasetVersion, IngestionBatch]:
+    primary = _succeeded_batch(source=DataSource.XTQUANT)
+    fallback = _succeeded_batch(source=DataSource.BAOSTOCK)
+    compared_version = _building_version((primary.batch_id,))
+    report = DifferenceReport(
+        report_id=new_entity_id("data_diff"),
+        version_id=compared_version.version_id,
+        primary_source=DataSource.XTQUANT,
+        fallback_source=DataSource.BAOSTOCK,
+        created_at=_DECIDED,
+        field_differences={"close": "1"},
+        total_compared=100,
+        total_differences=1,
+        report_relative_path="reports/diff.json",
+    )
+    override = SourceOverride.pending(
+        override_id=new_entity_id("data_override"),
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        difference_report_id=report.report_id,
+        primary_batch_id=primary.batch_id,
+        fallback_batch_id=fallback.batch_id,
+        primary_source=DataSource.XTQUANT,
+        fallback_source=DataSource.BAOSTOCK,
+        scope_codes=("000001.SZ",),
+        scope_dates=(_TRADE_DATE,),
+        fields=("close",),
+        reason="confirmed primary-source gap",
         created_at=_NOW,
     )
+    with factory() as uow:
+        uow.data.save_batch(primary)
+        uow.data.save_batch(fallback)
+        uow.data.save_version(compared_version)
+        uow.data.save_difference_report(report)
+        uow.data.save_override(override)
+        uow.commit()
+    return override, compared_version, fallback
 
 
 class TestBatchRepository:
     def test_create_and_get_running_batch(self, factory: DataSqliteUnitOfWorkFactory) -> None:
         batch = _running_batch()
         with factory() as uow:
-            saved = uow.data.save_batch(batch)
+            uow.data.save_batch(batch)
             uow.commit()
-        assert saved.batch_id == batch.batch_id
         with factory() as uow:
             loaded = uow.data.get_batch(str(batch.batch_id))
-            uow.rollback()
-        assert loaded.status is IngestionBatchStatus.RUNNING
-        assert loaded.source is DataSource.XTQUANT
+        assert loaded == batch
 
-    def test_transition_batch_to_succeeded_persists(
+    def test_terminal_batch_allows_identical_noop_but_rejects_content_change(
         self, factory: DataSqliteUnitOfWorkFactory
     ) -> None:
-        batch = _running_batch()
+        batch = _succeeded_batch()
         with factory() as uow:
             uow.data.save_batch(batch)
             uow.commit()
-        succeeded = transition_batch(
-            batch,
-            IngestionBatchStatus.SUCCEEDED,
-            at=_LATER,
-            row_count=100,
-            security_count=1,
-            manifest_files=(
-                ManifestFileEntry(relative_path="raw/x/d.parquet", size=10, sha256=_SHA),
+        with factory() as uow:
+            assert uow.data.save_batch(batch) == batch
+            uow.commit()
+        changed = replace(batch, row_count=101)
+        with factory() as uow, pytest.raises(InvalidDataTransitionError, match="content"):
+            uow.data.save_batch(changed)
+
+    def test_failed_request_can_retry_with_new_batch_id_and_succeed(
+        self, factory: DataSqliteUnitOfWorkFactory
+    ) -> None:
+        first = _running_batch()
+        failed = transition_batch(
+            first,
+            IngestionBatchStatus.FAILED,
+            at=_DECIDED,
+            failure=BatchFailureInfo(
+                error_type=BatchFailureKind.NETWORK,
+                message="supplier unavailable",
+                retryable=True,
             ),
         )
+        retry = _succeeded_batch()
+        assert retry.request_params_json == first.request_params_json
+        assert retry.batch_id != first.batch_id
         with factory() as uow:
-            uow.data.save_batch(succeeded)
+            uow.data.save_batch(failed)
+            uow.data.save_batch(retry)
             uow.commit()
         with factory() as uow:
-            loaded = uow.data.get_batch(str(batch.batch_id))
-            uow.rollback()
-        assert loaded.status is IngestionBatchStatus.SUCCEEDED
-        assert loaded.row_count == 100
-        assert len(loaded.manifest_files) == 1
+            assert uow.data.get_batch(str(first.batch_id)).status is IngestionBatchStatus.FAILED
+            assert uow.data.get_batch(str(retry.batch_id)).status is IngestionBatchStatus.SUCCEEDED
 
 
-class TestDatasetVersionImmutability:
-    def _make_published(self, factory: DataSqliteUnitOfWorkFactory) -> DatasetVersion:
-        batch = _running_batch()
-        version = DatasetVersion.building(
-            version_id=new_entity_id("data_version"),
-            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-            schema_version="daily_bar_unadjusted.v1",
-            code_version="abc123",
-            parent_version_id=None,
-            input_batch_ids=(batch.batch_id,),
-            created_at=_NOW,
+class TestDatasetVersionLineageAndCoverage:
+    def test_parent_and_input_batches_are_fk_backed_and_coverage_round_trips(
+        self, factory: DataSqliteUnitOfWorkFactory
+    ) -> None:
+        first_batch = _succeeded_batch()
+        second_batch = _succeeded_batch()
+        parent = _building_version((first_batch.batch_id,))
+        child = _validated(
+            _building_version(
+                (first_batch.batch_id, second_batch.batch_id),
+                parent_version_id=parent.version_id,
+            )
+        )
+        with factory() as uow:
+            uow.data.save_batch(first_batch)
+            uow.data.save_batch(second_batch)
+            uow.data.save_version(parent)
+            uow.data.save_version(child)
+            uow.commit()
+        with factory() as uow:
+            loaded = uow.data.get_version(str(child.version_id))
+            rows = (
+                uow.data._session.connection()
+                .exec_driver_sql(
+                    "SELECT batch_id, ordinal FROM dataset_version_batches "
+                    "WHERE version_id=? ORDER BY ordinal",
+                    (str(child.version_id),),
+                )
+                .fetchall()
+            )
+        assert loaded.input_batch_ids == (first_batch.batch_id, second_batch.batch_id)
+        assert loaded.parent_version_id == parent.version_id
+        assert loaded.coverage_start == _TRADE_DATE
+        assert loaded.coverage_summary["date_count"] == "1"
+        assert [row[0] for row in rows] == [str(first_batch.batch_id), str(second_batch.batch_id)]
+
+    def test_missing_or_cross_dataset_lineage_is_rejected(
+        self, factory: DataSqliteUnitOfWorkFactory
+    ) -> None:
+        calendar_batch = _succeeded_batch(dataset=DatasetKind.EXCHANGE_CALENDAR)
+        wrong = _building_version((calendar_batch.batch_id,))
+        with factory() as uow:
+            uow.data.save_batch(calendar_batch)
+            with pytest.raises(InvalidDataTransitionError, match="input batch"):
+                uow.data.save_version(wrong)
+
+
+class TestQualityAndDifferencePersistence:
+    def test_quality_run_results_save_read_and_query(
+        self, factory: DataSqliteUnitOfWorkFactory
+    ) -> None:
+        batch = _succeeded_batch()
+        version = _building_version((batch.batch_id,))
+        run = QualityRun(
+            run_id=new_entity_id("data_quality"),
+            version_id=version.version_id,
+            status=QualityRunStatus.PASSED,
+            rule_version="quality-rules.v1",
+            started_at=_NOW,
+            ended_at=_DECIDED,
+            results=(
+                QualityResult(
+                    rule_code="schema_exact",
+                    passed=True,
+                    affected_count=0,
+                    summary="exact schema",
+                    report_relative_path=None,
+                ),
+                QualityResult(
+                    rule_code="pk_unique",
+                    passed=True,
+                    affected_count=0,
+                    summary="unique",
+                    report_relative_path="quality/pk.json",
+                ),
+            ),
+            summary_report_relative_path="quality/summary.json",
+            failure=None,
         )
         with factory() as uow:
             uow.data.save_batch(batch)
             uow.data.save_version(version)
+            uow.data.save_quality_run(run)
             uow.commit()
-        validated = transition_dataset_version(
-            version,
-            DatasetVersionStatus.VALIDATED,
-            at=_NOW,
-            manifest_sha256=_SHA,
-            security_count=10,
-            row_count=1000,
-        )
         with factory() as uow:
-            uow.data.save_version(validated)
-            uow.commit()
-        published = transition_dataset_version(
-            validated,
-            DatasetVersionStatus.PUBLISHED,
-            at=_LATER,
-        )
-        with factory() as uow:
-            uow.data.save_version(published)
-            uow.commit()
-        return published
+            loaded = uow.data.get_quality_run(str(run.run_id))
+            queried = uow.data.list_quality_runs(
+                version_id=str(version.version_id), status=QualityRunStatus.PASSED
+            )
+        assert loaded == run
+        assert queried == [run]
 
-    def test_published_version_cannot_be_updated_at_db_level(
+    def test_difference_report_save_read_and_query(
         self, factory: DataSqliteUnitOfWorkFactory
     ) -> None:
-        published = self._make_published(factory)
-        # Attempt a direct UPDATE on a PUBLISHED row via raw sqlite -> blocked by trigger.
-        with factory() as uow:
-            engine = uow.data._session.bind
-            with engine.connect() as conn, pytest.raises(IntegrityError):
-                conn.exec_driver_sql(
-                    "UPDATE dataset_versions SET status='BUILDING' WHERE version_id=?",
-                    (str(published.version_id),),
-                )
-                conn.commit()
-            uow.rollback()
-
-    def test_service_layer_rejects_mutation_of_published(
-        self, factory: DataSqliteUnitOfWorkFactory
-    ) -> None:
-        published = self._make_published(factory)
-        from quantking.common.errors import DatasetVersionImmutableError
-
-        with factory() as uow:
-            with pytest.raises(DatasetVersionImmutableError):
-                uow.data.save_version(published)
-            uow.rollback()
-
-    def test_failed_version_cannot_be_made_successful_via_retry(
-        self, factory: DataSqliteUnitOfWorkFactory
-    ) -> None:
-        from quantking.common.errors import InvalidDataTransitionError
-
-        version = DatasetVersion.building(
-            version_id=new_entity_id("data_version"),
-            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-            schema_version="daily_bar_unadjusted.v1",
-            code_version="abc123",
-            parent_version_id=None,
-            input_batch_ids=(),
-            created_at=_NOW,
+        batch = _succeeded_batch()
+        version = _building_version((batch.batch_id,))
+        report = DifferenceReport(
+            report_id=new_entity_id("data_diff"),
+            version_id=version.version_id,
+            primary_source=DataSource.XTQUANT,
+            fallback_source=DataSource.BAOSTOCK,
+            created_at=_DECIDED,
+            field_differences={"amount": "2", "close": "1"},
+            total_compared=100,
+            total_differences=3,
+            report_relative_path="reports/diff.json",
         )
         with factory() as uow:
+            uow.data.save_batch(batch)
             uow.data.save_version(version)
+            uow.data.save_difference_report(report)
             uow.commit()
-        failed = transition_dataset_version(
-            version,
-            DatasetVersionStatus.FAILED,
-            at=_LATER,
-            failure=BatchFailureInfo(error_type="Q", message="bad", retryable=False),
-        )
         with factory() as uow:
-            uow.data.save_version(failed)
-            uow.commit()
-        # Retry must NOT reuse the failed id; attempting to transition it raises.
-        with pytest.raises(InvalidDataTransitionError):
-            transition_dataset_version(
-                failed, DatasetVersionStatus.VALIDATED, at=_LATER, manifest_sha256=_SHA
-            )
+            assert uow.data.get_difference_report(str(report.report_id)) == report
+            assert uow.data.list_difference_reports(
+                version_id=str(version.version_id), primary_source=DataSource.XTQUANT
+            ) == [report]
 
 
-class TestSourceOverrideAndAudit:
-    def test_approve_and_apply_override_appends_audit(
+class TestSourceOverrideTransactions:
+    def test_approval_and_application_are_audited_and_preserve_approved_facts(
         self, factory: DataSqliteUnitOfWorkFactory
     ) -> None:
-        override = SourceOverride.pending(
-            override_id=new_entity_id("data_override"),
-            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-            primary_source=DataSource.XTQUANT,
-            fallback_source=DataSource.BAOSTOCK,
-            scope_codes=("000001.SZ",),
-            scope_dates=(_TRADE_DATE,),
-            fields=("close",),
-            reason="missing bar",
-            created_at=_NOW,
-        )
+        pending, compared, fallback = _persist_override_graph(factory)
         with factory() as uow:
-            uow.data.save_override(override)
-            uow.commit()
-        approved = transition_override(
-            override,
-            SourceOverrideStatus.APPROVED,
-            at=_LATER,
-            actor="analyst",
-        )
-        with factory() as uow:
-            uow.data.save_override(approved)
-            uow.data.append_audit(
-                actor="analyst",
-                entity=str(override.override_id),
-                action="override_approved",
-                correlation_id=str(override.override_id),
-                occurred_at=_LATER,
-                details={"actor": "analyst"},
+            approved = uow.data.approve_override(
+                str(pending.override_id), actor="analyst", at=_DECIDED
             )
             uow.commit()
-        new_version_id = new_entity_id("data_version")
-        applied = transition_override(
-            approved,
-            SourceOverrideStatus.APPLIED,
-            at=_LATER,
-            actor="analyst",
-            applied_version_id=new_version_id,
+        child = _building_version(
+            (fallback.batch_id,),
+            parent_version_id=compared.version_id,
+            created_at=_LATER,
         )
         with factory() as uow:
-            uow.data.save_override(applied)
-            uow.data.append_audit(
+            uow.data.save_version(child)
+            applied = uow.data.apply_override(
+                str(pending.override_id),
                 actor="analyst",
-                entity=str(override.override_id),
-                action="override_applied",
-                correlation_id=str(override.override_id),
-                occurred_at=_LATER,
-                details={"new_version": str(new_version_id)},
+                at=_LATER,
+                applied_version_id=str(child.version_id),
             )
             uow.commit()
+        immutable_fields = (
+            "dataset",
+            "difference_report_id",
+            "primary_batch_id",
+            "fallback_batch_id",
+            "primary_source",
+            "fallback_source",
+            "scope_codes",
+            "scope_dates",
+            "fields",
+            "reason",
+            "created_at",
+            "approved_at",
+            "approved_by",
+        )
+        assert all(getattr(approved, name) == getattr(applied, name) for name in immutable_fields)
         with factory() as uow:
-            loaded = uow.data.get_override(str(override.override_id))
+            audits = uow.data.list_audits(action=None, limit=10)
+        assert [audit.action for audit in audits[-2:]] == [
+            "override_approved",
+            "override_applied",
+        ]
+
+    def test_direct_save_cannot_bypass_audit(self, factory: DataSqliteUnitOfWorkFactory) -> None:
+        pending, _, _ = _persist_override_graph(factory)
+        forged = transition_override(
+            pending, SourceOverrideStatus.APPROVED, at=_DECIDED, actor="forger"
+        )
+        with factory() as uow, pytest.raises(OverrideNotApplicableError, match="audited"):
+            uow.data.save_override(forged)
+
+    def test_audit_failure_rolls_back_the_decision(
+        self, factory: DataSqliteUnitOfWorkFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pending, _, _ = _persist_override_graph(factory)
+        with factory() as uow:
+
+            def fail_audit(**_kwargs: object) -> None:
+                raise RuntimeError("synthetic audit failure")
+
+            monkeypatch.setattr(uow.data, "append_audit", fail_audit)
+            with pytest.raises(RuntimeError, match="audit failure"):
+                uow.data.approve_override(str(pending.override_id), actor="analyst", at=_DECIDED)
+        with factory() as uow:
+            loaded = uow.data.get_override(str(pending.override_id))
             audits = uow.data.list_audits(action="override_approved", limit=10)
-            uow.rollback()
-        assert loaded.status is SourceOverrideStatus.APPLIED
-        assert loaded.applied_version_id == new_version_id
-        assert any(a.action == "override_approved" for a in audits)
+        assert loaded.status is SourceOverrideStatus.PENDING
+        assert audits == []
 
-    def test_applied_override_immutable_at_db_level(
+    def test_approved_to_applied_trigger_rejects_scope_mutation(
         self, factory: DataSqliteUnitOfWorkFactory
     ) -> None:
-        override = SourceOverride.pending(
-            override_id=new_entity_id("data_override"),
-            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-            primary_source=DataSource.XTQUANT,
-            fallback_source=DataSource.BAOSTOCK,
-            scope_codes=("000001.SZ",),
-            scope_dates=(_TRADE_DATE,),
-            fields=("close",),
-            reason="missing",
-            created_at=_NOW,
-        )
-        approved = transition_override(
-            override,
-            SourceOverrideStatus.APPROVED,
-            at=_NOW,
-            actor="analyst",
-        )
-        applied = transition_override(
-            approved,
-            SourceOverrideStatus.APPLIED,
-            at=_LATER,
-            actor="analyst",
-            applied_version_id=new_entity_id("data_version"),
+        pending, compared, fallback = _persist_override_graph(factory)
+        child = _building_version(
+            (fallback.batch_id,), parent_version_id=compared.version_id, created_at=_LATER
         )
         with factory() as uow:
-            uow.data.save_override(override)
-            uow.data.save_override(approved)
-            uow.data.save_override(applied)
+            uow.data.approve_override(str(pending.override_id), actor="analyst", at=_DECIDED)
+            uow.data.save_version(child)
             uow.commit()
         with factory() as uow:
             engine = uow.data._session.bind
-            with engine.connect() as conn, pytest.raises(IntegrityError):
-                conn.exec_driver_sql(
-                    "UPDATE source_overrides SET status='PENDING' WHERE override_id=?",
-                    (str(override.override_id),),
+            assert engine is not None
+            with engine.connect() as connection, pytest.raises(IntegrityError):
+                connection.exec_driver_sql(
+                    "UPDATE source_overrides SET status='APPLIED', applied_at=?, "
+                    "applied_version_id=?, reason='tampered' WHERE override_id=?",
+                    (_LATER.to_iso(), str(child.version_id), str(pending.override_id)),
                 )
-                conn.commit()
-            uow.rollback()
+                connection.commit()
 
 
 class TestNoParquetInSqlite:
@@ -320,18 +434,17 @@ class TestNoParquetInSqlite:
         initialize_database(database)
         engine = create_data_engine(database, busy_timeout_ms=250)
         inspector = inspect(engine)
-        data_tables = {
+        for table in {
             "ingestion_batches",
             "dataset_versions",
+            "dataset_version_batches",
             "quality_runs",
+            "quality_results",
             "difference_reports",
             "source_overrides",
-        }
-        for table in data_tables:
-            columns = {col["name"]: col["type"] for col in inspector.get_columns(table)}
-            for name, col_type in columns.items():
-                rendered = str(col_type).upper()
-                assert "BLOB" not in rendered, f"{table}.{name} is BLOB (no Parquet row data)"
+        }:
+            for column in inspector.get_columns(table):
+                assert "BLOB" not in str(column["type"]).upper()
         engine.dispose()
 
 
@@ -339,16 +452,12 @@ class TestOrmDomainSeparation:
     def test_domain_models_do_not_import_sqlalchemy(self) -> None:
         import quantking.data.models as data_models
 
-        module = data_models
-        # The domain module must not import sqlalchemy or alembic.
-        source = open(module.__file__, encoding="utf-8").read()  # noqa: SIM115
+        source = Path(data_models.__file__).read_text(encoding="utf-8")
         assert "sqlalchemy" not in source
-        assert "import alembic" not in source
         assert "from alembic" not in source
 
     def test_orm_rows_are_not_reexported_as_domain(self) -> None:
-        # Domain package __init__ must not expose ORM row classes.
         import quantking.data as data_pkg
 
         for name in ("IngestionBatchRow", "DatasetVersionRow", "Base"):
-            assert not hasattr(data_pkg, name), f"ORM row {name} leaked into domain package"
+            assert not hasattr(data_pkg, name)

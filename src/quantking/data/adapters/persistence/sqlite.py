@@ -22,7 +22,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Self
 
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from quantking.common.errors import (
@@ -34,21 +34,35 @@ from quantking.common.errors import (
 )
 from quantking.common.time import TradingDate, UtcTimestamp
 from quantking.data.adapters.persistence.models import (
+    DatasetVersionBatchRow,
     DatasetVersionRow,
+    DifferenceReportRow,
     IngestionBatchRow,
+    QualityResultRow,
+    QualityRunRow,
     SourceOverrideRow,
 )
 from quantking.data.models import (
+    BATCH_TRANSITIONS,
+    DATASET_VERSION_TRANSITIONS,
     BatchFailureInfo,
+    BatchFailureKind,
     DatasetKind,
     DatasetVersion,
     DatasetVersionStatus,
     DataSource,
+    DifferenceReport,
+    EmptyResultInfo,
     IngestionBatch,
     IngestionBatchStatus,
+    LegalEmptyClassification,
     ManifestFileEntry,
+    QualityResult,
+    QualityRun,
+    QualityRunStatus,
     SourceOverride,
     SourceOverrideStatus,
+    transition_override,
 )
 from quantking.jobs.adapters.persistence.models import AuditRecordRow
 from quantking.jobs.adapters.persistence.sqlite import (
@@ -57,7 +71,6 @@ from quantking.jobs.adapters.persistence.sqlite import (
 from quantking.jobs.models import AuditRecord
 
 _IMMUTABLE_VERSION_STATUSES = frozenset({DatasetVersionStatus.PUBLISHED})
-_IMMUTABLE_OVERRIDE_STATUSES = frozenset({SourceOverrideStatus.APPLIED})
 _TERMINAL_BATCH_STATUSES = frozenset(
     {
         IngestionBatchStatus.SUCCEEDED,
@@ -109,7 +122,11 @@ def _failure_json(value: BatchFailureInfo | None) -> str | None:
     if value is None:
         return None
     return json.dumps(
-        {"error_type": value.error_type, "message": value.message, "retryable": value.retryable},
+        {
+            "error_type": value.error_type.value,
+            "message": value.message,
+            "retryable": value.retryable,
+        },
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -121,7 +138,7 @@ def _load_failure(value: str | None) -> BatchFailureInfo | None:
         return None
     loaded = json.loads(value)
     return BatchFailureInfo(
-        error_type=str(loaded["error_type"]),
+        error_type=BatchFailureKind(str(loaded["error_type"])),
         message=str(loaded["message"]),
         retryable=bool(loaded["retryable"]),
     )
@@ -133,6 +150,31 @@ def _timestamp(value: str | None) -> UtcTimestamp | None:
 
 def _sha256_of_json(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _empty_result_json(value: EmptyResultInfo | None) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(
+        {"classification": value.classification.value, "reason": value.reason},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _load_empty_result(value: str | None) -> EmptyResultInfo | None:
+    if value is None:
+        return None
+    loaded = json.loads(value)
+    return EmptyResultInfo(
+        classification=LegalEmptyClassification(str(loaded["classification"])),
+        reason=str(loaded["reason"]),
+    )
+
+
+def _row_matches(row: object, values: Mapping[str, object]) -> bool:
+    return all(getattr(row, key) == value for key, value in values.items())
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +203,7 @@ def _batch_row_values(batch: IngestionBatch) -> dict[str, object]:
         "security_count": batch.security_count,
         "manifest_files_json": manifest_json,
         "failure_json": _failure_json(batch.failure),
+        "empty_result_json": _empty_result_json(batch.empty_result),
         "job_run_id": batch.job_run_id,
     }
 
@@ -192,6 +235,7 @@ def _batch_domain(row: IngestionBatchRow) -> IngestionBatch:
         manifest_files=manifest_files,
         failure=_load_failure(row.failure_json),
         job_run_id=row.job_run_id,
+        empty_result=_load_empty_result(row.empty_result_json),
     )
 
 
@@ -201,7 +245,6 @@ def _batch_domain(row: IngestionBatchRow) -> IngestionBatch:
 
 
 def _version_row_values(version: DatasetVersion) -> dict[str, object]:
-
     parent = None if version.parent_version_id is None else str(version.parent_version_id)
     input_ids = tuple(str(bid) for bid in version.input_batch_ids)
     return {
@@ -219,15 +262,22 @@ def _version_row_values(version: DatasetVersion) -> dict[str, object]:
         "manifest_sha256": version.manifest_sha256,
         "security_count": version.security_count,
         "row_count": version.row_count,
+        "coverage_start": None if version.coverage_start is None else str(version.coverage_start),
+        "coverage_end": None if version.coverage_end is None else str(version.coverage_end),
+        "coverage_summary_json": _json_mapping(version.coverage_summary),
         "failure_json": _failure_json(version.failure),
     }
 
 
-def _version_domain(row: DatasetVersionRow) -> DatasetVersion:
+def _version_domain(session: Session, row: DatasetVersionRow) -> DatasetVersion:
     from quantking.common.ids import parse_entity_id
 
-    raw_ids = json.loads(row.input_batch_ids_json)
-    input_ids = tuple(parse_entity_id(str(item)) for item in raw_ids)
+    lineage_rows = session.scalars(
+        select(DatasetVersionBatchRow)
+        .where(DatasetVersionBatchRow.version_id == row.version_id)
+        .order_by(DatasetVersionBatchRow.ordinal)
+    )
+    input_ids = tuple(parse_entity_id(item.batch_id) for item in lineage_rows)
     parent = None if row.parent_version_id is None else parse_entity_id(row.parent_version_id)
     return DatasetVersion(
         version_id=parse_entity_id(row.version_id),
@@ -244,7 +294,107 @@ def _version_domain(row: DatasetVersionRow) -> DatasetVersion:
         manifest_sha256=row.manifest_sha256,
         security_count=row.security_count,
         row_count=row.row_count,
+        coverage_start=None
+        if row.coverage_start is None
+        else TradingDate.from_iso(row.coverage_start),
+        coverage_end=None if row.coverage_end is None else TradingDate.from_iso(row.coverage_end),
+        coverage_summary=_load_mapping(row.coverage_summary_json),
         failure=_load_failure(row.failure_json),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Quality and difference-report mapping
+# ---------------------------------------------------------------------------
+
+
+def _quality_run_row_values(run: QualityRun) -> dict[str, object]:
+    results_json = json.dumps(
+        [
+            {
+                "rule_code": result.rule_code,
+                "passed": result.passed,
+                "affected_count": result.affected_count,
+                "summary": result.summary,
+                "report_relative_path": result.report_relative_path,
+            }
+            for result in run.results
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return {
+        "run_id": str(run.run_id),
+        "version_id": str(run.version_id),
+        "status": run.status.value,
+        "rule_version": run.rule_version,
+        "started_at": run.started_at.to_iso(),
+        "ended_at": None if run.ended_at is None else run.ended_at.to_iso(),
+        "results_json": results_json,
+        "summary_report_relative_path": run.summary_report_relative_path,
+        "failure_json": _failure_json(run.failure),
+    }
+
+
+def _quality_run_domain(session: Session, row: QualityRunRow) -> QualityRun:
+    from quantking.common.ids import parse_entity_id
+
+    result_rows = session.scalars(
+        select(QualityResultRow)
+        .where(QualityResultRow.run_id == row.run_id)
+        .order_by(QualityResultRow.sequence_number)
+    )
+    results = tuple(
+        QualityResult(
+            rule_code=result.rule_code,
+            passed=bool(result.passed),
+            affected_count=result.affected_count,
+            summary=result.summary,
+            report_relative_path=result.report_relative_path,
+        )
+        for result in result_rows
+    )
+    return QualityRun(
+        run_id=parse_entity_id(row.run_id),
+        version_id=parse_entity_id(row.version_id),
+        status=QualityRunStatus(row.status),
+        rule_version=row.rule_version,
+        started_at=UtcTimestamp.from_iso(row.started_at),
+        ended_at=_timestamp(row.ended_at),
+        results=results,
+        summary_report_relative_path=row.summary_report_relative_path,
+        failure=_load_failure(row.failure_json),
+    )
+
+
+def _difference_row_values(report: DifferenceReport) -> dict[str, object]:
+    return {
+        "report_id": str(report.report_id),
+        "version_id": str(report.version_id),
+        "primary_source": report.primary_source.value,
+        "fallback_source": report.fallback_source.value,
+        "created_at": report.created_at.to_iso(),
+        "field_differences_json": _json_mapping(report.field_differences),
+        "total_compared": report.total_compared,
+        "total_differences": report.total_differences,
+        "report_relative_path": report.report_relative_path,
+    }
+
+
+def _difference_domain(row: DifferenceReportRow) -> DifferenceReport:
+    from quantking.common.ids import parse_entity_id
+
+    return DifferenceReport(
+        report_id=parse_entity_id(row.report_id),
+        version_id=parse_entity_id(row.version_id),
+        primary_source=DataSource(row.primary_source),
+        fallback_source=DataSource(row.fallback_source),
+        created_at=UtcTimestamp.from_iso(row.created_at),
+        field_differences=_load_mapping(row.field_differences_json),
+        total_compared=row.total_compared,
+        total_differences=row.total_differences,
+        report_relative_path=row.report_relative_path,
     )
 
 
@@ -257,6 +407,9 @@ def _override_row_values(override: SourceOverride) -> dict[str, object]:
     return {
         "override_id": str(override.override_id),
         "dataset": override.dataset.value,
+        "difference_report_id": str(override.difference_report_id),
+        "primary_batch_id": str(override.primary_batch_id),
+        "fallback_batch_id": str(override.fallback_batch_id),
         "primary_source": override.primary_source.value,
         "fallback_source": override.fallback_source.value,
         "status": override.status.value,
@@ -285,6 +438,9 @@ def _override_domain(row: SourceOverrideRow) -> SourceOverride:
     return SourceOverride(
         override_id=parse_entity_id(row.override_id),
         dataset=DatasetKind(row.dataset),
+        difference_report_id=parse_entity_id(row.difference_report_id),
+        primary_batch_id=parse_entity_id(row.primary_batch_id),
+        fallback_batch_id=parse_entity_id(row.fallback_batch_id),
         primary_source=DataSource(row.primary_source),
         fallback_source=DataSource(row.fallback_source),
         status=SourceOverrideStatus(row.status),
@@ -316,17 +472,24 @@ class DataRepository:
     def save_batch(self, batch: IngestionBatch) -> IngestionBatch:
         """Insert or update an ingestion batch row."""
         existing = self._session.get(IngestionBatchRow, str(batch.batch_id))
+        values = _batch_row_values(batch)
         if existing is None:
-            self._session.add(IngestionBatchRow(**_batch_row_values(batch)))
+            self._session.add(IngestionBatchRow(**values))
         else:
-            if existing.status != batch.status.value and existing.status in {
-                s.value for s in _TERMINAL_BATCH_STATUSES
-            }:
+            if _row_matches(existing, values):
+                return batch
+            current = IngestionBatchStatus(existing.status)
+            if current in _TERMINAL_BATCH_STATUSES:
                 raise InvalidDataTransitionError(
-                    "terminal ingestion batch cannot be mutated; retry must create a new id",
+                    "terminal ingestion batch content is immutable; retry must create a new id",
                     context={"batch_id": str(batch.batch_id), "current": existing.status},
                 )
-            for key, value in _batch_row_values(batch).items():
+            if batch.status not in BATCH_TRANSITIONS[current]:
+                raise InvalidDataTransitionError(
+                    "ingestion batch transition is not allowed",
+                    context={"current": current.value, "target": batch.status.value},
+                )
+            for key, value in values.items():
                 setattr(existing, key, value)
         self._session.flush()
         return batch
@@ -342,7 +505,10 @@ class DataRepository:
     def save_version(self, version: DatasetVersion) -> DatasetVersion:
         """Insert or update a dataset version row with immutability guards."""
         existing = self._session.get(DatasetVersionRow, str(version.version_id))
+        values = _version_row_values(version)
         if existing is not None:
+            if _row_matches(existing, values):
+                return version
             if existing.status in {s.value for s in _IMMUTABLE_VERSION_STATUSES}:
                 raise DatasetVersionImmutableError(
                     "published dataset version is immutable",
@@ -353,12 +519,49 @@ class DataRepository:
                     "failed dataset version cannot be mutated; retry must create a new version",
                     context={"version_id": str(version.version_id)},
                 )
-            for key, value in _version_row_values(version).items():
+            current = DatasetVersionStatus(existing.status)
+            if version.status not in DATASET_VERSION_TRANSITIONS[current]:
+                raise InvalidDataTransitionError(
+                    "dataset version transition is not allowed",
+                    context={"current": current.value, "target": version.status.value},
+                )
+            existing_domain = _version_domain(self._session, existing)
+            if (
+                existing_domain.parent_version_id != version.parent_version_id
+                or existing_domain.input_batch_ids != version.input_batch_ids
+                or existing_domain.dataset is not version.dataset
+            ):
+                raise InvalidDataTransitionError("dataset version lineage is immutable")
+            for key, value in values.items():
                 setattr(existing, key, value)
         else:
-            self._session.add(DatasetVersionRow(**_version_row_values(version)))
+            self._validate_version_lineage(version)
+            self._session.add(DatasetVersionRow(**values))
+            self._session.flush()
+            for ordinal, batch_id in enumerate(version.input_batch_ids):
+                self._session.add(
+                    DatasetVersionBatchRow(
+                        version_id=str(version.version_id),
+                        batch_id=str(batch_id),
+                        ordinal=ordinal,
+                    )
+                )
         self._session.flush()
         return version
+
+    def _validate_version_lineage(self, version: DatasetVersion) -> None:
+        if version.parent_version_id is not None:
+            parent = self._session.get(DatasetVersionRow, str(version.parent_version_id))
+            if parent is None or parent.dataset != version.dataset.value:
+                raise InvalidDataTransitionError(
+                    "parent dataset version must exist in the same dataset"
+                )
+        for batch_id in version.input_batch_ids:
+            batch = self._session.get(IngestionBatchRow, str(batch_id))
+            if batch is None or batch.dataset != version.dataset.value:
+                raise InvalidDataTransitionError(
+                    "input batch must exist and belong to the version dataset"
+                )
 
     def get_version(self, version_id: str) -> DatasetVersion:
         row = self._session.get(DatasetVersionRow, version_id)
@@ -366,30 +569,242 @@ class DataRepository:
             raise DatasetVersionNotFoundError(
                 "dataset version does not exist", context={"version_id": version_id}
             )
-        return _version_domain(row)
+        return _version_domain(self._session, row)
+
+    # -- quality runs ------------------------------------------------------
+
+    def save_quality_run(self, run: QualityRun) -> QualityRun:
+        """Persist a quality run and its ordered rule results."""
+        if self._session.get(DatasetVersionRow, str(run.version_id)) is None:
+            raise DatasetVersionNotFoundError("quality run dataset version does not exist")
+        row = self._session.get(QualityRunRow, str(run.run_id))
+        values = _quality_run_row_values(run)
+        if row is None:
+            row = QualityRunRow(**values)
+            self._session.add(row)
+        else:
+            existing_domain = _quality_run_domain(self._session, row)
+            if existing_domain == run:
+                return run
+            if existing_domain.status is not QualityRunStatus.RUNNING:
+                raise InvalidDataTransitionError("terminal quality run is immutable")
+            if run.status is QualityRunStatus.RUNNING:
+                raise InvalidDataTransitionError("RUNNING quality run content is immutable")
+            for key, value in values.items():
+                setattr(row, key, value)
+            self._session.execute(
+                delete(QualityResultRow).where(QualityResultRow.run_id == str(run.run_id))
+            )
+        self._session.flush()
+        for sequence_number, result in enumerate(run.results):
+            self._session.add(
+                QualityResultRow(
+                    run_id=str(run.run_id),
+                    sequence_number=sequence_number,
+                    rule_code=result.rule_code,
+                    passed=int(result.passed),
+                    affected_count=result.affected_count,
+                    summary=result.summary,
+                    report_relative_path=result.report_relative_path,
+                )
+            )
+        self._session.flush()
+        return run
+
+    def get_quality_run(self, run_id: str) -> QualityRun:
+        row = self._session.get(QualityRunRow, run_id)
+        if row is None:
+            raise InvalidIdError("quality run does not exist", context={"run_id": run_id})
+        return _quality_run_domain(self._session, row)
+
+    def list_quality_runs(
+        self,
+        *,
+        version_id: str | None = None,
+        status: QualityRunStatus | None = None,
+    ) -> list[QualityRun]:
+        statement = select(QualityRunRow).order_by(QualityRunRow.started_at, QualityRunRow.run_id)
+        if version_id is not None:
+            statement = statement.where(QualityRunRow.version_id == version_id)
+        if status is not None:
+            statement = statement.where(QualityRunRow.status == status.value)
+        return [_quality_run_domain(self._session, row) for row in self._session.scalars(statement)]
+
+    # -- difference reports ----------------------------------------------
+
+    def save_difference_report(self, report: DifferenceReport) -> DifferenceReport:
+        if self._session.get(DatasetVersionRow, str(report.version_id)) is None:
+            raise DatasetVersionNotFoundError("difference report dataset version does not exist")
+        row = self._session.get(DifferenceReportRow, str(report.report_id))
+        values = _difference_row_values(report)
+        if row is None:
+            self._session.add(DifferenceReportRow(**values))
+        elif not _row_matches(row, values):
+            raise InvalidDataTransitionError("difference reports are immutable")
+        self._session.flush()
+        return report
+
+    def get_difference_report(self, report_id: str) -> DifferenceReport:
+        row = self._session.get(DifferenceReportRow, report_id)
+        if row is None:
+            raise InvalidIdError(
+                "difference report does not exist", context={"report_id": report_id}
+            )
+        return _difference_domain(row)
+
+    def list_difference_reports(
+        self,
+        *,
+        version_id: str | None = None,
+        primary_source: DataSource | None = None,
+    ) -> list[DifferenceReport]:
+        statement = select(DifferenceReportRow).order_by(
+            DifferenceReportRow.created_at, DifferenceReportRow.report_id
+        )
+        if version_id is not None:
+            statement = statement.where(DifferenceReportRow.version_id == version_id)
+        if primary_source is not None:
+            statement = statement.where(DifferenceReportRow.primary_source == primary_source.value)
+        return [_difference_domain(row) for row in self._session.scalars(statement)]
 
     # -- overrides ---------------------------------------------------------
 
     def save_override(self, override: SourceOverride) -> SourceOverride:
-        """Insert or update a source override row with immutability guards.
-
-        Transitioning PENDING → APPROVED is allowed; mutating a row that is
-        already APPROVED or APPLIED is rejected at the service layer (the
-        database trigger enforces the same rule for any direct UPDATE/DELETE).
-        """
+        """Insert a PENDING override; decisions require audited methods below."""
         existing = self._session.get(SourceOverrideRow, str(override.override_id))
+        values = _override_row_values(override)
         if existing is not None:
-            if existing.status in {s.value for s in _IMMUTABLE_OVERRIDE_STATUSES}:
-                raise OverrideNotApplicableError(
-                    "applied or approved source override is immutable",
-                    context={"override_id": str(override.override_id)},
-                )
-            for key, value in _override_row_values(override).items():
-                setattr(existing, key, value)
+            if _row_matches(existing, values):
+                return override
+            raise OverrideNotApplicableError(
+                "override decisions must use audited repository operations",
+                context={"override_id": str(override.override_id)},
+            )
         else:
-            self._session.add(SourceOverrideRow(**_override_row_values(override)))
+            if override.status is not SourceOverrideStatus.PENDING:
+                raise OverrideNotApplicableError("new override must start in PENDING")
+            self._validate_override_bindings(override)
+            self._session.add(SourceOverrideRow(**values))
         self._session.flush()
         return override
+
+    def _validate_override_bindings(self, override: SourceOverride) -> None:
+        report_row = self._session.get(DifferenceReportRow, str(override.difference_report_id))
+        primary = self._session.get(IngestionBatchRow, str(override.primary_batch_id))
+        fallback = self._session.get(IngestionBatchRow, str(override.fallback_batch_id))
+        if report_row is None or primary is None or fallback is None:
+            raise OverrideNotApplicableError("override lineage references must exist")
+        report_version = self._session.get(DatasetVersionRow, report_row.version_id)
+        if report_version is None or report_version.dataset != override.dataset.value:
+            raise OverrideNotApplicableError("difference report dataset does not match override")
+        if (
+            report_row.primary_source != override.primary_source.value
+            or report_row.fallback_source != override.fallback_source.value
+            or primary.source != override.primary_source.value
+            or fallback.source != override.fallback_source.value
+            or primary.dataset != override.dataset.value
+            or fallback.dataset != override.dataset.value
+            or primary.status not in {"SUCCEEDED", "PARTIAL"}
+            or fallback.status not in {"SUCCEEDED", "PARTIAL"}
+        ):
+            raise OverrideNotApplicableError("override source or batch lineage is inconsistent")
+
+    def approve_override(self, override_id: str, *, actor: str, at: UtcTimestamp) -> SourceOverride:
+        return self._decide_override(
+            override_id,
+            target=SourceOverrideStatus.APPROVED,
+            actor=actor,
+            at=at,
+            applied_version_id=None,
+        )
+
+    def reject_override(self, override_id: str, *, actor: str, at: UtcTimestamp) -> SourceOverride:
+        return self._decide_override(
+            override_id,
+            target=SourceOverrideStatus.REJECTED,
+            actor=actor,
+            at=at,
+            applied_version_id=None,
+        )
+
+    def apply_override(
+        self,
+        override_id: str,
+        *,
+        actor: str,
+        at: UtcTimestamp,
+        applied_version_id: str,
+    ) -> SourceOverride:
+        from quantking.common.ids import parse_entity_id
+
+        return self._decide_override(
+            override_id,
+            target=SourceOverrideStatus.APPLIED,
+            actor=actor,
+            at=at,
+            applied_version_id=parse_entity_id(applied_version_id),
+        )
+
+    def _decide_override(
+        self,
+        override_id: str,
+        *,
+        target: SourceOverrideStatus,
+        actor: str,
+        at: UtcTimestamp,
+        applied_version_id: object,
+    ) -> SourceOverride:
+        from quantking.common.ids import EntityId
+
+        row = self._session.get(SourceOverrideRow, override_id)
+        if row is None:
+            raise InvalidIdError(
+                "source override does not exist", context={"override_id": override_id}
+            )
+        current = _override_domain(row)
+        version_id = applied_version_id if isinstance(applied_version_id, EntityId) else None
+        if target is SourceOverrideStatus.APPLIED:
+            if version_id is None:
+                raise OverrideNotApplicableError("APPLIED requires a dataset version")
+            version = self.get_version(str(version_id))
+            report = self.get_difference_report(str(current.difference_report_id))
+            if (
+                version.dataset is not current.dataset
+                or version.version_id == report.version_id
+                or version.parent_version_id != report.version_id
+                or current.approved_at is None
+                or version.created_at.value < current.approved_at.value
+            ):
+                raise OverrideNotApplicableError(
+                    "applied version must be a new same-dataset child of the compared version"
+                )
+        changed = transition_override(
+            current,
+            target,
+            at=at,
+            actor=actor,
+            applied_version_id=version_id,
+        )
+        for key, value in _override_row_values(changed).items():
+            setattr(row, key, value)
+        action = {
+            SourceOverrideStatus.APPROVED: "override_approved",
+            SourceOverrideStatus.REJECTED: "override_rejected",
+            SourceOverrideStatus.APPLIED: "override_applied",
+        }[target]
+        details = {"status": target.value}
+        if version_id is not None:
+            details["applied_version_id"] = str(version_id)
+        self.append_audit(
+            actor=actor,
+            entity=override_id,
+            action=action,
+            correlation_id=override_id,
+            occurred_at=at,
+            details=details,
+        )
+        self._session.flush()
+        return changed
 
     def get_override(self, override_id: str) -> SourceOverride:
         row = self._session.get(SourceOverrideRow, override_id)

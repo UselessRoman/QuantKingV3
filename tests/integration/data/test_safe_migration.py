@@ -1,8 +1,10 @@
-"""Safe existing-database migration entry: snapshot, isolated verify, failure retention."""
+"""Safe migration attacks, maintenance exclusivity, and Stage 0 snapshot proof."""
 
 from __future__ import annotations
 
+import hashlib
 import json
+import multiprocessing
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,6 +17,7 @@ from alembic.config import Config
 from quantking.common.time import UtcTimestamp
 from quantking.data.adapters.persistence.maintenance import (
     MaintenanceFailureCode,
+    MigrationCheckpoint,
     MigrationFailureError,
     MigrationRequest,
     migrate_existing_database,
@@ -23,10 +26,15 @@ from quantking.jobs.adapters.persistence.sqlite import (
     _REPOSITORY_ROOT,
     _reserve_new_database,
     create_sqlite_engine,
-    initialize_database,
+)
+from quantking.jobs.backup.services import (
+    verify_local_snapshot,
+    verify_materialized_restore,
 )
 
 _NOW = UtcTimestamp(datetime(2026, 7, 16, 3, 0, tzinfo=UTC))
+_STAGE0_REVISION = "20260715_0001"
+_HEAD = "20260716_0002"
 
 
 def _alembic_config(database: Path) -> Config:
@@ -36,11 +44,11 @@ def _alembic_config(database: Path) -> Config:
     return configuration
 
 
-def _upgrade(database: Path, revision: str = "head") -> None:
+def _upgrade(database: Path, revision: str) -> None:
     engine = create_sqlite_engine(database, busy_timeout_ms=250)
-    configuration = _alembic_config(database)
     try:
         with engine.connect() as connection:
+            configuration = _alembic_config(database)
             configuration.attributes["connection"] = connection
             command.upgrade(configuration, revision)
     finally:
@@ -48,10 +56,11 @@ def _upgrade(database: Path, revision: str = "head") -> None:
 
 
 def _build_stage0_database(tmp_path: Path) -> Path:
-    """Build a real Stage 0 database at revision 20260715_0001 with sample data."""
-    database = tmp_path / "run.db"
+    database_root = tmp_path / "database"
+    database_root.mkdir()
+    database = database_root / "run.db"
     _reserve_new_database(database)
-    _upgrade(database, "20260715_0001")
+    _upgrade(database, _STAGE0_REVISION)
     with sqlite3.connect(database) as connection:
         connection.execute(
             "INSERT INTO job_runs (job_id, job_type, idempotency_key, input_manifest_json, "
@@ -86,198 +95,257 @@ def _build_stage0_database(tmp_path: Path) -> Path:
                 1,
             ),
         )
-        connection.execute(
-            "INSERT INTO audit_records (actor, entity, action, correlation_id, "
-            "occurred_at, details_json) VALUES (?,?,?,?,?,?)",
-            ("pytest", "job:x", "job_created", "c", "2026-07-16T01:00:00Z", "{}"),
-        )
         connection.commit()
     return database
 
 
-class TestNewDatabaseMigration:
-    def test_new_database_migrates_to_head(self, tmp_path: Path) -> None:
-        database = tmp_path / "fresh.db"
-        initialize_database(database)
-        with sqlite3.connect(database) as connection:
-            assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
-            rev = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert rev == ("20260716_0001",)
+def _request(
+    tmp_path: Path,
+    database: Path,
+    *,
+    run_id: str = "mig-001",
+    snapshot_name: str = "snapshots",
+    isolated_name: str = "isolated",
+) -> MigrationRequest:
+    return MigrationRequest(
+        run_id=run_id,
+        database_path=database,
+        snapshot_root=tmp_path / snapshot_name,
+        isolated_root=tmp_path / isolated_name,
+        target_revision="head",
+        requested_at=_NOW,
+        code_version="98a8440dc2b860f4dd46ae592c94ea832f89e811",
+        expected_snapshot_revision=_STAGE0_REVISION,
+    )
 
 
-class TestExistingDatabaseUpgrade:
-    def test_stage0_to_stage1_upgrade_succeeds(self, tmp_path: Path) -> None:
+def _revision(database: Path) -> str:
+    with sqlite3.connect(database) as connection:
+        row = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _child_attempt(request: MigrationRequest, queue: Any) -> None:
+    try:
+        migrate_existing_database(request)
+    except MigrationFailureError as error:
+        queue.put(error.code.value)
+    else:
+        queue.put("unexpected_success")
+
+
+class TestCompleteSnapshotAndEvidence:
+    def test_stage0_snapshot_restore_and_concrete_revision_evidence(self, tmp_path: Path) -> None:
         database = _build_stage0_database(tmp_path)
-        snapshot_root = tmp_path / "snapshots"
-        isolated_root = tmp_path / "isolated"
-        request = MigrationRequest(
-            run_id="mig-001",
-            database_path=database,
-            snapshot_root=snapshot_root,
-            isolated_root=isolated_root,
-            target_revision="head",
-            requested_at=_NOW,
-            code_version="abc123",
-        )
+        request = _request(tmp_path, database)
         result = migrate_existing_database(request)
-        assert result.ok
-        assert result.snapshot_path is not None
-        assert result.isolated_path is not None
-        with sqlite3.connect(database) as connection:
-            assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
-            rev = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-            # sample data preserved
-            job = connection.execute(
-                "SELECT status FROM job_runs WHERE job_id = ?",
-                ("job:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",),
-            ).fetchone()
-        assert rev == ("20260716_0001",)
-        assert job == ("SUCCEEDED",)
 
-    def test_isolated_copy_is_verified_before_original_migration(self, tmp_path: Path) -> None:
-        database = _build_stage0_database(tmp_path)
-        snapshot_root = tmp_path / "snapshots"
-        isolated_root = tmp_path / "isolated"
-        request = MigrationRequest(
-            run_id="mig-002",
-            database_path=database,
-            snapshot_root=snapshot_root,
-            isolated_root=isolated_root,
-            target_revision="head",
-            requested_at=_NOW,
-            code_version="abc123",
+        assert result.ok
+        assert result.source_revision == _STAGE0_REVISION
+        assert result.target_revision == _HEAD
+        assert result.target_revision != "head"
+        assert _revision(database) == _HEAD
+        assert (
+            verify_local_snapshot(result.snapshot_path).manifest.restore_point_id == request.run_id
         )
-        result = migrate_existing_database(request)
-        assert result.ok
-        # isolated copy should have been migrated to head and verified
-        assert result.isolated_path is not None
-        with sqlite3.connect(result.isolated_path) as connection:
-            rev = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert rev == ("20260716_0001",)
+        verify_materialized_restore(result.isolated_restore_path)
+        assert (result.snapshot_path / "input.json").is_file()
+        assert (result.snapshot_path / "manifest.json").is_file()
+        assert (result.snapshot_path / "COMPLETE").is_file()
+        assert (result.snapshot_path / "payload" / "database" / "quantking.db").is_file()
+        assert (result.isolated_restore_path / "VERIFIED").is_file()
+        assert _revision(result.isolated_path) == _HEAD
+
+        evidence = json.loads(result.evidence_path.read_text(encoding="utf-8"))
+        assert evidence == {
+            "schema_version": "stage1-migration-evidence.v1",
+            "run_id": request.run_id,
+            "requested_at": _NOW.to_iso(),
+            "code_version": request.code_version,
+            "source_revision": _STAGE0_REVISION,
+            "target_revision": _HEAD,
+            "snapshot_id": request.run_id,
+            "manifest_sha256": result.manifest_sha256,
+            "complete_sha256": hashlib.sha256(
+                (result.snapshot_path / "COMPLETE").read_bytes()
+            ).hexdigest(),
+        }
+        evidence_bytes = result.evidence_path.read_bytes()
+        evidence_sha = result.evidence_path.with_suffix(".sha256").read_text().strip()
+        assert hashlib.sha256(evidence_bytes).hexdigest() == evidence_sha
 
 
-class TestTamperedSnapshotRejected:
-    def test_wrong_revision_snapshot_rejected(self, tmp_path: Path) -> None:
+class TestTamperingBeforeOriginalMigration:
+    @pytest.mark.parametrize("attack", ("manifest", "marker", "database", "revision"))
+    def test_tampering_is_rejected_before_original(self, tmp_path: Path, attack: str) -> None:
         database = _build_stage0_database(tmp_path)
-        snapshot_root = tmp_path / "snapshots"
-        isolated_root = tmp_path / "isolated"
+        request = _request(tmp_path, database, run_id=f"mig-tamper-{attack}")
+
+        def tamper(checkpoint: MigrationCheckpoint) -> None:
+            if attack == "manifest":
+                path = checkpoint.snapshot_path / "manifest.json"
+                path.write_bytes(path.read_bytes() + b" ")
+            elif attack == "marker":
+                path = checkpoint.snapshot_path / "COMPLETE"
+                path.write_bytes(path.read_bytes() + b" ")
+            elif attack == "database":
+                path = checkpoint.snapshot_path / "payload" / "database" / "quantking.db"
+                path.write_bytes(path.read_bytes() + b"attack")
+            else:
+                with sqlite3.connect(checkpoint.isolated_database_path) as connection:
+                    connection.execute("UPDATE alembic_version SET version_num='forged_revision'")
+                    connection.commit()
+
+        with pytest.raises(MigrationFailureError) as exc_info:
+            migrate_existing_database(request, before_original_migration=tamper)
+        assert exc_info.value.code is MaintenanceFailureCode.PRE_ORIGINAL_REVALIDATION_FAILED
+        assert _revision(database) == _STAGE0_REVISION
+        assert exc_info.value.evidence_path is not None
+        record = json.loads(exc_info.value.evidence_path.read_text(encoding="utf-8"))
+        rendered = json.dumps(record, ensure_ascii=False)
+        assert str(database) not in rendered
+        assert "attack" not in rendered
+
+    def test_expected_source_revision_mismatch_stops_before_original(self, tmp_path: Path) -> None:
+        database = _build_stage0_database(tmp_path)
+        request = _request(tmp_path, database, run_id="mig-source-revision")
         request = MigrationRequest(
-            run_id="mig-bad-rev",
-            database_path=database,
-            snapshot_root=snapshot_root,
-            isolated_root=isolated_root,
-            target_revision="head",
-            requested_at=_NOW,
-            code_version="abc123",
-            expected_snapshot_revision="9999_unknown",  # forged
+            run_id=request.run_id,
+            database_path=request.database_path,
+            snapshot_root=request.snapshot_root,
+            isolated_root=request.isolated_root,
+            target_revision=request.target_revision,
+            requested_at=request.requested_at,
+            code_version=request.code_version,
+            expected_snapshot_revision="forged_revision",
         )
         with pytest.raises(MigrationFailureError) as exc_info:
             migrate_existing_database(request)
         assert exc_info.value.code is MaintenanceFailureCode.SNAPSHOT_REVISION_MISMATCH
-        # original DB untouched
-        with sqlite3.connect(database) as connection:
-            rev = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert rev == ("20260715_0001",)
+        assert _revision(database) == _STAGE0_REVISION
 
 
-class TestIsolatedMigrationFailureRetainsEvidence:
-    def test_isolated_migration_failure_keeps_evidence_and_fails(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+class TestRunIdAndManagedPathAttacks:
+    @pytest.mark.parametrize(
+        "run_id",
+        (
+            "../escape",
+            "C:/absolute",
+            "a/b",
+            "a\\b",
+            " white",
+            "white ",
+            "two words",
+            "dot..escape",
+            "failed.incomplete",
+        ),
+    )
+    def test_run_id_attack_is_rejected(self, tmp_path: Path, run_id: str) -> None:
         database = _build_stage0_database(tmp_path)
-        snapshot_root = tmp_path / "snapshots"
-        isolated_root = tmp_path / "isolated"
+        request = _request(tmp_path, database, run_id=run_id)
+        with pytest.raises(MigrationFailureError) as exc_info:
+            migrate_existing_database(request)
+        assert exc_info.value.code is MaintenanceFailureCode.INVALID_REQUEST
+        assert _revision(database) == _STAGE0_REVISION
 
-        from quantking.data.adapters.persistence import maintenance as maint_mod
-
-        def fail_isolated_upgrade(configuration: Any, revision: str) -> None:
-            raise RuntimeError("synthetic isolated migration failure")
-
-        monkeypatch.setattr(maint_mod.command, "upgrade", fail_isolated_upgrade)
+    def test_overlapping_database_and_output_roots_are_rejected(self, tmp_path: Path) -> None:
+        database = _build_stage0_database(tmp_path)
         request = MigrationRequest(
-            run_id="mig-iso-fail",
+            run_id="mig-overlap",
             database_path=database,
-            snapshot_root=snapshot_root,
-            isolated_root=isolated_root,
+            snapshot_root=database.parent / "snapshots",
+            isolated_root=tmp_path / "isolated",
             target_revision="head",
             requested_at=_NOW,
             code_version="abc123",
         )
         with pytest.raises(MigrationFailureError) as exc_info:
             migrate_existing_database(request)
-        assert exc_info.value.code is MaintenanceFailureCode.ISOLATED_MIGRATION_FAILED
-        # failure evidence retained
-        failure_files = list(snapshot_root.rglob("failure.json")) + list(
-            isolated_root.rglob("failure.json")
-        )
-        assert failure_files, "failure evidence must be retained"
-        # original DB untouched
-        with sqlite3.connect(database) as connection:
-            rev = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert rev == ("20260715_0001",)
+        assert exc_info.value.code is MaintenanceFailureCode.INVALID_PATH
 
-
-class TestOriginalMigrationFailureRetainsEvidence:
-    def test_original_migration_failure_retains_snapshot_isolated_and_evidence(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("reparse_kind", ("symlink", "junction"))
+    def test_reparse_output_root_is_rejected(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        reparse_kind: str,
     ) -> None:
         database = _build_stage0_database(tmp_path)
-        snapshot_root = tmp_path / "snapshots"
-        isolated_root = tmp_path / "isolated"
+        reparse_root = tmp_path / "snapshot-reparse"
+        reparse_root.mkdir()
+        method_name = "is_symlink" if reparse_kind == "symlink" else "is_junction"
+        original = getattr(Path, method_name)
 
-        call_count = {"n": 0}
-        from quantking.data.adapters.persistence import maintenance as maint_mod
+        def detect_reparse(path: Path) -> bool:
+            return path == reparse_root or original(path)
 
-        original_upgrade = maint_mod.command.upgrade
-
-        def fail_on_original(configuration: Any, revision: str) -> None:
-            call_count["n"] += 1
-            # first call(s) are the isolated copy; fail only when the original DB
-            # is being migrated. We detect by the sqlalchemy.url in the config.
-            url = configuration.get_main_option("sqlalchemy.url")
-            if str(database.as_posix()) in (url or "") and "isolated" not in (url or ""):
-                raise RuntimeError("synthetic original migration failure")
-            original_upgrade(configuration, revision)
-
-        monkeypatch.setattr(maint_mod.command, "upgrade", fail_on_original)
+        monkeypatch.setattr(Path, method_name, detect_reparse)
         request = MigrationRequest(
-            run_id="mig-orig-fail",
+            run_id=f"mig-{reparse_kind}",
             database_path=database,
-            snapshot_root=snapshot_root,
-            isolated_root=isolated_root,
+            snapshot_root=reparse_root,
+            isolated_root=tmp_path / "isolated",
             target_revision="head",
             requested_at=_NOW,
             code_version="abc123",
         )
         with pytest.raises(MigrationFailureError) as exc_info:
             migrate_existing_database(request)
-        assert exc_info.value.code is MaintenanceFailureCode.ORIGINAL_MIGRATION_FAILED
-        # snapshot and isolated copy retained
-        assert snapshot_root.exists()
-        # failure evidence present
-        failure_files = list(snapshot_root.rglob("failure.json"))
-        assert failure_files
-        record = json.loads(failure_files[0].read_text(encoding="utf-8"))
-        assert record["error_code"] == MaintenanceFailureCode.ORIGINAL_MIGRATION_FAILED.value
+        assert exc_info.value.code is MaintenanceFailureCode.INVALID_PATH
+
+
+class TestMaintenanceExclusivity:
+    def test_concurrent_writer_is_rejected_for_entire_pre_original_boundary(
+        self, tmp_path: Path
+    ) -> None:
+        database = _build_stage0_database(tmp_path)
+        request = _request(tmp_path, database, run_id="mig-writer-lock")
+        writer_rejected = {"value": False}
+
+        def attack_writer(_checkpoint: MigrationCheckpoint) -> None:
+            with sqlite3.connect(database, timeout=0) as connection:
+                with pytest.raises(sqlite3.OperationalError, match="locked"):
+                    connection.execute("BEGIN IMMEDIATE")
+                writer_rejected["value"] = True
+
+        result = migrate_existing_database(request, before_original_migration=attack_writer)
+        assert result.ok
+        assert writer_rejected["value"]
+
+    def test_second_migration_process_is_rejected(self, tmp_path: Path) -> None:
+        database = _build_stage0_database(tmp_path)
+        request = _request(tmp_path, database, run_id="mig-process-lock")
+        child_request = _request(
+            tmp_path,
+            database,
+            run_id="mig-process-lock-child",
+            snapshot_name="snapshots-child",
+            isolated_name="isolated-child",
+        )
+        child_code = {"value": ""}
+
+        def attack_process(_checkpoint: MigrationCheckpoint) -> None:
+            context = multiprocessing.get_context("spawn")
+            queue = context.Queue()
+            process = context.Process(target=_child_attempt, args=(child_request, queue))
+            process.start()
+            process.join(timeout=30)
+            assert process.exitcode == 0
+            child_code["value"] = queue.get(timeout=5)
+
+        result = migrate_existing_database(request, before_original_migration=attack_process)
+        assert result.ok
+        assert child_code["value"] == MaintenanceFailureCode.MAINTENANCE_LOCKED.value
 
 
 class TestDuplicateExecution:
-    def test_duplicate_run_id_rejected(self, tmp_path: Path) -> None:
+    def test_duplicate_run_id_rejected_without_overwriting_evidence(self, tmp_path: Path) -> None:
         database = _build_stage0_database(tmp_path)
-        snapshot_root = tmp_path / "snapshots"
-        isolated_root = tmp_path / "isolated"
-        request = MigrationRequest(
-            run_id="mig-dup",
-            database_path=database,
-            snapshot_root=snapshot_root,
-            isolated_root=isolated_root,
-            target_revision="head",
-            requested_at=_NOW,
-            code_version="abc123",
-        )
-        result = migrate_existing_database(request)
-        assert result.ok
-        # second invocation with the same run_id must fail
+        request = _request(tmp_path, database, run_id="mig-duplicate")
+        first = migrate_existing_database(request)
+        evidence_before = first.evidence_path.read_bytes()
         with pytest.raises(MigrationFailureError) as exc_info:
             migrate_existing_database(request)
         assert exc_info.value.code is MaintenanceFailureCode.RUN_ID_ALREADY_USED
+        assert first.evidence_path.read_bytes() == evidence_before

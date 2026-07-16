@@ -33,9 +33,6 @@ class Base(DeclarativeBase):
 class IngestionBatchRow(Base):
     __tablename__ = "ingestion_batches"
     __table_args__ = (
-        UniqueConstraint(
-            "source", "dataset", "request_params_sha256", name="uq_batches_source_dataset_params"
-        ),
         CheckConstraint(
             "status IN ('RUNNING','SUCCEEDED','PARTIAL','FAILED')",
             name="ck_ingestion_batches_status",
@@ -63,6 +60,7 @@ class IngestionBatchRow(Base):
     security_count: Mapped[int | None] = mapped_column(Integer)
     manifest_files_json: Mapped[str] = mapped_column(Text, nullable=False)
     failure_json: Mapped[str | None] = mapped_column(Text)
+    empty_result_json: Mapped[str | None] = mapped_column(Text)
     # Plain string, not a SQLAlchemy ForeignKey: the real FK constraint is created
     # by the Alembic migration against job_runs.job_id. Keeping it a plain column
     # avoids coupling the data ORM metadata to the jobs ORM metadata, so each
@@ -93,7 +91,9 @@ class DatasetVersionRow(Base):
     schema_version: Mapped[str] = mapped_column(String(128), nullable=False)
     code_version: Mapped[str] = mapped_column(String(128), nullable=False)
     rule_version: Mapped[str] = mapped_column(String(128), nullable=False)
-    parent_version_id: Mapped[str | None] = mapped_column(String(96))
+    parent_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("dataset_versions.version_id", ondelete="RESTRICT")
+    )
     input_batch_ids_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = mapped_column(String(40), nullable=False)
     validated_at: Mapped[str | None] = mapped_column(String(40))
@@ -101,7 +101,27 @@ class DatasetVersionRow(Base):
     manifest_sha256: Mapped[str | None] = mapped_column(String(64))
     security_count: Mapped[int | None] = mapped_column(Integer)
     row_count: Mapped[int | None] = mapped_column(Integer)
+    coverage_start: Mapped[str | None] = mapped_column(String(10))
+    coverage_end: Mapped[str | None] = mapped_column(String(10))
+    coverage_summary_json: Mapped[str] = mapped_column(Text, nullable=False)
     failure_json: Mapped[str | None] = mapped_column(Text)
+
+
+class DatasetVersionBatchRow(Base):
+    __tablename__ = "dataset_version_batches"
+    __table_args__ = (
+        CheckConstraint("ordinal >= 0", name="ck_dataset_version_batches_ordinal"),
+        UniqueConstraint("version_id", "ordinal", name="uq_dataset_version_batches_ordinal"),
+        Index("ix_dataset_version_batches_batch", "batch_id"),
+    )
+
+    version_id: Mapped[str] = mapped_column(
+        ForeignKey("dataset_versions.version_id", ondelete="CASCADE"), primary_key=True
+    )
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("ingestion_batches.batch_id", ondelete="RESTRICT"), primary_key=True
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class QualityRunRow(Base):
@@ -125,6 +145,26 @@ class QualityRunRow(Base):
     results_json: Mapped[str] = mapped_column(Text, nullable=False)
     summary_report_relative_path: Mapped[str | None] = mapped_column(Text)
     failure_json: Mapped[str | None] = mapped_column(Text)
+
+
+class QualityResultRow(Base):
+    __tablename__ = "quality_results"
+    __table_args__ = (
+        CheckConstraint("sequence_number >= 0", name="ck_quality_results_sequence"),
+        CheckConstraint("passed IN (0,1)", name="ck_quality_results_passed"),
+        CheckConstraint("affected_count >= 0", name="ck_quality_results_affected_count"),
+        UniqueConstraint("run_id", "rule_code", name="uq_quality_results_rule_code"),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("quality_runs.run_id", ondelete="CASCADE"), primary_key=True
+    )
+    sequence_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    rule_code: Mapped[str] = mapped_column(String(128), nullable=False)
+    passed: Mapped[int] = mapped_column(Integer, nullable=False)
+    affected_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    report_relative_path: Mapped[str | None] = mapped_column(Text)
 
 
 class DifferenceReportRow(Base):
@@ -156,6 +196,15 @@ class SourceOverrideRow(Base):
 
     override_id: Mapped[str] = mapped_column(String(96), primary_key=True)
     dataset: Mapped[str] = mapped_column(String(64), nullable=False)
+    difference_report_id: Mapped[str] = mapped_column(
+        ForeignKey("difference_reports.report_id", ondelete="RESTRICT"), nullable=False
+    )
+    primary_batch_id: Mapped[str] = mapped_column(
+        ForeignKey("ingestion_batches.batch_id", ondelete="RESTRICT"), nullable=False
+    )
+    fallback_batch_id: Mapped[str] = mapped_column(
+        ForeignKey("ingestion_batches.batch_id", ondelete="RESTRICT"), nullable=False
+    )
     primary_source: Mapped[str] = mapped_column(String(32), nullable=False)
     fallback_source: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -167,4 +216,6 @@ class SourceOverrideRow(Base):
     approved_at: Mapped[str | None] = mapped_column(String(40))
     approved_by: Mapped[str | None] = mapped_column(String(256))
     applied_at: Mapped[str | None] = mapped_column(String(40))
-    applied_version_id: Mapped[str | None] = mapped_column(String(96))
+    applied_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("dataset_versions.version_id", ondelete="RESTRICT")
+    )

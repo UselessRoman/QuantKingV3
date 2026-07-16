@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 
 import pytest
@@ -16,12 +17,15 @@ from quantking.common.ids import new_entity_id
 from quantking.common.time import TradingDate, UtcTimestamp
 from quantking.data.models import (
     BatchFailureInfo,
+    BatchFailureKind,
     DatasetKind,
     DatasetVersion,
     DatasetVersionStatus,
     DataSource,
+    EmptyResultInfo,
     IngestionBatch,
     IngestionBatchStatus,
+    LegalEmptyClassification,
     ManifestFileEntry,
     SourceOverride,
     SourceOverrideStatus,
@@ -62,6 +66,9 @@ def _pending_override() -> SourceOverride:
     return SourceOverride.pending(
         override_id=new_entity_id("data_override"),
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        difference_report_id=new_entity_id("data_diff"),
+        primary_batch_id=new_entity_id("data_batch"),
+        fallback_batch_id=new_entity_id("data_batch"),
         primary_source=DataSource.XTQUANT,
         fallback_source=DataSource.BAOSTOCK,
         scope_codes=("000001.SZ",),
@@ -98,7 +105,11 @@ class TestIngestionBatchStateMachine:
             at=_LATER,
             row_count=50,
             security_count=1,
-            failure=BatchFailureInfo(error_type="PartialError", message="partial", retryable=True),
+            failure=BatchFailureInfo(
+                error_type=BatchFailureKind.PARTIAL_SOURCE,
+                message="partial",
+                retryable=True,
+            ),
         )
         assert batch.status is IngestionBatchStatus.PARTIAL
         assert batch.failure is not None
@@ -107,12 +118,38 @@ class TestIngestionBatchStateMachine:
         with pytest.raises(InvalidDataTransitionError):
             transition_batch(_running_batch(), IngestionBatchStatus.FAILED, at=_LATER)
 
+    def test_zero_row_success_requires_explicit_legal_empty_result(self) -> None:
+        with pytest.raises(InvalidDataTransitionError, match="legal empty"):
+            transition_batch(
+                _running_batch(),
+                IngestionBatchStatus.SUCCEEDED,
+                at=_LATER,
+                row_count=0,
+                security_count=0,
+            )
+        succeeded = transition_batch(
+            _running_batch(),
+            IngestionBatchStatus.SUCCEEDED,
+            at=_LATER,
+            row_count=0,
+            security_count=0,
+            empty_result=EmptyResultInfo(
+                classification=LegalEmptyClassification.NO_TRADING_SESSION,
+                reason="requested interval has no open exchange day",
+            ),
+        )
+        assert succeeded.empty_result is not None
+
     def test_failed_cannot_become_succeeded(self) -> None:
         failed = transition_batch(
             _running_batch(),
             IngestionBatchStatus.FAILED,
             at=_LATER,
-            failure=BatchFailureInfo(error_type="Err", message="boom", retryable=False),
+            failure=BatchFailureInfo(
+                error_type=BatchFailureKind.INTERNAL,
+                message="boom",
+                retryable=False,
+            ),
         )
         with pytest.raises(InvalidDataTransitionError):
             transition_batch(failed, IngestionBatchStatus.SUCCEEDED, at=_LATER)
@@ -124,7 +161,11 @@ class TestIngestionBatchStateMachine:
             at=_LATER,
             row_count=50,
             security_count=1,
-            failure=BatchFailureInfo(error_type="P", message="p", retryable=True),
+            failure=BatchFailureInfo(
+                error_type=BatchFailureKind.PARTIAL_SOURCE,
+                message="p",
+                retryable=True,
+            ),
         )
         with pytest.raises(InvalidDataTransitionError):
             transition_batch(partial, IngestionBatchStatus.SUCCEEDED, at=_LATER)
@@ -133,7 +174,9 @@ class TestIngestionBatchStateMachine:
     def test_terminal_states_are_immutable(self, terminal: IngestionBatchStatus) -> None:
         if terminal is IngestionBatchStatus.RUNNING:
             return
-        failure = BatchFailureInfo(error_type="E", message="e", retryable=False)
+        failure = BatchFailureInfo(
+            error_type=BatchFailureKind.INTERNAL, message="e", retryable=False
+        )
         if terminal is IngestionBatchStatus.SUCCEEDED:
             batch = transition_batch(
                 _running_batch(), terminal, at=_LATER, row_count=1, security_count=1
@@ -162,6 +205,9 @@ class TestDatasetVersionStateMachine:
             manifest_sha256="b" * 64,
             security_count=10,
             row_count=1000,
+            coverage_start=_TRADE_DATE,
+            coverage_end=_TRADE_DATE,
+            coverage_summary={"security_count": "10"},
         )
         assert version.status is DatasetVersionStatus.VALIDATED
         assert version.manifest_sha256 == "b" * 64
@@ -171,7 +217,11 @@ class TestDatasetVersionStateMachine:
             _building_version(),
             DatasetVersionStatus.FAILED,
             at=_LATER,
-            failure=BatchFailureInfo(error_type="Q", message="bad", retryable=False),
+            failure=BatchFailureInfo(
+                error_type=BatchFailureKind.QUALITY,
+                message="bad",
+                retryable=False,
+            ),
         )
         assert version.status is DatasetVersionStatus.FAILED
 
@@ -183,6 +233,9 @@ class TestDatasetVersionStateMachine:
             manifest_sha256="b" * 64,
             security_count=10,
             row_count=1000,
+            coverage_start=_TRADE_DATE,
+            coverage_end=_TRADE_DATE,
+            coverage_summary={"security_count": "10"},
         )
         published = transition_dataset_version(
             validated,
@@ -200,6 +253,9 @@ class TestDatasetVersionStateMachine:
             manifest_sha256="b" * 64,
             security_count=10,
             row_count=1000,
+            coverage_start=_TRADE_DATE,
+            coverage_end=_TRADE_DATE,
+            coverage_summary={"security_count": "10"},
         )
         published = transition_dataset_version(
             validated,
@@ -216,7 +272,11 @@ class TestDatasetVersionStateMachine:
             _building_version(),
             DatasetVersionStatus.FAILED,
             at=_LATER,
-            failure=BatchFailureInfo(error_type="Q", message="bad", retryable=False),
+            failure=BatchFailureInfo(
+                error_type=BatchFailureKind.QUALITY,
+                message="bad",
+                retryable=False,
+            ),
         )
         with pytest.raises(InvalidDataTransitionError):
             transition_dataset_version(failed, DatasetVersionStatus.VALIDATED, at=_LATER)
@@ -296,6 +356,38 @@ class TestSourceOverrideStateMachine:
         )
         with pytest.raises(InvalidDataTransitionError):
             transition_override(rejected, SourceOverrideStatus.APPROVED, at=_LATER, actor="a")
+
+
+class TestDirectConstructionConsistency:
+    def test_direct_terminal_batch_without_terminal_fields_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="terminal"):
+            replace(_running_batch(), status=IngestionBatchStatus.SUCCEEDED)
+
+    def test_direct_published_version_without_validation_facts_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="coverage metadata"):
+            replace(_building_version(), status=DatasetVersionStatus.PUBLISHED)
+
+    def test_direct_approved_override_without_decision_facts_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="decision facts"):
+            replace(_pending_override(), status=SourceOverrideStatus.APPROVED)
+
+    def test_failure_categories_are_stable_and_distinct(self) -> None:
+        categories = {
+            BatchFailureKind.NETWORK.value,
+            BatchFailureKind.PERMISSION.value,
+            BatchFailureKind.PARSE.value,
+            BatchFailureKind.UNEXPECTED_EMPTY.value,
+        }
+        assert categories == {
+            "NETWORK_FAILURE",
+            "PERMISSION_FAILURE",
+            "PARSE_FAILURE",
+            "UNEXPECTED_EMPTY",
+        }
+
+    def test_legacy_data_only_has_an_explicit_non_xtquant_source(self) -> None:
+        assert DataSource.LEGACY_DATA_ONLY is not DataSource.XTQUANT
+        assert DataSource.LEGACY_DATA_ONLY.value == "LEGACY_DATA_ONLY"
 
 
 class TestManagedRelativePathsOnly:

@@ -1,6 +1,6 @@
 # Stage 1 数据合同
 
-状态：S1-01 已实现数据合同、schema 描述与 PyArrow 验证；Stage 1 已获实施授权并进行中，但尚未完成。本文描述目标合同，不代表全部功能已验收可用。
+状态：S1-01 主验收未通过，S1-01-R1 正在修复数据合同、schema 描述与 PyArrow 验证；Stage 1 已获实施授权并进行中，但尚未完成。本文描述目标合同，不代表功能已通过主验收。
 
 本文件固化 Stage 1 六类 Canonical 数据集的可执行合同。权威来源是 `src/quantking/data/schemas.py`（框架无关描述符）和 `src/quantking/data/adapters/canonical_schema.py`（PyArrow 映射与验证）。文档不得替代 schema 与契约测试。
 
@@ -138,8 +138,15 @@ PyArrow 验证器对以下样本的接受/拒绝行为由 `tests/data/adapters/t
 | 上市首日附近 | 接受 |
 | 退市阶段 | 接受 |
 | 复权事件 | 接受 |
-| 合法空结果（零行表，schema 匹配） | 接受 |
+| 合法空结果（零行表、schema 匹配、携带显式合法分类和非空原因） | 接受 |
+| 意外空表或未携带合法分类/原因 | 拒绝，并建模为 `UNEXPECTED_EMPTY` |
+| 网络失败、权限失败、解析失败 | 分别建模，禁止伪装成空表成功 |
 | 非法空结果（缺列/类型错） | 拒绝 |
+| Arrow 字段类型、字段顺序或 nullability 不精确匹配 | 拒绝 |
+| 未按合同 `sort_key` 排序 | 拒绝 |
+| `high`/`low` 与 OHLC 关系冲突 | 拒绝 |
+| `exchange` 与代码后缀不一致 | 拒绝 |
+| 交易、停牌、ST/*ST 或涨跌停状态互相矛盾 | 拒绝 |
 | 重复主键 | 拒绝 |
 | NaN / 无穷 | 拒绝 |
 | 错误代码（非 `000001.SZ` 形式） | 拒绝 |

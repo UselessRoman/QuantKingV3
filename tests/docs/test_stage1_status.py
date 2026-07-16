@@ -55,6 +55,32 @@ class TestStage1DocsExist:
         for code in ("S1-01", "S1-02", "S1-03", "S1-04", "S1-05", "S1-06", "S1-07", "S1-08"):
             assert code in text, f"{code} must be listed in TASKS.md"
 
+    def test_s1_01_is_failed_main_acceptance_and_r1_repair_only(self) -> None:
+        for name in ("README.md", "TASKS.md", "ACCEPTANCE.md"):
+            text = _read(_STAGE1_DIR / name)
+            assert "S1-01 主验收未通过" in text
+            assert "S1-01-R1" in text
+        tasks = _read(_STAGE1_DIR / "TASKS.md")
+        assert "不得开始 S1-02" in tasks
+
+    def test_main_acceptance_task_order_is_restored(self) -> None:
+        text = _read(_STAGE1_DIR / "README.md")
+        ordered = (
+            "S1-02 Warehouse、原子发布与查询",
+            "S1-03 XTQuant",
+            "S1-04 质量、跨源差异与 SourceOverride",
+            "S1-05 EOD、Worker、CLI 与 API",
+            "S1-06 数据中心 Web",
+            "S1-07 经授权真实样本与旧数据 DATA_ONLY 判定",
+            "S1-08 真实或明确范围 Canonical 构建及 Stage 1 最终验收",
+        )
+        positions = [text.index(item) for item in ordered]
+        assert positions == sorted(positions)
+
+    def test_offline_gates_are_not_described_as_main_acceptance(self) -> None:
+        text = _read(_STAGE1_DIR / "ACCEPTANCE.md")
+        assert "不得写成主验收通过" in text
+
     def test_stage1_acceptance_matrix_is_pending(self) -> None:
         text = _read(_STAGE1_DIR / "ACCEPTANCE.md")
         assert "进行中" in text or "未完成" in text or "待" in text, (

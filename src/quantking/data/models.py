@@ -36,6 +36,27 @@ class DataSource(StrEnum):
     BAOSTOCK = "BAOSTOCK"
     AKSHARE = "AKSHARE"
     TUSHARE = "TUSHARE"
+    LEGACY_DATA_ONLY = "LEGACY_DATA_ONLY"
+
+
+class BatchFailureKind(StrEnum):
+    """Stable ingestion failure categories exposed across adapter boundaries."""
+
+    NETWORK = "NETWORK_FAILURE"
+    PERMISSION = "PERMISSION_FAILURE"
+    PARSE = "PARSE_FAILURE"
+    UNEXPECTED_EMPTY = "UNEXPECTED_EMPTY"
+    QUALITY = "QUALITY_FAILURE"
+    PARTIAL_SOURCE = "PARTIAL_SOURCE_FAILURE"
+    INTERNAL = "INTERNAL_FAILURE"
+
+
+class LegalEmptyClassification(StrEnum):
+    """Explicit reasons for a successful zero-row supplier response."""
+
+    NO_TRADING_SESSION = "NO_TRADING_SESSION"
+    OUTSIDE_LISTING_RANGE = "OUTSIDE_LISTING_RANGE"
+    EMPTY_REQUEST_UNIVERSE = "EMPTY_REQUEST_UNIVERSE"
 
 
 class DatasetKind(StrEnum):
@@ -210,15 +231,29 @@ def _tuple_trading_dates(value: tuple[TradingDate, ...], *, field: str) -> tuple
 class BatchFailureInfo:
     """Structured failure kept on a PARTIAL or FAILED batch."""
 
-    error_type: str
+    error_type: BatchFailureKind
     message: str
     retryable: bool
 
     def __post_init__(self) -> None:
-        _text(self.error_type, field="error_type")
+        if not isinstance(self.error_type, BatchFailureKind):
+            raise TypeError("error_type must be a BatchFailureKind")
         _text(self.message, field="message")
         if not isinstance(self.retryable, bool):
             raise TypeError("retryable must be a bool")
+
+
+@dataclass(frozen=True, slots=True)
+class EmptyResultInfo:
+    """A successful zero-row result with a stable legal classification and reason."""
+
+    classification: LegalEmptyClassification
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.classification, LegalEmptyClassification):
+            raise TypeError("classification must be a LegalEmptyClassification")
+        _text(self.reason, field="empty result reason")
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +291,7 @@ class IngestionBatch:
     manifest_files: tuple[ManifestFileEntry, ...]
     failure: BatchFailureInfo | None
     job_run_id: str | None
+    empty_result: EmptyResultInfo | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.batch_id, EntityId):
@@ -273,6 +309,10 @@ class IngestionBatch:
             self, "request_params", _sorted_manifest(self.request_params, field="request_params")
         )
         object.__setattr__(self, "request_params_json", _canonical_json(self.request_params))
+        if not isinstance(self.started_at, UtcTimestamp):
+            raise TypeError("started_at must be a UtcTimestamp")
+        if self.ended_at is not None and not isinstance(self.ended_at, UtcTimestamp):
+            raise TypeError("ended_at must be a UtcTimestamp or None")
         if self.ended_at is not None and self.ended_at.value < self.started_at.value:
             raise ValueError("ended_at must not precede started_at")
         for field in ("row_count", "security_count"):
@@ -282,12 +322,45 @@ class IngestionBatch:
             ):
                 raise ValueError(f"{field} must be a non-negative integer or None")
         object.__setattr__(self, "manifest_files", tuple(self.manifest_files))
-        if self.status is IngestionBatchStatus.FAILED and self.failure is None:
-            raise ValueError("FAILED batch requires structured failure")
-        if self.status is IngestionBatchStatus.PARTIAL and self.failure is None:
-            raise ValueError("PARTIAL batch requires structured failure")
+        if any(not isinstance(item, ManifestFileEntry) for item in self.manifest_files):
+            raise TypeError("manifest_files must contain ManifestFileEntry values")
+        if self.failure is not None and not isinstance(self.failure, BatchFailureInfo):
+            raise TypeError("failure must be BatchFailureInfo or None")
+        if self.empty_result is not None and not isinstance(self.empty_result, EmptyResultInfo):
+            raise TypeError("empty_result must be EmptyResultInfo or None")
         if self.job_run_id is not None:
             _text(self.job_run_id, field="job_run_id")
+
+        if self.status is IngestionBatchStatus.RUNNING:
+            if (
+                any(
+                    value is not None
+                    for value in (self.ended_at, self.row_count, self.security_count, self.failure)
+                )
+                or self.manifest_files
+                or self.empty_result is not None
+            ):
+                raise ValueError("RUNNING batch cannot carry terminal outcome fields")
+            return
+
+        if self.ended_at is None:
+            raise ValueError("terminal batch requires ended_at")
+        if self.status in {IngestionBatchStatus.SUCCEEDED, IngestionBatchStatus.PARTIAL} and (
+            self.row_count is None or self.security_count is None
+        ):
+            raise ValueError("SUCCEEDED/PARTIAL batch requires row_count and security_count")
+        if self.status in {IngestionBatchStatus.FAILED, IngestionBatchStatus.PARTIAL}:
+            if self.failure is None:
+                raise ValueError("FAILED/PARTIAL batch requires structured failure")
+            if self.empty_result is not None:
+                raise ValueError("FAILED/PARTIAL batch cannot carry a legal empty result")
+        elif self.failure is not None:
+            raise ValueError("SUCCEEDED batch must not carry a failure")
+        if self.status is IngestionBatchStatus.SUCCEEDED:
+            if self.row_count == 0 and self.empty_result is None:
+                raise ValueError("zero-row SUCCEEDED batch requires explicit legal empty result")
+            if self.row_count != 0 and self.empty_result is not None:
+                raise ValueError("non-empty SUCCEEDED batch cannot carry empty_result")
 
     @classmethod
     def running(
@@ -318,6 +391,7 @@ class IngestionBatch:
             manifest_files=(),
             failure=None,
             job_run_id=job_run_id,
+            empty_result=None,
         )
 
 
@@ -339,6 +413,9 @@ class DatasetVersion:
     manifest_sha256: str | None
     security_count: int | None
     row_count: int | None
+    coverage_start: TradingDate | None
+    coverage_end: TradingDate | None
+    coverage_summary: Mapping[str, str]
     failure: BatchFailureInfo | None
 
     def __post_init__(self) -> None:
@@ -353,12 +430,27 @@ class DatasetVersion:
         _text(self.schema_version, field="schema_version")
         _text(self.code_version, field="code_version")
         _text(self.rule_version, field="rule_version")
-        if self.parent_version_id is not None and not isinstance(self.parent_version_id, EntityId):
-            raise TypeError("parent_version_id must be an EntityId or None")
+        if self.parent_version_id is not None:
+            if not isinstance(self.parent_version_id, EntityId):
+                raise TypeError("parent_version_id must be an EntityId or None")
+            if self.parent_version_id.namespace != "data_version":
+                raise ValueError("parent_version_id must use the data_version namespace")
+            if self.parent_version_id == self.version_id:
+                raise ValueError("parent_version_id cannot reference the version itself")
         object.__setattr__(self, "input_batch_ids", tuple(self.input_batch_ids))
+        if len(set(self.input_batch_ids)) != len(self.input_batch_ids):
+            raise ValueError("input_batch_ids must be unique")
         for batch_id in self.input_batch_ids:
             if not isinstance(batch_id, EntityId):
                 raise TypeError("input_batch_ids must contain EntityId values")
+            if batch_id.namespace != "data_batch":
+                raise ValueError("input_batch_ids must use the data_batch namespace")
+        if not isinstance(self.created_at, UtcTimestamp):
+            raise TypeError("created_at must be a UtcTimestamp")
+        for field in ("validated_at", "published_at"):
+            value = getattr(self, field)
+            if value is not None and not isinstance(value, UtcTimestamp):
+                raise TypeError(f"{field} must be a UtcTimestamp or None")
         if self.manifest_sha256 is not None:
             object.__setattr__(
                 self, "manifest_sha256", _sha256(self.manifest_sha256, field="manifest_sha256")
@@ -369,8 +461,73 @@ class DatasetVersion:
                 not isinstance(value, int) or isinstance(value, bool) or value < 0
             ):
                 raise ValueError(f"{field} must be a non-negative integer or None")
-        if self.status is DatasetVersionStatus.FAILED and self.failure is None:
-            raise ValueError("FAILED version requires structured failure")
+        if self.coverage_start is not None and not isinstance(self.coverage_start, TradingDate):
+            raise TypeError("coverage_start must be a TradingDate or None")
+        if self.coverage_end is not None and not isinstance(self.coverage_end, TradingDate):
+            raise TypeError("coverage_end must be a TradingDate or None")
+        if (self.coverage_start is None) != (self.coverage_end is None):
+            raise ValueError("coverage_start and coverage_end must both be set or both be None")
+        if (
+            self.coverage_start is not None
+            and self.coverage_end is not None
+            and self.coverage_end.value < self.coverage_start.value
+        ):
+            raise ValueError("coverage_end must not precede coverage_start")
+        object.__setattr__(
+            self,
+            "coverage_summary",
+            _sorted_manifest(self.coverage_summary, field="coverage_summary"),
+        )
+        if self.failure is not None and not isinstance(self.failure, BatchFailureInfo):
+            raise TypeError("failure must be BatchFailureInfo or None")
+
+        if self.validated_at is not None and self.validated_at.value < self.created_at.value:
+            raise ValueError("validated_at must not precede created_at")
+        if self.published_at is not None and (
+            self.validated_at is None or self.published_at.value < self.validated_at.value
+        ):
+            raise ValueError("published_at requires and must not precede validated_at")
+
+        if self.status is DatasetVersionStatus.BUILDING:
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        self.validated_at,
+                        self.published_at,
+                        self.manifest_sha256,
+                        self.security_count,
+                        self.row_count,
+                        self.coverage_start,
+                        self.coverage_end,
+                        self.failure,
+                    )
+                )
+                or self.coverage_summary
+            ):
+                raise ValueError("BUILDING version cannot carry validation or failure outcome")
+        elif self.status in {DatasetVersionStatus.VALIDATED, DatasetVersionStatus.PUBLISHED}:
+            if (
+                self.validated_at is None
+                or self.manifest_sha256 is None
+                or self.security_count is None
+                or self.row_count is None
+                or not self.coverage_summary
+            ):
+                raise ValueError("VALIDATED/PUBLISHED version requires complete coverage metadata")
+            if self.row_count > 0 and self.coverage_start is None:
+                raise ValueError("non-empty VALIDATED/PUBLISHED version requires coverage dates")
+            if self.failure is not None:
+                raise ValueError("VALIDATED/PUBLISHED version cannot carry failure")
+            if self.status is DatasetVersionStatus.VALIDATED and self.published_at is not None:
+                raise ValueError("VALIDATED version cannot carry published_at")
+            if self.status is DatasetVersionStatus.PUBLISHED and self.published_at is None:
+                raise ValueError("PUBLISHED version requires published_at")
+        elif self.status is DatasetVersionStatus.FAILED:
+            if self.failure is None:
+                raise ValueError("FAILED version requires structured failure")
+            if self.published_at is not None:
+                raise ValueError("FAILED version cannot carry published_at")
 
     @classmethod
     def building(
@@ -401,6 +558,9 @@ class DatasetVersion:
             manifest_sha256=None,
             security_count=None,
             row_count=None,
+            coverage_start=None,
+            coverage_end=None,
+            coverage_summary={},
             failure=None,
         )
 
@@ -451,12 +611,20 @@ class QualityRun:
     def __post_init__(self) -> None:
         if not isinstance(self.run_id, EntityId) or self.run_id.namespace != "data_quality":
             raise ValueError("run_id must use the data_quality namespace")
-        if not isinstance(self.version_id, EntityId):
-            raise TypeError("version_id must be an EntityId")
+        if not isinstance(self.version_id, EntityId) or self.version_id.namespace != "data_version":
+            raise ValueError("version_id must use the data_version namespace")
         if not isinstance(self.status, QualityRunStatus):
             raise TypeError("status must be a QualityRunStatus")
         _text(self.rule_version, field="rule_version")
+        if not isinstance(self.started_at, UtcTimestamp):
+            raise TypeError("started_at must be a UtcTimestamp")
+        if self.ended_at is not None and not isinstance(self.ended_at, UtcTimestamp):
+            raise TypeError("ended_at must be a UtcTimestamp or None")
+        if self.ended_at is not None and self.ended_at.value < self.started_at.value:
+            raise ValueError("ended_at must not precede started_at")
         object.__setattr__(self, "results", tuple(self.results))
+        if any(not isinstance(item, QualityResult) for item in self.results):
+            raise TypeError("results must contain QualityResult values")
         if self.summary_report_relative_path is not None:
             object.__setattr__(
                 self,
@@ -465,6 +633,23 @@ class QualityRun:
                     self.summary_report_relative_path, field="summary_report_relative_path"
                 ),
             )
+        if self.failure is not None and not isinstance(self.failure, BatchFailureInfo):
+            raise TypeError("failure must be BatchFailureInfo or None")
+        if self.status is QualityRunStatus.RUNNING:
+            if self.ended_at is not None or self.results or self.failure is not None:
+                raise ValueError("RUNNING quality run cannot carry terminal outcome")
+        elif self.ended_at is None:
+            raise ValueError("terminal quality run requires ended_at")
+        elif self.status is QualityRunStatus.PASSED:
+            if not self.results or any(not result.passed for result in self.results):
+                raise ValueError("PASSED quality run requires non-empty passing results")
+            if self.failure is not None:
+                raise ValueError("PASSED quality run cannot carry failure")
+        elif self.status is QualityRunStatus.FAILED:
+            if self.failure is None and not any(not result.passed for result in self.results):
+                raise ValueError("FAILED quality run requires failure or a failed result")
+        elif self.status is QualityRunStatus.SKIPPED and (self.results or self.failure is not None):
+            raise ValueError("SKIPPED quality run cannot carry results or failure")
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,8 +669,8 @@ class DifferenceReport:
     def __post_init__(self) -> None:
         if not isinstance(self.report_id, EntityId) or self.report_id.namespace != "data_diff":
             raise ValueError("report_id must use the data_diff namespace")
-        if not isinstance(self.version_id, EntityId):
-            raise TypeError("version_id must be an EntityId")
+        if not isinstance(self.version_id, EntityId) or self.version_id.namespace != "data_version":
+            raise ValueError("version_id must use the data_version namespace")
         if not isinstance(self.primary_source, DataSource):
             raise TypeError("primary_source must be a DataSource")
         if not isinstance(self.fallback_source, DataSource):
@@ -514,6 +699,9 @@ class SourceOverride:
 
     override_id: EntityId
     dataset: DatasetKind
+    difference_report_id: EntityId
+    primary_batch_id: EntityId
+    fallback_batch_id: EntityId
     primary_source: DataSource
     fallback_source: DataSource
     status: SourceOverrideStatus
@@ -535,6 +723,16 @@ class SourceOverride:
             raise ValueError("override_id must use the data_override namespace")
         if not isinstance(self.dataset, DatasetKind):
             raise TypeError("dataset must be a DatasetKind")
+        for field, namespace in (
+            ("difference_report_id", "data_diff"),
+            ("primary_batch_id", "data_batch"),
+            ("fallback_batch_id", "data_batch"),
+        ):
+            value = getattr(self, field)
+            if not isinstance(value, EntityId) or value.namespace != namespace:
+                raise ValueError(f"{field} must use the {namespace} namespace")
+        if self.primary_batch_id == self.fallback_batch_id:
+            raise ValueError("primary_batch_id and fallback_batch_id must differ")
         if not isinstance(self.primary_source, DataSource):
             raise TypeError("primary_source must be a DataSource")
         if not isinstance(self.fallback_source, DataSource):
@@ -549,15 +747,45 @@ class SourceOverride:
         )
         object.__setattr__(self, "fields", _tuple_text(self.fields, field="fields"))
         _text(self.reason, field="reason")
-        if self.status is SourceOverrideStatus.APPLIED:
-            if self.applied_version_id is None:
-                raise OverrideNotApplicableError(
-                    "APPLIED override requires a new applied_version_id"
-                )
-            if not isinstance(self.applied_version_id, EntityId):
-                raise TypeError("applied_version_id must be an EntityId")
+        if not isinstance(self.created_at, UtcTimestamp):
+            raise TypeError("created_at must be a UtcTimestamp")
+        for field in ("approved_at", "applied_at"):
+            value = getattr(self, field)
+            if value is not None and not isinstance(value, UtcTimestamp):
+                raise TypeError(f"{field} must be a UtcTimestamp or None")
         if self.approved_by is not None:
             _text(self.approved_by, field="approved_by")
+        if self.applied_version_id is not None and (
+            not isinstance(self.applied_version_id, EntityId)
+            or self.applied_version_id.namespace != "data_version"
+        ):
+            raise ValueError("applied_version_id must use the data_version namespace")
+
+        if self.status is SourceOverrideStatus.PENDING:
+            if any(
+                value is not None
+                for value in (
+                    self.approved_at,
+                    self.approved_by,
+                    self.applied_at,
+                    self.applied_version_id,
+                )
+            ):
+                raise ValueError("PENDING override cannot carry decision or application facts")
+        elif self.status in {SourceOverrideStatus.APPROVED, SourceOverrideStatus.REJECTED}:
+            if self.approved_at is None or self.approved_by is None:
+                raise ValueError("APPROVED/REJECTED override requires decision facts")
+            if self.applied_at is not None or self.applied_version_id is not None:
+                raise ValueError("APPROVED/REJECTED override cannot carry application facts")
+        elif self.status is SourceOverrideStatus.APPLIED:
+            if self.approved_at is None or self.approved_by is None:
+                raise OverrideNotApplicableError("APPLIED override requires approval facts")
+            if self.applied_at is None or self.applied_version_id is None:
+                raise OverrideNotApplicableError(
+                    "APPLIED override requires application facts and a new version"
+                )
+            if self.applied_at.value < self.approved_at.value:
+                raise ValueError("applied_at must not precede approved_at")
 
     @classmethod
     def pending(
@@ -565,6 +793,9 @@ class SourceOverride:
         *,
         override_id: EntityId,
         dataset: DatasetKind,
+        difference_report_id: EntityId,
+        primary_batch_id: EntityId,
+        fallback_batch_id: EntityId,
         primary_source: DataSource,
         fallback_source: DataSource,
         scope_codes: tuple[str, ...],
@@ -577,6 +808,9 @@ class SourceOverride:
         return cls(
             override_id=override_id,
             dataset=dataset,
+            difference_report_id=difference_report_id,
+            primary_batch_id=primary_batch_id,
+            fallback_batch_id=fallback_batch_id,
             primary_source=primary_source,
             fallback_source=fallback_source,
             status=SourceOverrideStatus.PENDING,
@@ -606,6 +840,7 @@ def transition_batch(
     security_count: int | None = None,
     manifest_files: tuple[ManifestFileEntry, ...] = (),
     failure: BatchFailureInfo | None = None,
+    empty_result: EmptyResultInfo | None = None,
 ) -> IngestionBatch:
     """Apply the authoritative ingestion-batch transition table."""
     if target not in BATCH_TRANSITIONS[batch.status]:
@@ -619,6 +854,12 @@ def transition_batch(
         raise InvalidDataTransitionError("PARTIAL batch requires structured failure")
     if target is IngestionBatchStatus.SUCCEEDED and failure is not None:
         raise InvalidDataTransitionError("SUCCEEDED batch must not carry a failure")
+    if target is IngestionBatchStatus.SUCCEEDED and row_count == 0 and empty_result is None:
+        raise InvalidDataTransitionError(
+            "zero-row SUCCEEDED batch requires explicit legal empty result"
+        )
+    if target is not IngestionBatchStatus.SUCCEEDED and empty_result is not None:
+        raise InvalidDataTransitionError("only SUCCEEDED batch may carry a legal empty result")
     return replace(
         batch,
         status=target,
@@ -627,6 +868,7 @@ def transition_batch(
         security_count=security_count if target in _BATCH_TERMINAL else batch.security_count,
         manifest_files=manifest_files if target in _BATCH_TERMINAL else batch.manifest_files,
         failure=failure,
+        empty_result=empty_result,
     )
 
 
@@ -638,6 +880,9 @@ def transition_dataset_version(
     manifest_sha256: str | None = None,
     security_count: int | None = None,
     row_count: int | None = None,
+    coverage_start: TradingDate | None = None,
+    coverage_end: TradingDate | None = None,
+    coverage_summary: Mapping[str, str] | None = None,
     failure: BatchFailureInfo | None = None,
 ) -> DatasetVersion:
     """Apply the authoritative dataset-version transition table."""
@@ -660,6 +905,8 @@ def transition_dataset_version(
         raise InvalidDataTransitionError("FAILED version requires structured failure")
     if target is DatasetVersionStatus.VALIDATED and manifest_sha256 is None:
         raise InvalidDataTransitionError("VALIDATED requires a manifest SHA-256")
+    if target is DatasetVersionStatus.VALIDATED and not coverage_summary:
+        raise InvalidDataTransitionError("VALIDATED requires a coverage summary")
     if (
         target is DatasetVersionStatus.PUBLISHED
         and version.status is not DatasetVersionStatus.VALIDATED
@@ -677,6 +924,15 @@ def transition_dataset_version(
         if target is DatasetVersionStatus.VALIDATED
         else version.security_count,
         row_count=row_count if target is DatasetVersionStatus.VALIDATED else version.row_count,
+        coverage_start=coverage_start
+        if target is DatasetVersionStatus.VALIDATED
+        else version.coverage_start,
+        coverage_end=coverage_end
+        if target is DatasetVersionStatus.VALIDATED
+        else version.coverage_end,
+        coverage_summary=coverage_summary
+        if target is DatasetVersionStatus.VALIDATED and coverage_summary is not None
+        else version.coverage_summary,
         failure=failure,
     )
 
