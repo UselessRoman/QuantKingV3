@@ -6,6 +6,7 @@ import hashlib
 import json
 import multiprocessing
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from quantking.data.adapters.persistence.maintenance import (
     MigrationCheckpoint,
     MigrationFailureError,
     MigrationRequest,
+    _write_failure,
     migrate_existing_database,
 )
 from quantking.jobs.adapters.persistence.sqlite import (
@@ -34,7 +36,7 @@ from quantking.jobs.backup.services import (
 
 _NOW = UtcTimestamp(datetime(2026, 7, 16, 3, 0, tzinfo=UTC))
 _STAGE0_REVISION = "20260715_0001"
-_HEAD = "20260716_0002"
+_HEAD = "20260716_0003"
 
 
 def _alembic_config(database: Path) -> Config:
@@ -133,6 +135,18 @@ def _child_attempt(request: MigrationRequest, queue: Any) -> None:
         queue.put(error.code.value)
     else:
         queue.put("unexpected_success")
+
+
+def _artifact_inventory(*paths: Path) -> dict[str, bytes]:
+    inventory: dict[str, bytes] = {}
+    for index, path in enumerate(paths):
+        if path.is_file():
+            inventory[f"{index}:{path.name}"] = path.read_bytes()
+            continue
+        inventory[f"{index}:directory"] = b""
+        for file_path in sorted(item for item in path.rglob("*") if item.is_file()):
+            inventory[f"{index}:{file_path.relative_to(path).as_posix()}"] = file_path.read_bytes()
+    return inventory
 
 
 class TestCompleteSnapshotAndEvidence:
@@ -344,8 +358,149 @@ class TestDuplicateExecution:
         database = _build_stage0_database(tmp_path)
         request = _request(tmp_path, database, run_id="mig-duplicate")
         first = migrate_existing_database(request)
-        evidence_before = first.evidence_path.read_bytes()
+        artifacts = (
+            first.snapshot_path,
+            first.isolated_restore_path,
+            first.isolated_path.parent,
+            first.evidence_path,
+            first.evidence_path.with_suffix(".sha256"),
+        )
+        evidence_before = _artifact_inventory(*artifacts)
         with pytest.raises(MigrationFailureError) as exc_info:
             migrate_existing_database(request)
         assert exc_info.value.code is MaintenanceFailureCode.RUN_ID_ALREADY_USED
-        assert first.evidence_path.read_bytes() == evidence_before
+        assert _artifact_inventory(*artifacts) == evidence_before
+
+    @pytest.mark.parametrize(
+        "artifact",
+        (
+            "snapshot",
+            "isolated_restore",
+            "isolated_migration",
+            "success_evidence",
+            "success_evidence_sha",
+            "failure_evidence",
+        ),
+    )
+    def test_any_existing_run_artifact_reserves_run_id_before_side_effects(
+        self, tmp_path: Path, artifact: str
+    ) -> None:
+        database = _build_stage0_database(tmp_path)
+        run_id = f"mig-existing-{artifact.replace('_', '-')}"
+        request = _request(tmp_path, database, run_id=run_id)
+        evidence = request.snapshot_root / "migration-evidence" / f"{run_id}.json"
+        artifacts = {
+            "snapshot": request.snapshot_root / run_id,
+            "isolated_restore": request.isolated_root / run_id,
+            "isolated_migration": request.isolated_root / f"{run_id}-migration",
+            "success_evidence": evidence,
+            "success_evidence_sha": evidence.with_suffix(".sha256"),
+            "failure_evidence": request.snapshot_root / "migration-failures" / run_id,
+        }
+        existing = artifacts[artifact]
+        if artifact in {"success_evidence", "success_evidence_sha"}:
+            existing.parent.mkdir(parents=True)
+            existing.write_bytes(b"immutable-existing-evidence")
+        else:
+            existing.mkdir(parents=True)
+
+        with pytest.raises(MigrationFailureError) as exc_info:
+            migrate_existing_database(request)
+
+        assert exc_info.value.code is MaintenanceFailureCode.RUN_ID_ALREADY_USED
+        assert _revision(database) == _STAGE0_REVISION
+        assert not database.with_name(f".{database.name}.migration.lock").exists()
+
+    def test_failure_before_snapshot_occupies_run_id_forever(self, tmp_path: Path) -> None:
+        database = _build_stage0_database(tmp_path)
+        request = replace(
+            _request(tmp_path, database, run_id="mig-failed-used"),
+            expected_snapshot_revision="forged_revision",
+        )
+        with pytest.raises(MigrationFailureError) as first:
+            migrate_existing_database(request)
+        assert first.value.code is MaintenanceFailureCode.SNAPSHOT_REVISION_MISMATCH
+        assert first.value.evidence_path is not None
+        evidence_before = first.value.evidence_path.read_bytes()
+
+        with pytest.raises(MigrationFailureError) as repeated:
+            migrate_existing_database(request)
+
+        assert repeated.value.code is MaintenanceFailureCode.RUN_ID_ALREADY_USED
+        assert first.value.evidence_path.read_bytes() == evidence_before
+        assert _revision(database) == _STAGE0_REVISION
+
+    def test_failed_run_id_cannot_retry_successfully(self, tmp_path: Path) -> None:
+        database = _build_stage0_database(tmp_path)
+        failed_request = replace(
+            _request(tmp_path, database, run_id="mig-failed-retry"),
+            expected_snapshot_revision="forged_revision",
+        )
+        with pytest.raises(MigrationFailureError) as first:
+            migrate_existing_database(failed_request)
+        assert first.value.code is MaintenanceFailureCode.SNAPSHOT_REVISION_MISMATCH
+
+        corrected_request = replace(
+            failed_request,
+            expected_snapshot_revision=_STAGE0_REVISION,
+        )
+        with pytest.raises(MigrationFailureError) as repeated:
+            migrate_existing_database(corrected_request)
+
+        assert repeated.value.code is MaintenanceFailureCode.RUN_ID_ALREADY_USED
+        assert _revision(database) == _STAGE0_REVISION
+
+
+class TestFailureEvidenceContract:
+    def test_failure_record_is_complete_current_and_redacted(self, tmp_path: Path) -> None:
+        database = _build_stage0_database(tmp_path)
+        request = replace(
+            _request(tmp_path, database, run_id="mig-failure-contract"),
+            expected_snapshot_revision="ATTACK_INPUT",
+        )
+        before = datetime.now(UTC)
+        with pytest.raises(MigrationFailureError) as exc_info:
+            migrate_existing_database(request)
+        after = datetime.now(UTC)
+
+        assert exc_info.value.evidence_path is not None
+        record = json.loads(exc_info.value.evidence_path.read_text(encoding="utf-8"))
+        assert set(record) == {
+            "schema_version",
+            "run_id",
+            "error_code",
+            "message",
+            "failed_at",
+        }
+        assert record["schema_version"] == "1"
+        assert record["run_id"] == request.run_id
+        assert record["error_code"] == MaintenanceFailureCode.SNAPSHOT_REVISION_MISMATCH.value
+        assert record["message"] == "source revision credential did not match"
+        failed_at = UtcTimestamp.from_iso(record["failed_at"])
+        assert before <= failed_at.value <= after
+        rendered = json.dumps(record, ensure_ascii=False)
+        assert str(database) not in rendered
+        assert "ATTACK_INPUT" not in rendered
+
+    def test_failure_writer_never_overwrites_an_existing_record(self, tmp_path: Path) -> None:
+        directory = tmp_path / "migration-failures" / "mig-failure-writer"
+        first = _write_failure(
+            directory,
+            "mig-failure-writer",
+            MaintenanceFailureCode.SNAPSHOT_FAILED,
+        )
+        first_bytes = first.read_bytes()
+
+        second = _write_failure(
+            directory,
+            "mig-failure-writer",
+            MaintenanceFailureCode.ORIGINAL_MIGRATION_FAILED,
+        )
+
+        assert first.name == "failure.json"
+        assert second.name == "failure-0.json"
+        assert second != first
+        assert first.read_bytes() == first_bytes
+        assert json.loads(second.read_text(encoding="utf-8"))["error_code"] == (
+            MaintenanceFailureCode.ORIGINAL_MIGRATION_FAILED.value
+        )

@@ -182,4 +182,4 @@ SQLite 使用 WAL 模式、连接级 `busy_timeout`、短事务和针对锁冲�
 
 ## 状态声明
 
-以上除已验收的 Stage 0 工程基线外均为目标结构。当前只确认锁定环境、通用持久任务与日志、最小本机 Web 壳、备份恢复和迁移清单等 Stage 0 能力；Stage 1 S1-01 主验收未通过，数据合同、元数据持久化与安全迁移基础正在进行 S1-01-R1 修复，尚未通过主验收。Stage 1 其余业务能力（Warehouse 发布与查询、数据抓取、质量、EOD、Web 页面等）尚未实现。各模块状态以 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) 和 [Stage 0 最终验收报告](stage0/FINAL_ACCEPTANCE.md) 为准。
+以上除已验收的 Stage 0 工程基线外均为目标结构。当前只确认锁定环境、通用持久任务与日志、最小本机 Web 壳、备份恢复和迁移清单等 Stage 0 能力；Stage 1 S1-01-R1 主验收未通过，数据合同、元数据持久化与安全迁移基础正在进行 S1-01-R2 修复并待主验收。Stage 1 其余业务能力（Warehouse 发布与查询、数据抓取、质量、EOD、Web 页面等）尚未实现。各模块状态以 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) 和 [Stage 0 最终验收报告](stage0/FINAL_ACCEPTANCE.md) 为准。

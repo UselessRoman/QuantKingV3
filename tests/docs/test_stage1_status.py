@@ -55,11 +55,12 @@ class TestStage1DocsExist:
         for code in ("S1-01", "S1-02", "S1-03", "S1-04", "S1-05", "S1-06", "S1-07", "S1-08"):
             assert code in text, f"{code} must be listed in TASKS.md"
 
-    def test_s1_01_is_failed_main_acceptance_and_r1_repair_only(self) -> None:
+    def test_s1_01_is_failed_r1_main_acceptance_and_r2_repair_only(self) -> None:
         for name in ("README.md", "TASKS.md", "ACCEPTANCE.md"):
             text = _read(_STAGE1_DIR / name)
-            assert "S1-01 主验收未通过" in text
-            assert "S1-01-R1" in text
+            assert "S1-01-R1 主验收未通过" in text
+            assert "S1-01-R2" in text
+            assert "待主验收" in text
         tasks = _read(_STAGE1_DIR / "TASKS.md")
         assert "不得开始 S1-02" in tasks
 

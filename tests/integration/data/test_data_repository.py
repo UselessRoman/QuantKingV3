@@ -427,6 +427,121 @@ class TestSourceOverrideTransactions:
                 )
                 connection.commit()
 
+    def test_database_rejects_applied_version_without_direct_parent_and_rolls_back_audit(
+        self, factory: DataSqliteUnitOfWorkFactory
+    ) -> None:
+        pending, _, fallback = _persist_override_graph(factory)
+        unrelated = _building_version((fallback.batch_id,), created_at=_LATER)
+        with factory() as uow:
+            uow.data.approve_override(str(pending.override_id), actor="analyst", at=_DECIDED)
+            uow.data.save_version(unrelated)
+            uow.commit()
+
+        with pytest.raises(IntegrityError), factory() as uow:
+            connection = uow.data._session.connection()
+            connection.exec_driver_sql(
+                "INSERT INTO audit_records (actor, entity, action, correlation_id, "
+                "occurred_at, details_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "attacker",
+                    str(pending.override_id),
+                    "override_applied",
+                    str(pending.override_id),
+                    _LATER.to_iso(),
+                    "{}",
+                ),
+            )
+            connection.exec_driver_sql(
+                "UPDATE source_overrides SET status='APPLIED', applied_at=?, "
+                "applied_version_id=? WHERE override_id=?",
+                (_LATER.to_iso(), str(unrelated.version_id), str(pending.override_id)),
+            )
+            uow.commit()
+
+        with factory() as uow:
+            loaded = uow.data.get_override(str(pending.override_id))
+            audits = uow.data.list_audits(action="override_applied", limit=10)
+        assert loaded.status is SourceOverrideStatus.APPROVED
+        assert audits == []
+
+    def test_database_rejects_applied_version_from_another_dataset(
+        self, factory: DataSqliteUnitOfWorkFactory
+    ) -> None:
+        pending, _, _ = _persist_override_graph(factory)
+        calendar_batch = _succeeded_batch(dataset=DatasetKind.EXCHANGE_CALENDAR)
+        calendar_version = _building_version(
+            (calendar_batch.batch_id,),
+            dataset=DatasetKind.EXCHANGE_CALENDAR,
+            created_at=_LATER,
+        )
+        with factory() as uow:
+            uow.data.approve_override(str(pending.override_id), actor="analyst", at=_DECIDED)
+            uow.data.save_batch(calendar_batch)
+            uow.data.save_version(calendar_version)
+            uow.commit()
+
+        with factory() as uow:
+            connection = uow.data._session.connection()
+            with pytest.raises(IntegrityError):
+                connection.exec_driver_sql(
+                    "UPDATE source_overrides SET status='APPLIED', applied_at=?, "
+                    "applied_version_id=? WHERE override_id=?",
+                    (
+                        _LATER.to_iso(),
+                        str(calendar_version.version_id),
+                        str(pending.override_id),
+                    ),
+                )
+
+    def test_database_rejects_direct_child_created_before_approval(
+        self, factory: DataSqliteUnitOfWorkFactory
+    ) -> None:
+        pending, compared, fallback = _persist_override_graph(factory)
+        stale_child = _building_version(
+            (fallback.batch_id,),
+            parent_version_id=compared.version_id,
+            created_at=_NOW,
+        )
+        with factory() as uow:
+            uow.data.save_version(stale_child)
+            uow.data.approve_override(str(pending.override_id), actor="analyst", at=_DECIDED)
+            uow.commit()
+
+        with factory() as uow:
+            connection = uow.data._session.connection()
+            with pytest.raises(IntegrityError):
+                connection.exec_driver_sql(
+                    "UPDATE source_overrides SET status='APPLIED', applied_at=?, "
+                    "applied_version_id=? WHERE override_id=?",
+                    (_LATER.to_iso(), str(stale_child.version_id), str(pending.override_id)),
+                )
+
+    def test_repository_rejects_unrelated_version_without_partial_application(
+        self, factory: DataSqliteUnitOfWorkFactory
+    ) -> None:
+        pending, _, fallback = _persist_override_graph(factory)
+        unrelated = _building_version((fallback.batch_id,), created_at=_LATER)
+        with factory() as uow:
+            uow.data.approve_override(str(pending.override_id), actor="analyst", at=_DECIDED)
+            uow.data.save_version(unrelated)
+            uow.commit()
+
+        with factory() as uow:
+            with pytest.raises(OverrideNotApplicableError, match="same-dataset child"):
+                uow.data.apply_override(
+                    str(pending.override_id),
+                    actor="analyst",
+                    at=_LATER,
+                    applied_version_id=str(unrelated.version_id),
+                )
+            uow.commit()
+
+        with factory() as uow:
+            loaded = uow.data.get_override(str(pending.override_id))
+            audits = uow.data.list_audits(action="override_applied", limit=10)
+        assert loaded.status is SourceOverrideStatus.APPROVED
+        assert audits == []
+
 
 class TestNoParquetInSqlite:
     def test_no_blob_or_parquet_columns(self, tmp_path: Path) -> None:

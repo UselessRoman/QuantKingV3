@@ -24,7 +24,7 @@ from alembic.config import Config
 from sqlalchemy import Connection
 
 from quantking.common.paths import RuntimePaths
-from quantking.common.time import UtcTimestamp
+from quantking.common.time import UtcTimestamp, utc_now
 from quantking.data.adapters.persistence.sqlite import create_data_engine
 from quantking.jobs.adapters.persistence.sqlite import _REPOSITORY_ROOT
 from quantking.jobs.backup.adapters.sqlite import SQLiteOnlineBackup
@@ -170,6 +170,7 @@ def migrate_existing_database(
         isolated_work_dir,
         evidence_path,
         evidence_sha_path,
+        failure_dir,
     )
 
     with _maintenance_lock(request.database_path, request.run_id):
@@ -574,20 +575,27 @@ def _verify_evidence(
 
 
 def _write_failure(directory: Path, run_id: str, code: MaintenanceFailureCode) -> Path:
+    if not isinstance(run_id, str) or _RUN_ID.fullmatch(run_id) is None or ".." in run_id:
+        raise MigrationFailureError(MaintenanceFailureCode.INVALID_REQUEST)
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / _FAILURE_FILE
     record = {
         "schema_version": "1",
         "run_id": run_id,
         "error_code": code.value,
         "message": _FAILURE_MESSAGES[code],
+        "failed_at": utc_now().to_iso(),
     }
     payload = _canonical_bytes(record)
-    try:
-        with path.open("xb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except FileExistsError:
+    index = -1
+    while True:
+        name = _FAILURE_FILE if index < 0 else f"failure-{index}.json"
+        path = directory / name
+        try:
+            with path.open("xb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except FileExistsError:
+            index += 1
+            continue
         return path
-    return path

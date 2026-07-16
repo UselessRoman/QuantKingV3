@@ -1,4 +1,4 @@
-"""Stage 1 R1 metadata migrations from a new DB and the Stage 0 revision."""
+"""Stage 1 R2 metadata migrations from a new DB and the Stage 0 revision."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ STAGE1_TABLES = {
     "source_overrides",
 }
 STAGE0_TABLES = {"job_runs", "job_dependencies", "job_events", "audit_records"}
-HEAD = "20260716_0002"
+HEAD = "20260716_0003"
 
 
 def _alembic_config(database: Path) -> Config:
@@ -55,7 +55,7 @@ def _revision(database: Path) -> str:
     return str(row[0])
 
 
-def test_new_database_initializes_to_r1_head_with_lineage_tables(tmp_path: Path) -> None:
+def test_new_database_initializes_to_r2_head_with_lineage_tables(tmp_path: Path) -> None:
     database = tmp_path / "stage1.db"
     initialize_database(database)
     engine = create_sqlite_engine(database, busy_timeout_ms=250)
@@ -80,7 +80,7 @@ def test_new_database_initializes_to_r1_head_with_lineage_tables(tmp_path: Path)
     assert _revision(database) == HEAD
 
 
-def test_stage0_revision_upgrades_to_r1_head(tmp_path: Path) -> None:
+def test_stage0_revision_upgrades_to_r2_head(tmp_path: Path) -> None:
     database = tmp_path / "upgrade.db"
     _reserve_new_database(database)
     _upgrade(database, "20260715_0001")
