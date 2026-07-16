@@ -1,7 +1,7 @@
 # Stage 0 本地 Web 壳契约
 
-状态：S0-04 已实现，并通过开发 agent 定向检查和主 agent 独立验收；S0-07
-全量复跑仍未完成。这不是 Stage 0 完成结论，Stage 1 未开始。
+状态：S0-04 已实现，并通过开发 agent、主 agent 和 S0-07 的完整复核；Stage 0 完成，
+Stage 1 未开始。
 
 ## 边界
 
@@ -42,5 +42,5 @@ SSE 每批仍通过持久应用端口查询，不使用进程内 Worker 总线�
 - `npm run build`
 - `npm run test:e2e`
 
-主 agent 已独立复跑后端、前端、生产构建、质量检查和本机 Edge Playwright；S0-07
-仍须复跑全阶段矩阵，且只有 S0-07 能作 Stage 0 完成判断。
+S0-07 已再次复跑后端、前端、生产构建、质量检查和本机 Edge Playwright：Vitest
+`8 passed`，真实 Microsoft Edge Playwright `1 passed`。

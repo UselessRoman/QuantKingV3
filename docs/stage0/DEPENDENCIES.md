@@ -49,7 +49,7 @@ Stage 0 的队列仍按架构决策使用 SQLite。锁文件中没有 Celery。
 |---|---:|---|---|---|---|---|
 | React | 19.2.7 | S0-04 UI 运行时 | 活跃稳定线；MIT | 已安装 | 构建/运行离线 | Preact（与已确认栈不同） |
 | React DOM | 19.2.7 | 浏览器渲染 | 活跃稳定线；MIT | 已安装 | 构建/运行离线 | Preact compat |
-| Playwright Test | 1.61.1 | 关键浏览器 E2E | 活跃稳定；Apache-2.0 | 声明 Node >=18，已安装 | 浏览器二进制需另行缓存；S0-01 无测试通过不启动浏览器 | WebdriverIO |
+| Playwright Test | 1.61.1 | 关键浏览器 E2E | 活跃稳定；Apache-2.0 | 声明 Node >=18，已安装；S0-04/S0-07 本机 Edge 验收通过 | 使用已安装 Microsoft Edge，不下载浏览器 | WebdriverIO |
 | Testing Library jest-dom | 6.9.1 | DOM 断言 | 活跃稳定；MIT | 声明 Node >=14，已安装 | 运行离线 | 原生 DOM 断言 |
 | Testing Library React | 16.3.0 | React 组件测试 | 活跃稳定；MIT | 声明 Node >=18，已安装 | 运行离线 | React Test Renderer |
 | Testing Library user-event | 14.6.1 | 用户交互模拟 | 活跃稳定；MIT | 声明 Node >=12，已安装 | 运行离线 | `fireEvent`（语义较弱） |

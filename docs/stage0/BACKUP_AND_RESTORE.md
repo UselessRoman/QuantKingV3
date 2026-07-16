@@ -1,8 +1,8 @@
 # S0-05：备份、增量复制与恢复契约
 
-状态：离线实现与临时目录合成验收已通过；正式
-`E:\QuantKingV3Data` / `F:\QuantKingV3Backups` 演练未获本轮授权、未执行，S0-05
-尚不能据此标记为完整验收。
+状态：离线完整性门及两次经单独授权的
+`E:\QuantKingV3Data` / `F:\QuantKingV3Backups` 合成恢复演练均已通过。S0-05 与
+S0-07 的不可变运行目录和结果文件已保留。
 
 ## 边界与工具
 
@@ -109,7 +109,7 @@ Windows 本地临时目录已完成离线实测。F 盘的文件系统、ACL、�
 
 ## 运行基线
 
-以下为 Stage 0 运维基线；正式启用仍需用户在 S0-07 确认：
+以下为 Stage 0 已验收的运维基线；未来用于正式业务数据仍须按对应任务取得授权：
 
 - 频率：每次正式发布后和数据库迁移前创建本地恢复点；有状态变化的交易日结束后至少一次。
   本地验证成功后当天复制到异盘，周度调仓前再确认最近一次异盘恢复点可验证。
@@ -129,7 +129,7 @@ Windows 本地临时目录已完成离线实测。F 盘的文件系统、ACL、�
 .\.venv\Scripts\python.exe -m pytest tests\backup -m "not real_backup" -q -p no:cacheprovider
 ```
 
-2026-07-15 当前结果为 `42 passed, 1 deselected`；deselected 项是唯一
+2026-07-16 复跑结果为 `42 passed, 1 deselected`；deselected 项是唯一
 `real_backup` 标记，没有访问正式根。
 
 只有重新取得明确授权后，才可执行以下命令；命令中的 run ID 必须全新：
@@ -153,3 +153,9 @@ Windows 本地临时目录已完成离线实测。F 盘的文件系统、ACL、�
 顶层失败固定写入该唯一数据 run 目录的 `acceptance-failure.json`；内部 snapshot、复制或恢复
 失败还保留各自 `.incomplete/failure.json`。任何失败都会阻止成功证据生成，重试必须再次授权并
 使用新 run ID。
+
+2026-07-16 经分别授权完成两个运行：`stage0-s05-20260715-1920` 与
+`stage0-s07-20260715-1921`。两次均为首轮 `copied=5, skipped=0`，重复轮
+`copied=0, skipped=5`，单分区变化轮 `copied=1, skipped=4`；本地与异盘隔离恢复通过，
+预置的历史点、失败目录和哨兵均为 `deleted=0, modified=0, preserved=3`。完整路径与代码版本见
+[最终验收报告](FINAL_ACCEPTANCE.md)。
