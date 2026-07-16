@@ -2,7 +2,7 @@
 
 QuantKing V3 是一个运行在个人 Windows 电脑上的 A 股日频量化研究、组合回测、调仓决策与人工交易登记系统。它面向单用户，覆盖“数据更新 → 因子与模型 → 组合与回测 → 调仓计划 → 人工下单 → 成交同步与对账 → Web 复盘”的闭环。
 
-> 当前状态：架构设计已经确认，Stage 0 已于 2026-07-16 完成验收；Stage 1 尚未开始，也未获得实施授权。Stage 1 及以后仍是目标能力，不得描述为已经实现。
+> 当前状态：架构设计已经确认，Stage 0 已于 2026-07-16 完成验收；Stage 1 已获实施授权并进行中，但尚未完成。Stage 1 及以后仍是目标能力，不得描述为已经实现或已验收。
 
 ## 产品边界
 
@@ -66,4 +66,4 @@ XTQuant/备用源
 
 ## 下一步
 
-[Stage 0](docs/IMPLEMENTATION_PLAN.md#stage-0工程与可恢复基线) 已完成，证据见 [Stage 0 最终验收报告](docs/stage0/FINAL_ACCEPTANCE.md)。下一阶段是 Stage 1 日线数据仓与数据质量，但尚未获准开始；在取得明确授权前不得创建 Stage 1 运行数据或提前实现后续业务功能。
+[Stage 0](docs/IMPLEMENTATION_PLAN.md#stage-0工程与可恢复基线) 已完成，证据见 [Stage 0 最终验收报告](docs/stage0/FINAL_ACCEPTANCE.md)。Stage 1 日线数据仓与数据质量已获实施授权并进行中，但尚未完成；真实网络、真实 XTQuant、运行数据根、旧数据迁移和 F 盘写入仍须逐项授权。

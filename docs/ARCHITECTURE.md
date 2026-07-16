@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-本文描述已确认的目标架构。Stage 0 已于 2026-07-16 完成验收，Stage 1 尚未开始；实现状态以 [路线图](ROADMAP.md) 为准。架构决策以 [DECISIONS.md](DECISIONS.md) 为最高依据。
+本文描述已确认的目标架构。Stage 0 已于 2026-07-16 完成验收，Stage 1 已获实施授权并进行中，但尚未完成；实现状态以 [路线图](ROADMAP.md) 为准。架构决策以 [DECISIONS.md](DECISIONS.md) 为最高依据。
 
 ## 架构风格
 
@@ -182,4 +182,4 @@ SQLite 使用 WAL 模式、连接级 `busy_timeout`、短事务和针对锁冲�
 
 ## 状态声明
 
-以上除已验收的 Stage 0 工程基线外均为目标结构。当前只确认锁定环境、通用持久任务与日志、最小本机 Web 壳、备份恢复和迁移清单等 Stage 0 能力；Stage 1 及以后业务能力仍未实现。各模块状态以 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) 和 [Stage 0 最终验收报告](stage0/FINAL_ACCEPTANCE.md) 为准。
+以上除已验收的 Stage 0 工程基线外均为目标结构。当前只确认锁定环境、通用持久任务与日志、最小本机 Web 壳、备份恢复和迁移清单等 Stage 0 能力，以及 Stage 1 S1-01 的数据合同、元数据持久化与安全迁移基础；Stage 1 其余业务能力（数据抓取、质量规则、发布、EOD、Web 页面等）尚未实现。各模块状态以 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) 和 [Stage 0 最终验收报告](stage0/FINAL_ACCEPTANCE.md) 为准。

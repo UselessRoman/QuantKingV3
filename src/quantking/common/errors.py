@@ -15,6 +15,10 @@ class ErrorCode(StrEnum):
     INVALID_TIME = "invalid_time"
     INVALID_PATH = "invalid_path"
     INVALID_JOB_TRANSITION = "invalid_job_transition"
+    INVALID_DATA_TRANSITION = "invalid_data_transition"
+    DATASET_VERSION_IMMUTABLE = "dataset_version_immutable"
+    DATASET_VERSION_NOT_FOUND = "dataset_version_not_found"
+    OVERRIDE_NOT_APPLICABLE = "override_not_applicable"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
     JOB_NOT_FOUND = "job_not_found"
     PERSISTENCE_BUSY = "persistence_busy"
@@ -89,6 +93,34 @@ class InvalidJobTransitionError(QuantKingError):
 
     def __init__(self, message: str, *, context: Mapping[str, str] | None = None) -> None:
         super().__init__(ErrorCode.INVALID_JOB_TRANSITION, message, context=context)
+
+
+class InvalidDataTransitionError(QuantKingError):
+    """A data batch, dataset version, or override attempted an illegal transition."""
+
+    def __init__(self, message: str, *, context: Mapping[str, str] | None = None) -> None:
+        super().__init__(ErrorCode.INVALID_DATA_TRANSITION, message, context=context)
+
+
+class DatasetVersionImmutableError(QuantKingError):
+    """A published or otherwise terminal dataset version cannot be mutated."""
+
+    def __init__(self, message: str, *, context: Mapping[str, str] | None = None) -> None:
+        super().__init__(ErrorCode.DATASET_VERSION_IMMUTABLE, message, context=context)
+
+
+class DatasetVersionNotFoundError(QuantKingError):
+    """A requested dataset version does not exist."""
+
+    def __init__(self, message: str, *, context: Mapping[str, str] | None = None) -> None:
+        super().__init__(ErrorCode.DATASET_VERSION_NOT_FOUND, message, context=context)
+
+
+class OverrideNotApplicableError(QuantKingError):
+    """A source override cannot be applied in its current state."""
+
+    def __init__(self, message: str, *, context: Mapping[str, str] | None = None) -> None:
+        super().__init__(ErrorCode.OVERRIDE_NOT_APPLICABLE, message, context=context)
 
 
 class IdempotencyConflictError(QuantKingError):

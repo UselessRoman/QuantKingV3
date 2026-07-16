@@ -14,6 +14,7 @@ dependencies = [
     "duckdb>=1.2,<2",
     "fastapi>=0.115,<1",
     "lightgbm>=4.6,<5",
+    "pyarrow>=24,<25",
     "pydantic-settings>=2.8,<3",
     "pyqlib==0.9.7",
     "sqlalchemy>=2.0,<3",
