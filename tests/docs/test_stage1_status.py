@@ -55,14 +55,26 @@ class TestStage1DocsExist:
         for code in ("S1-01", "S1-02", "S1-03", "S1-04", "S1-05", "S1-06", "S1-07", "S1-08"):
             assert code in text, f"{code} must be listed in TASKS.md"
 
-    def test_s1_01_is_failed_r1_main_acceptance_and_r2_repair_only(self) -> None:
+    def test_s1_01_is_main_accepted(self) -> None:
         for name in ("README.md", "TASKS.md", "ACCEPTANCE.md"):
             text = _read(_STAGE1_DIR / name)
-            assert "S1-01-R1 主验收未通过" in text
-            assert "S1-01-R2" in text
-            assert "待主验收" in text
+            assert "7e4e5b38b7fc91edaf8727ed55b1e26435373aea" in text, (
+                f"{name} must record the S1-01 main-acceptance commit"
+            )
+            assert "S1-01 主验收" in text, f"{name} must reference the S1-01 main acceptance status"
+        # S1-01 acceptance evidence file must exist and point at the main-acceptance commit.
+        evidence = _read(_STAGE1_DIR / "S1-01_ACCEPTANCE.md")
+        assert "7e4e5b38b7fc91edaf8727ed55b1e26435373aea" in evidence
+        assert "S1-01 通过" not in evidence and "Stage 1 完成" not in evidence
         tasks = _read(_STAGE1_DIR / "TASKS.md")
-        assert "不得开始 S1-02" in tasks
+        assert "S1-02 已获实施授权" in tasks or "S1-02 已获授权" in tasks
+
+    def test_s1_02_status_is_authorized_in_progress(self) -> None:
+        for name in ("README.md", "TASKS.md", "ACCEPTANCE.md"):
+            text = _read(_STAGE1_DIR / name)
+            assert "S1-02 已获实施授权并进行中" in text or ("S1-02 已获实施授权" in text), (
+                f"{name} must record S1-02 is authorized in progress"
+            )
 
     def test_main_acceptance_task_order_is_restored(self) -> None:
         text = _read(_STAGE1_DIR / "README.md")
@@ -80,10 +92,13 @@ class TestStage1DocsExist:
 
     def test_offline_gates_are_not_described_as_main_acceptance(self) -> None:
         text = _read(_STAGE1_DIR / "ACCEPTANCE.md")
-        assert "不得写成主验收通过" in text
+        # S1-02..S1-08 may still have their offline gates; the rule applies only to those tasks,
+        # not to S1-01 which has been main-accepted.
+        assert "已不再是验收判据" in text or "不得写成主验收通过" in text
 
     def test_stage1_acceptance_matrix_is_pending(self) -> None:
         text = _read(_STAGE1_DIR / "ACCEPTANCE.md")
+        # The acceptance matrix must still show that the Stage 1 overall acceptance is pending.
         assert "进行中" in text or "未完成" in text or "待" in text, (
             "ACCEPTANCE.md must reflect that Stage 1 is not yet accepted"
         )

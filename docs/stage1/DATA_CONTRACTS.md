@@ -1,6 +1,6 @@
 # Stage 1 数据合同
 
-状态：S1-01-R1 主验收未通过；S1-01-R2 修复中、待主验收。Stage 1 已获实施授权并进行中，但尚未完成。本文描述目标合同，不代表功能已通过主验收。
+状态：S1-01 已于 2026-07-16 在提交 `7e4e5b38b7fc91edaf8727ed55b1e26435373aea` 完成主验收；S1-02（Warehouse、原子发布与显式版本查询）已获实施授权并进行中。Stage 1 已获实施授权并进行中，但尚未完成。本文描述目标合同，不代表功能已通过主验收。
 
 本文件固化 Stage 1 六类 Canonical 数据集的可执行合同。权威来源是 `src/quantking/data/schemas.py`（框架无关描述符）和 `src/quantking/data/adapters/canonical_schema.py`（PyArrow 映射与验证）。文档不得替代 schema 与契约测试。
 

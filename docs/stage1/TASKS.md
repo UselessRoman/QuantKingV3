@@ -1,7 +1,8 @@
 # Stage 1 任务卡
 
-状态：Stage 0 已完成；Stage 1 已获实施授权并进行中，但尚未完成。S1-01 主验收未通过，
-S1-01-R1 主验收未通过；当前只实施 S1-01-R2 修复并待主验收。S1-02～S1-08
+状态：Stage 0 已完成；Stage 1 已获实施授权并进行中，但尚未完成。S1-01 已于
+2026-07-16 在提交 `7e4e5b38b7fc91edaf8727ed55b1e26435373aea` 完成主验收，证据见
+[S1-01 主验收证据](S1-01_ACCEPTANCE.md)。S1-02 已获实施授权并进行中；S1-03～S1-08
 未开始、未获实施授权。
 
 每个任务必须声明所属 Stage、范围、输入、测试和验收证据。前一任务的完成条件未满足前不得
@@ -9,29 +10,17 @@ S1-01-R1 主验收未通过；当前只实施 S1-01-R2 修复并待主验收。S
 
 ## S1-01：数据合同、元数据持久化与安全迁移基础
 
-- **状态**：S1-01-R1 主验收未通过；S1-01-R2 修复中、待主验收。
-- **R1 范围**：严格 Canonical 合同和空结果分类；DatasetVersion 覆盖与可约束血缘；
-  QualityRun/QualityResult/DifferenceReport 仓储；旧数据 `LEGACY_DATA_ONLY` 来源；绑定差异报告与
-  双方批次的 SourceOverride；不可绕过审计的短事务；终态不可变与新 batch ID 重试；使用
-  Stage 0 完整快照合同、维护期写边界和不可篡改证据的安全迁移。
-- **R2 范围**：失败证据一旦存在即终身占用 run ID；恢复完整且不可覆盖的失败证据合同；
-  通过新 Alembic revision 在数据库层强制 override 应用版本为被比较版本的同数据集、审批后
-  创建的直接子版本，并验证失败事务不留下部分状态或审计。
-- **输入**：S1-01-R1 提交 `64490e1bc15657e0980308f2fdec51a309be4f8e`；原主实现提交
-  `98a8440dc2b860f4dd46ae592c94ea832f89e811` 保持不变。
-- **测试**：失败 run ID 重放/修正后重试和证据不可变攻击；失败证据字段、真实 UTC 时间、脱敏
-  消息和非覆盖写入；override 无直接父版本、跨数据集、审批前版本、正确直接子版本及事务回滚；
-  新库 head 与 Stage 0→`20260716_0003` 升级。
-- **验收纪律**：R2 的定向测试和 `scripts/quality.ps1` 即使退出码为 0，也只证明修复候选通过
-  离线门禁；主验收 Agent 复验前不得标记 S1-01 已通过。
-- **禁止项**：不实施 Warehouse 发布/查询、数据抓取、质量执行器、EOD、Worker handler、
-  CLI/API、业务 Web、真实访问或旧数据读取；不得开始 S1-02。
+- **状态**：已于 2026-07-16 在提交 `7e4e5b38b7fc91edaf8727ed55b1e26435373aea` 完成主验收。证据见 [S1-01 主验收证据](S1-01_ACCEPTANCE.md)。
+- **范围**：严格 Canonical 合同和空结果分类；DatasetVersion 覆盖与可约束血缘；QualityRun/QualityResult/DifferenceReport 仓储；旧数据 `LEGACY_DATA_ONLY` 来源；绑定差异报告与双方批次的 SourceOverride；不可绕过审计的短事务；终态不可变与新 batch ID 重试；使用 Stage 0 完整快照合同、维护期写边界和不可篡改证据的安全迁移。
+- **输入**：S1-01-R1 提交 `64490e1bc15657e0980308f2fdec51a309be4f8e`；原主实现提交 `98a8440dc2b860f4dd46ae592c94ea832f89e811` 保持不变。
+- **测试**：失败 run ID 重放/修正后重试和证据不可变攻击；失败证据字段、真实 UTC 时间、脱敏消息和非覆盖写入；override 无直接父版本、跨数据集、审批前版本、正确直接子版本及事务回滚；新库 head 与 Stage 0→`20260716_0003` 升级。
+- **验收纪律**：离线测试与 `scripts/quality.ps1` 通过只能证明该任务的离线门禁；S1-01 主验收已确认通过。
+- **禁止项**：不实施 Warehouse 发布/查询、数据抓取、质量执行器、EOD、Worker handler、CLI/API、业务 Web、真实访问或旧数据读取；不得开始 S1-02 之外的 Stage 1 任务。
 
 ## S1-02：Warehouse、原子发布与查询
 
-- **状态**：未开始，未获实施授权。
-- **范围**：Raw/Canonical 受管理落地、批次清单和 SHA-256、Canonical Warehouse 分区、
-  临时目录到 DatasetVersion 的原子发布、幂等发布以及 DuckDB 显式版本查询。
+- **状态**：已获实施授权，进行中。
+- **范围**：Raw/Canonical 受管理落地、批次清单和 SHA-256、Canonical Warehouse 分区、临时目录到 DatasetVersion 的原子发布、幂等发布以及 DuckDB 显式版本查询。
 - **依赖**：S1-01 主验收通过并获得 S1-02 单独授权。
 - **禁止项**：不实现 XTQuant 抓取（S1-03），不提前实现质量和跨源业务（S1-04）。
 

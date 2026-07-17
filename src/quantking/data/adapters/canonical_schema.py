@@ -16,6 +16,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from quantking.data.models import EmptyResultInfo
 from quantking.data.schemas import (
@@ -131,7 +132,7 @@ def validate_table(
 def ensure_sorted(dataset: str, table: pa.Table) -> pa.Table:
     """Return the table sorted by the canonical sort key."""
     key = sort_key(dataset)
-    indices = pa.sort_indices(table, sort_keys=[(col, "ascending") for col in key])
+    indices = pc.sort_indices(table, sort_keys=[(col, "ascending") for col in key])  # type: ignore[attr-defined]
     return table.take(indices)
 
 
