@@ -18,6 +18,7 @@ from quantking.data.adapters.warehouse.partitioning import (
     partition_scheme_for,
 )
 from quantking.data.adapters.warehouse.raw_store import (
+    RawBatchFailureRequest,
     RawBatchPublisher,
     RawBatchPublishRequest,
     RawManifestFile,
@@ -29,6 +30,7 @@ __all__ = [
     "CanonicalPartitionScheme",
     "CanonicalPublishRequest",
     "CanonicalWarehouse",
+    "RawBatchFailureRequest",
     "RawBatchPublishRequest",
     "RawBatchPublisher",
     "RawManifestFile",

@@ -3,7 +3,8 @@
 状态：S1-01 已于 2026-07-16 在提交 `7e4e5b38b7fc91edaf8727ed55b1e26435373aea`
 完成主验收；S1-02（Warehouse、原子发布与显式版本查询）已于 2026-07-18 在提交
 `79f9fa3e682e212cf74e7886a04c6fb52158f302` 完成主验收。Stage 1 已获实施授权并
-进行中，但尚未完成；S1-03～S1-08 未开始、未获授权。
+进行中，但尚未完成；S1-03 离线实现已提交，等待主验收。S1-04～S1-08
+未开始、未获授权。
 
 本文件固化 Stage 1 六类 Canonical 数据集的可执行合同。权威来源是 `src/quantking/data/schemas.py`（框架无关描述符）和 `src/quantking/data/adapters/canonical_schema.py`（PyArrow 映射与验证）。文档不得替代 schema 与契约测试。
 
@@ -162,3 +163,68 @@ PyArrow 验证器对以下样本的接受/拒绝行为由 `tests/data/adapters/t
 - PyArrow 映射只出现在 `src/quantking/data/adapters/canonical_schema.py`。
 - 数据领域对象（`src/quantking/data/models.py`）不导入 sqlalchemy 或 alembic。
 - ORM 行只位于 `src/quantking/data/adapters/persistence/`，不作为 API 或领域接口。
+
+## S1-03 XTQuant 只读能力矩阵
+
+S1-03 的生产适配器只允许延迟加载明确配置目录中的 `xtquant.xtdata`，不加载交易、账户或
+下单模块。以下依据仅来自本机自然可访问的 XTQuant 公共 Python 源码/签名的只读核对，
+没有导入 SDK、连接 QMT、访问网络或读取真实行情。真实 XTQuant 样本验证仍须逐项授权；
+合成测试不构成真实 XTQuant 能力证明。
+
+| Canonical 数据集 | 只读公共接口 | 供应商边界所需字段 | 字段/单位依据与确定性推导 | 当前能力与缺口 |
+|---|---|---|---|---|
+| `security_master` | `get_instrument_detail_list` | 代码、交易所、名称、板块、上市/退市日、有效区间、上市状态 | 公共源码只描述当前证券详情；Canonical 需要 point-in-time 有效区间 | 不可用：当前列表不能伪装为历史 point-in-time 主数据 |
+| `exchange_calendar` | `get_trading_dates` | 市场、显式起止日、开市日毫秒时间戳 | 公共源码描述起止边界和开市日；闭市日可在显式区间内由开市日补集确定性推导 | 可用：仅此能力在当前证据下启用 |
+| `daily_bar_unadjusted` | `get_market_data_ex` | 日期、OHLC、昨收、成交量、成交额 | 公共源码列出部分行情字段，但 `pre_close` 和股/手、人民币元等单位语义未验证 | 不可用：不得猜测单位或把其他复权口径冒充未复权 |
+| `adjustment_factor` | `get_divid_factors` | 事件日、价量乘数、基准日、算法版本 | 公共源码未证明返回列、公式、基准日与算法语义 | 不可用：不得伪造因子公式或基准 |
+| `trading_status` | `get_instrument_detail` | 历史官方停牌、ST、*ST、退市整理期及涨跌停价 | 公共源码只描述当前 `IsTrading`/`InstrumentStatus`；没有历史交易状态合同 | 不可用：不得由零成交量或当前状态推断历史官方状态 |
+| `benchmark_index_daily` | `get_market_data_ex` | 日期、OHLC、昨收及可空成交量/成交额 | 公共源码没有证明指数昨收及成交量/成交额的单位和可空语义 | 不可用：单位语义未验证时不得补零或沿用股票口径 |
+
+能力不可用、字段缺失或语义未验证时，对外返回稳定、脱敏的
+`CAPABILITY_UNAVAILABLE`/`RESPONSE_CONTRACT`，并分别映射为现有
+`BatchFailureKind.INTERNAL`/`BatchFailureKind.PARSE`；
+不得以常量、当前状态或无关字段构造历史值。
+
+## S1-03 合成供应商响应合同
+
+Fake Gateway 和离线映射测试使用显式 `SupplierResponseContract`。调用方必须声明代码格式、
+交易所映射、日期格式、成交量单位、成交额单位、未复权、point-in-time、官方交易状态及
+因子公式是否已验证。只有声明与数据集合同完全一致时才进入转换：
+
+- `SZ000001`、`SH600000`、`BJ430047` 确定性转换为
+  `000001.SZ`、`600000.SH`、`430047.BJ`，并复验交易所与后缀。
+- 供应商日期按显式格式解析为交易所本地 `date32`；批次时间统一使用 UTC。
+- 成交量只接受已证明的“股”或明确的“100 股/手”并转换为股；成交额只接受人民币元。
+- 未复权日线必须显式标记未复权；指数成交量、成交额只按 Canonical nullability 允许为空。
+- 复权公式固定为
+  `p_adj=p_raw*price_multiplier;v_adj=v_raw*volume_multiplier`，并要求基准日和
+  `algorithm_version`。
+- 交易状态必须来自官方状态合同，分别保留交易、停牌、ST、*ST 和退市整理期；不从零成交量推断。
+- 原始记录以规范 JSON 保存到 Raw，Canonical 表不携带供应商专用字段。
+- 结果使用精确 Arrow 字段顺序、类型和 nullability，按 `sort_key` 排序并复验全局主键；
+  重复、矛盾、NaN、无穷、缺字段或错类型一律失败。
+
+## S1-03 增量、Raw 与批次语义
+
+`IncrementalFetchPlan` 显式记录 dataset、证券/交易所范围、包含边界的请求起止日、已知覆盖
+区间、调用方给定回看天数、稳定分块、adapter version、请求摘要和新 `batch_id`。中间缺口
+逐段补抓，回看窗口不会从最大日期推断并跳过缺口；核心逻辑不使用“今天”或 `latest`。
+除 `batch_id` 外相同输入得到相同计划摘要，相同参数失败重试必须换新 `batch_id`。
+
+编排先短事务写 `RUNNING IngestionBatch`，事务外调用 Gateway，将完整供应商 JSON 响应交给
+现有 `RawBatchPublisher`，复验 `manifest.json`、逐文件 SHA-256 和 `COMPLETE` 后才标准化。
+Raw 发布后标准化失败仍保留完整 Raw；payload 产生前失败则使用同一受管理路径防护写入
+不可覆盖的 `.incomplete/failure.json`。不删除失败目录。
+
+批次终态如下：
+
+- `SUCCEEDED`：Raw 凭证完整且完整 Canonical 候选表通过 S1-01 验证；合法空结果还必须携带
+  `NO_TRADING_SESSION`、`OUTSIDE_LISTING_RANGE` 或 `EMPTY_REQUEST_UNIVERSE` 之一及原因。
+- `PARTIAL`：供应商明确部分响应；保存已收到 Raw 和 `PARTIAL_SOURCE`，不返回完整候选。
+  多分块抓取中后续分块失败时，同样保存此前响应和脱敏错误代码后进入 `PARTIAL`。
+- `FAILED`：网络、权限、请求、解析、未验证能力、意外空、Raw 或内部失败；保存脱敏失败信息。
+
+稳定源错误映射为 `NETWORK`、`PERMISSION`、`PARSE`、`UNEXPECTED_EMPTY`、
+`PARTIAL_SOURCE` 或 `INTERNAL`，S1-03 不产生 `QUALITY`。终态 `batch_id` 不再调用供应商；
+失败或部分响应不得变成成功，相同参数只允许使用新 `batch_id` 重试。S1-03 不调用
+`CanonicalPublishCoordinator`，不创建或推进任何 `PUBLISHED DatasetVersion`。

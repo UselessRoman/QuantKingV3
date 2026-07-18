@@ -42,7 +42,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from quantking.common.errors import IdempotencyConflictError, InvalidPathError
+from quantking.common.errors import IdempotencyConflictError, InvalidPathError, InvalidTimeError
+from quantking.common.time import UtcTimestamp
 from quantking.data.adapters.warehouse.errors import ManifestIntegrityError, RawStoreError
 from quantking.data.adapters.warehouse.manifest import (
     RAW_COMPLETE_FILENAME,
@@ -138,6 +139,47 @@ class RawBatchPublishRequest:
             object.__setattr__(self, "created_at", _now_iso())
 
 
+@dataclass(frozen=True, slots=True)
+class RawBatchFailureRequest:
+    """A managed Raw attempt that failed before a supplier payload existed."""
+
+    source: str
+    dataset: str
+    batch_id: str
+    adapter_version: str
+    request_params: Mapping[str, str]
+    error_code: str
+    failed_at: str | None = None
+    code_version: str = "stage1-raw-v1"
+
+    def __post_init__(self) -> None:
+        _validate_managed_component(self.source, "source")
+        _validate_managed_component(self.dataset, "dataset")
+        _validate_managed_component(self.batch_id, "batch_id")
+        if not isinstance(self.adapter_version, str) or not self.adapter_version.strip():
+            raise InvalidPathError("adapter_version must be non-empty text")
+        if (
+            not isinstance(self.error_code, str)
+            or re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", self.error_code) is None
+        ):
+            raise InvalidPathError("error_code must be a stable uppercase identifier")
+        normalized: dict[str, str] = {}
+        for key, value in self.request_params.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise TypeError("request_params must be a mapping of str to str")
+            normalized[key] = value
+        object.__setattr__(self, "request_params", dict(sorted(normalized.items())))
+        if self.failed_at is None:
+            object.__setattr__(self, "failed_at", _now_iso())
+        else:
+            try:
+                timestamp = UtcTimestamp.from_iso(self.failed_at)
+            except InvalidTimeError as error:
+                raise InvalidPathError("failed_at must use the canonical UTC format") from error
+            if timestamp.to_iso() != self.failed_at:
+                raise InvalidPathError("failed_at must use the canonical UTC format")
+
+
 def _now_iso() -> str:
     """Return a canonical UTC ISO-8601 timestamp with the ``Z`` suffix."""
     return _dt.datetime.now(_dt.UTC).isoformat().removesuffix("+00:00") + "Z"
@@ -175,6 +217,61 @@ class RawBatchPublisher:
         if final.exists():
             return self._reconcile_existing(final, request)
         return self._publish_fresh(request, final)
+
+    def record_failure(self, request: RawBatchFailureRequest) -> Path:
+        """Persist an immutable managed failure attempt without a Raw payload."""
+        if not isinstance(request, RawBatchFailureRequest):
+            raise TypeError("request must be a RawBatchFailureRequest")
+        surrogate = RawBatchPublishRequest(
+            source=request.source,
+            dataset=request.dataset,
+            batch_id=request.batch_id,
+            adapter_version=request.adapter_version,
+            request_params=request.request_params,
+            files=(),
+            created_at=request.failed_at,
+            code_version=request.code_version,
+        )
+        final = self._final_path(surrogate)
+        incomplete = self._incomplete_path(surrogate)
+        self._assert_managed_target(self._data_root, final)
+        self._assert_managed_target(self._data_root, incomplete)
+        if final.exists() or incomplete.exists():
+            raise RawStoreError(
+                "raw batch id already has immutable evidence",
+                context={"batch_id": request.batch_id},
+            )
+        try:
+            incomplete.mkdir(parents=True, exist_ok=False)
+            self._write_input_listing(incomplete, surrogate)
+            record = {
+                "schema_version": "raw-attempt-failure.v1",
+                "source": request.source,
+                "dataset": request.dataset,
+                "batch_id": request.batch_id,
+                "adapter_version": request.adapter_version,
+                "code_version": request.code_version,
+                "error_code": request.error_code,
+                "message": "raw attempt failed before supplier payload was available",
+                "failed_at": request.failed_at,
+            }
+            target = incomplete / RAW_FAILURE_FILENAME
+            with target.open("x", encoding="utf-8") as stream:
+                json.dump(
+                    record,
+                    stream,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+        except Exception as error:
+            raise RawStoreError(
+                "failed to preserve managed raw attempt evidence",
+                context={"batch_id": request.batch_id},
+            ) from error
+        return incomplete
 
     # -- internals ----------------------------------------------------------
 
@@ -486,6 +583,7 @@ def _default_write_file(target: Path, payload: bytes) -> None:
 
 
 __all__ = [
+    "RawBatchFailureRequest",
     "RawBatchPublishRequest",
     "RawBatchPublisher",
     "RawManifestFile",

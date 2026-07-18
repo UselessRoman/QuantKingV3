@@ -4,8 +4,8 @@
 2026-07-16 在提交 `7e4e5b38b7fc91edaf8727ed55b1e26435373aea` 完成主验收，证据见
 [S1-01 主验收证据](S1-01_ACCEPTANCE.md)。
 S1-02 已于 2026-07-18 在提交 `79f9fa3e682e212cf74e7886a04c6fb52158f302`
-完成主验收，证据见 [S1-02 主验收证据](S1-02_ACCEPTANCE.md)。S1-03～S1-08
-未开始、未获授权。
+完成主验收，证据见 [S1-02 主验收证据](S1-02_ACCEPTANCE.md)。S1-03 离线实现已提交，等待主验收。
+S1-04～S1-08 未开始、未获授权。
 
 阶段状态只能由实际验收证据驱动。文档存在、代码提交或单次演示均不能单独证明阶段完成。
 
@@ -56,7 +56,25 @@ S1-01 主验收 Agent 复验后，状态被标记为已通过；离线定向测�
 S1-02 完成只证明 Warehouse、发布和查询基础可用于后续任务，不代表 Stage 1
 整体完成，也不自动授权 S1-03。
 
-## S1-03～S1-08 验收
+## S1-03 验收标准
+
+S1-03 离线实现已提交，等待主验收。当前离线门禁不得写成已经通过主验收：
+
+| 验收项 | 状态 | 证据 |
+|---|---|---|
+| XTQuant 依赖只存在于适配器边界，生产加载延迟且仅允许 `xtquant.xtdata` | 待主验收 | `sources/xtquant.py`；边界测试 |
+| 六类合成响应映射到精确 Canonical schema、排序、主键和语义验证 | 待主验收 | `test_xtquant_mapping.py` |
+| 无法证实的 point-in-time、单位、因子和历史状态能力安全失败 | 待主验收 | 能力矩阵；`test_xtquant_adapter.py` |
+| 显式覆盖、回看、缺口与稳定分块的 provider-neutral 增量计划 | 待主验收 | `test_incremental_fetch_plan.py` |
+| Raw manifest/SHA/COMPLETE、失败证据及 `IngestionBatch` 终态 | 待主验收 | `test_xtquant_ingestion.py` |
+| 合法空、意外空、部分响应与稳定脱敏错误严格区分 | 待主验收 | 适配器与集成回归 |
+| 不创建或发布任何 Canonical `DatasetVersion` | 待主验收 | 集成测试查询版本表为零行 |
+| 默认门禁无网络、QMT、正式根和真实 XTQuant 访问 | 待主验收 | 离线守卫；未运行 `real_xtquant` |
+
+真实 XTQuant 样本、QMT 或网络能力没有在本任务中验证。五类未充分证实的数据能力是显式缺口，
+不能由合成测试消除；是否阻断 S1-03 主验收由主验收 Agent 判定。
+
+## S1-04～S1-08 验收
 
 按主验收 Agent 下发的顺序依次为 XTQuant、质量/跨源/override、EOD/Worker/CLI/API、
 数据中心 Web、经授权真实样本与旧数据判定、真实或明确范围 Canonical 构建
