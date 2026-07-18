@@ -19,6 +19,7 @@ _REQUIRED_STAGE1_DOCS = (
     "TASKS.md",
     "ACCEPTANCE.md",
     "DATA_CONTRACTS.md",
+    "S1-02_ACCEPTANCE.md",
 )
 
 # The canonical status phrase required across updated documents.
@@ -67,21 +68,19 @@ class TestStage1DocsExist:
         assert "7e4e5b38b7fc91edaf8727ed55b1e26435373aea" in evidence
         assert "S1-01 通过" not in evidence and "Stage 1 完成" not in evidence
         tasks = _read(_STAGE1_DIR / "TASKS.md")
-        # After S1-02-R1 lands, TASKS.md records that S1-02 main acceptance
-        # failed and S1-02-R1 is in repair pending main acceptance.
-        assert "S1-02 主验收未通过" in tasks
-        assert "S1-02-R1 修复中、待主验收" in tasks
+        # S1-02 main acceptance is independently recorded.
+        assert "S1-02 主验收证据" in tasks
 
-    def test_s1_02_r1_status_is_in_repair(self) -> None:
+    def test_s1_02_is_main_accepted(self) -> None:
         for name in ("README.md", "TASKS.md", "ACCEPTANCE.md"):
             text = _read(_STAGE1_DIR / name)
-            assert "S1-02 主验收未通过" in text, f"{name} must record S1-02 main acceptance failed"
-            assert "S1-02-R1 修复中、待主验收" in text, (
-                f"{name} must record S1-02-R1 is in repair pending main acceptance"
-            )
+            assert "79f9fa3e682e212cf74e7886a04c6fb52158f302" in text
+            assert "S1-02 主验收证据" in text
             assert "S1-03～S1-08 未开始、未获授权" in text or "未开始、未获授权" in text, (
                 f"{name} must record S1-03～S1-08 are not started and not authorized"
             )
+        evidence = _read(_STAGE1_DIR / "S1-02_ACCEPTANCE.md")
+        assert "S1-02（Warehouse、原子发布与显式版本查询）完成主验收" in evidence
 
     def test_main_acceptance_task_order_is_restored(self) -> None:
         text = _read(_STAGE1_DIR / "README.md")

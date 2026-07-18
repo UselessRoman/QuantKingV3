@@ -18,8 +18,7 @@ All tests use only ``tmp_path`` and synthetic data.
 
 from __future__ import annotations
 
-import contextlib
-import os
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -54,16 +53,14 @@ def _file(name: str, payload: bytes) -> RawManifestFile:
 
 def _make_junction(link: Path, target: Path) -> None:
     """Create a Windows directory junction (no admin rights required)."""
-    import ctypes
-    from ctypes import wintypes
-
-    CreateSymbolicLinkW = ctypes.windll.kernel32.CreateSymbolicLinkW  # type: ignore[attr-defined]
-    CreateSymbolicLinkW.restype = wintypes.BOOLEAN
-    CreateSymbolicLinkW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
-    # 1 = SYMBOLIC_LINK_FLAG_DIRECTORY
-    ok = CreateSymbolicLinkW(str(link), str(target), 1)
-    if not ok:
-        raise OSError("CreateSymbolicLinkW failed")
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise OSError("junction creation failed")
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -80,18 +77,6 @@ def _is_reparse_point(path: Path) -> bool:
         return bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
     except (OSError, AttributeError):
         return path.is_symlink()
-
-
-def _junction_available(tmp_path: Path) -> bool:
-    probe = tmp_path / "probe-junction"
-    try:
-        _make_junction(probe, tmp_path)
-    except OSError:
-        return False
-    finally:
-        with contextlib.suppress(OSError):
-            os.rmdir(probe)
-    return True
 
 
 def _canonical_daily_bar_table() -> pa.Table:
@@ -255,8 +240,11 @@ class TestSymlinkJunctionRejection:
         link = tmp_path / "linked-raw-root"
         try:
             link.symlink_to(outside)
-        except (OSError, NotImplementedError) as error:
-            pytest.skip(f"symlink not available: {error}")
+        except (OSError, NotImplementedError):
+            try:
+                _make_junction(link, outside)
+            except OSError as error:
+                pytest.skip(f"symlink and junction unavailable: {error}")
         if not link.is_symlink() and not _is_reparse_point(link):
             pytest.skip("symlink was not actually created")
         with pytest.raises(InvalidPathError):
@@ -268,8 +256,11 @@ class TestSymlinkJunctionRejection:
         link = tmp_path / "linked-canonical-root"
         try:
             link.symlink_to(outside)
-        except (OSError, NotImplementedError) as error:
-            pytest.skip(f"symlink not available: {error}")
+        except (OSError, NotImplementedError):
+            try:
+                _make_junction(link, outside)
+            except OSError as error:
+                pytest.skip(f"symlink and junction unavailable: {error}")
         if not link.is_symlink() and not _is_reparse_point(link):
             pytest.skip("symlink was not actually created")
         with pytest.raises(InvalidPathError):
@@ -281,19 +272,20 @@ class TestSymlinkJunctionRejection:
         link = tmp_path / "linked-query-root"
         try:
             link.symlink_to(outside)
-        except (OSError, NotImplementedError) as error:
-            pytest.skip(f"symlink not available: {error}")
+        except (OSError, NotImplementedError):
+            try:
+                _make_junction(link, outside)
+            except OSError as error:
+                pytest.skip(f"symlink and junction unavailable: {error}")
         if not link.is_symlink() and not _is_reparse_point(link):
             pytest.skip("symlink was not actually created")
         with pytest.raises(InvalidPathError):
             CanonicalQueryAdapter(data_root=link, uow_factory=None)  # type: ignore[arg-type]
 
-    @pytest.mark.skipif(
-        sys.platform != "win32" or not _junction_available(Path(os.getcwd())),
-        reason="Windows junction not available",
-    )
     def test_raw_rejects_junction_inside_intermediate_path(self, tmp_path: Path) -> None:
         """A junction planted inside the data_root must not be followable."""
+        if sys.platform != "win32":
+            pytest.skip("Windows junction test")
         outside = tmp_path / "outside-intermediate-raw"
         outside.mkdir()
         # Create the directory tree up to where the publisher would write,
@@ -333,8 +325,11 @@ class TestSymlinkJunctionRejection:
         link = tmp_path / "warehouse" / "daily_bar_unadjusted" / "evil-link"
         try:
             link.symlink_to(outside)
-        except (OSError, NotImplementedError) as error:
-            pytest.skip(f"symlink not available: {error}")
+        except (OSError, NotImplementedError):
+            try:
+                _make_junction(link, outside)
+            except OSError as error:
+                pytest.skip(f"symlink and junction unavailable: {error}")
         if not link.is_symlink() and not _is_reparse_point(link):
             pytest.skip("symlink was not actually created")
         warehouse = CanonicalWarehouse(data_root=tmp_path)

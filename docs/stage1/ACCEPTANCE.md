@@ -2,8 +2,10 @@
 
 状态：Stage 0 已完成；Stage 1 已获实施授权并进行中，但尚未完成。S1-01 已于
 2026-07-16 在提交 `7e4e5b38b7fc91edaf8727ed55b1e26435373aea` 完成主验收，证据见
-[S1-01 主验收证据](S1-01_ACCEPTANCE.md)。S1-02 主验收未通过；S1-02-R1 修复中、待主验收。
-S1-03～S1-08 未开始、未获授权。
+[S1-01 主验收证据](S1-01_ACCEPTANCE.md)。
+S1-02 已于 2026-07-18 在提交 `79f9fa3e682e212cf74e7886a04c6fb52158f302`
+完成主验收，证据见 [S1-02 主验收证据](S1-02_ACCEPTANCE.md)。S1-03～S1-08
+未开始、未获授权。
 
 阶段状态只能由实际验收证据驱动。文档存在、代码提交或单次演示均不能单独证明阶段完成。
 
@@ -38,8 +40,24 @@ S1-01 主验收 Agent 复验后，状态被标记为已通过；离线定向测�
 保持退出码 0，但已不再是验收判据。S1-01 通过不代表 Stage 1 完成；其余任务仍按主验收
 顺序推进。
 
-## S1-02～S1-08 验收
+## S1-02 验收标准
 
-按主验收 Agent 下发的顺序依次为 Warehouse/发布/查询、XTQuant、质量/跨源/override、
-EOD/Worker/CLI/API、数据中心 Web、经授权真实样本与旧数据判定、真实或明确范围 Canonical 构建
+| 验收项 | 状态 | 证据 |
+|---|---|---|
+| Raw 安全组件、受管理路径、不可变批次、manifest/SHA/COMPLETE 与失败证据 | 已主验收 | `raw_store.py`；路径与完整性回归 |
+| 六类 Canonical 严格 schema、全局主键/排序、年月分区与合法空版本 | 已主验收 | `canonical_warehouse.py`；六类参数化发布/回读 |
+| `.incomplete` 到 final 原子提升、冲突幂等与并发单一结果 | 已主验收 | 发布集成测试 |
+| 统一 published-directory verifier：规范 JSON、自身 SHA、COMPLETE、文件集合、完整 Arrow schema、行数和分区唯一性 | 已主验收 | `verifier.py`；篡改与重解析点回归 |
+| 唯一应用级协调服务写入实际 manifest/覆盖凭证并短事务发布 | 已主验收 | `publish_coordinator.py`；中断恢复测试 |
+| SQLite 与 manifest 全凭证精确绑定；只有显式 PUBLISHED version_id 可查询 | 已主验收 | `query.py`；凭证漂移测试 |
+| 合法空版本和省略排序键的字段投影返回精确 PyArrow schema | 已主验收 | 查询合同回归 |
+| `scripts/quality.ps1` 退出码 0，且默认测试不访问外部系统 | 已主验收 | [S1-02 主验收证据](S1-02_ACCEPTANCE.md) |
+
+S1-02 完成只证明 Warehouse、发布和查询基础可用于后续任务，不代表 Stage 1
+整体完成，也不自动授权 S1-03。
+
+## S1-03～S1-08 验收
+
+按主验收 Agent 下发的顺序依次为 XTQuant、质量/跨源/override、EOD/Worker/CLI/API、
+数据中心 Web、经授权真实样本与旧数据判定、真实或明确范围 Canonical 构建
 及 Stage 1 最终验收。待逐项授权和完成后填写，详见 [任务卡](TASKS.md)。
