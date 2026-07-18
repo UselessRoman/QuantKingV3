@@ -161,18 +161,33 @@ def _publish_and_mark(
 ) -> Path:
     landed = _publish(warehouse, version, table=table)
     publishable = table if table is not None else _table()
+    # Read the actual manifest SHA and coverage from the on-disk
+    # manifest so the SQLite DatasetVersion credentials match the
+    # disk exactly. The publish coordinator would do the same.
+    manifest_path = landed / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_sha = manifest["manifest_sha256"]
+    coverage_summary = dict(manifest["coverage_summary"])
+    coverage_start_value = manifest.get("coverage_start")
+    coverage_end_value = manifest.get("coverage_end")
     with uow_factory() as uow:
         stored = uow.data.save_version(version)
         validated = transition_dataset_version(
             stored,
             DatasetVersionStatus.VALIDATED,
             at=utc_now(),
-            manifest_sha256="a" * 64,
-            security_count=2,
-            row_count=publishable.num_rows,
-            coverage_start=TradingDate(date(2026, 7, 14)),
-            coverage_end=TradingDate(date(2026, 7, 16)),
-            coverage_summary={"date_count": "3", "security_count": "2"},
+            manifest_sha256=manifest_sha,
+            security_count=int(coverage_summary.get("security_count", "0")),
+            row_count=int(coverage_summary.get("row_count", str(publishable.num_rows))),
+            coverage_start=(
+                TradingDate(date.fromisoformat(coverage_start_value))
+                if coverage_start_value
+                else None
+            ),
+            coverage_end=(
+                TradingDate(date.fromisoformat(coverage_end_value)) if coverage_end_value else None
+            ),
+            coverage_summary=coverage_summary,
         )
         uow.data.save_version(validated)
         published = transition_dataset_version(

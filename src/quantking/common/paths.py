@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ntpath
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,31 @@ def _same_or_descendant(candidate: Path, parent: Path) -> bool:
         return False
 
 
+def is_reparse_point(path: Path) -> bool:
+    """Return True when ``path`` is a Windows reparse point (junction/symlink).
+
+    On non-Windows platforms this delegates to :meth:`Path.is_symlink`.
+    On Windows it uses ``GetFileAttributesW`` to detect the
+    ``FILE_ATTRIBUTE_REPARSE_POINT`` flag, which covers both symlinks and
+    junctions. ``Path.is_junction`` only detects junctions and is not
+    available on Python < 3.12; ``Path.is_symlink`` does not detect
+    junctions. The Win32 attribute check is the only reliable single call
+    that covers both reparse-point flavours.
+    """
+    if sys.platform != "win32":
+        return path.is_symlink()
+    try:
+        import ctypes
+
+        FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+        attrs = ctypes.windll.kernel32.GetFileAttributesW(str(path))
+        if attrs == -1:
+            return False
+        return bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+    except (OSError, AttributeError):
+        return path.is_symlink() or path.is_junction()
+
+
 def _validate_absolute(path: Path, *, field: str) -> None:
     if not isinstance(path, Path) or not path.is_absolute():
         raise InvalidPathError(
@@ -32,7 +58,7 @@ def _validate_absolute(path: Path, *, field: str) -> None:
     try:
         for part in path.parts[1:]:
             current /= part
-            if current.exists() and (current.is_symlink() or current.is_junction()):
+            if current.exists() and is_reparse_point(current):
                 raise InvalidPathError(
                     "managed roots must not contain symbolic links or junctions",
                     context={"field": field},
@@ -93,6 +119,27 @@ def resolve_under(root: Path, relative: str | Path) -> Path:
             "managed path must not contain parent traversal",
             context={"path": str(relative_path)},
         )
+
+    # Walk every intermediate component from ``root`` to the candidate and
+    # reject any that is a symlink or Windows junction/reparse point.
+    # ``Path.resolve(strict=False)`` does not follow junctions on Windows,
+    # so a pure resolve-and-compare would miss junction escapes.
+    current = root
+    try:
+        for part in relative_path.parts:
+            current = current / part
+            if current.exists() and is_reparse_point(current):
+                raise InvalidPathError(
+                    "managed path must not traverse a symbolic link or junction",
+                    context={"path": str(relative_path)},
+                )
+    except InvalidPathError:
+        raise
+    except OSError as error:
+        raise InvalidPathError(
+            "managed path could not be inspected",
+            context={"path": str(relative_path)},
+        ) from error
 
     try:
         resolved_root = root.resolve(strict=False)

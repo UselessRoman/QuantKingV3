@@ -26,6 +26,7 @@ from quantking.common.errors import (
     JobNotFoundError,
     PersistenceBusyError,
 )
+from quantking.common.paths import is_reparse_point
 from quantking.common.time import UtcTimestamp
 from quantking.jobs.adapters.persistence.models import (
     AuditRecordRow,
@@ -48,10 +49,6 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
 ResultT = TypeVar("ResultT")
 
 
-def _is_reparse_point(path: Path) -> bool:
-    return path.is_symlink() or path.is_junction()
-
-
 def _reserve_new_database(database: Path) -> None:
     """Atomically reserve a never-before-existing database at an explicit safe path."""
     if not isinstance(database, Path) or not database.is_absolute():
@@ -66,14 +63,9 @@ def _reserve_new_database(database: Path) -> None:
         )
 
     parent = database.parent
-    if not parent.is_dir():
-        raise InvalidPathError(
-            "SQLite initialization parent must already exist as a directory",
-            context={"parent": str(parent)},
-        )
     try:
         for component in (parent, *parent.parents):
-            if _is_reparse_point(component):
+            if component.exists() and is_reparse_point(component):
                 raise InvalidPathError(
                     "SQLite initialization path cannot contain a symbolic link or junction",
                     context={"path": str(database)},
@@ -84,7 +76,13 @@ def _reserve_new_database(database: Path) -> None:
             context={"path": str(database)},
         ) from error
 
-    if database.exists() or _is_reparse_point(database):
+    if not parent.is_dir():
+        raise InvalidPathError(
+            "SQLite initialization parent must already exist as a directory",
+            context={"parent": str(parent)},
+        )
+
+    if database.exists() or is_reparse_point(database):
         raise InvalidPathError(
             "SQLite initialization target must not already exist",
             context={"path": str(database)},

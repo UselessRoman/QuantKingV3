@@ -2,8 +2,8 @@
 
 状态：Stage 0 已完成；Stage 1 已获实施授权并进行中，但尚未完成。S1-01 已于
 2026-07-16 在提交 `7e4e5b38b7fc91edaf8727ed55b1e26435373aea` 完成主验收，证据见
-[S1-01 主验收证据](S1-01_ACCEPTANCE.md)。S1-02 已获实施授权并进行中；S1-03～S1-08
-未开始、未获实施授权。
+[S1-01 主验收证据](S1-01_ACCEPTANCE.md)。S1-02 主验收未通过；S1-02-R1 修复中、待主验收。
+S1-03～S1-08 未开始、未获授权。
 
 每个任务必须声明所属 Stage、范围、输入、测试和验收证据。前一任务的完成条件未满足前不得
 开始后一任务。离线质量门通过不等于主验收通过。
@@ -19,8 +19,9 @@
 
 ## S1-02：Warehouse、原子发布与查询
 
-- **状态**：已获实施授权，进行中。
+- **状态**：主验收未通过；S1-02-R1 修复中、待主验收。基线提交 `3235aba1fe758394bcee39f03945f5cd2ab4aa83`；R1 在其上新建普通提交，不改写原提交。
 - **范围**：Raw/Canonical 受管理落地、批次清单和 SHA-256、Canonical Warehouse 分区、临时目录到 DatasetVersion 的原子发布、幂等发布以及 DuckDB 显式版本查询。
+- **R1 修复重点**：关闭全部路径边界（source/dataset/batch_id/version_id 严格组件、拒绝 symlink/junction 根与中间路径）；建立唯一应用级 Canonical 发布协调服务；统一严格 published-directory verifier；对齐 manifest 与 DatasetVersion 凭证；修复查询合同（空版本、字段投影、错误映射）；保留脱敏失败证据，删除 `shutil.rmtree` 恢复路径。
 - **依赖**：S1-01 主验收通过并获得 S1-02 单独授权。
 - **禁止项**：不实现 XTQuant 抓取（S1-03），不提前实现质量和跨源业务（S1-04）。
 

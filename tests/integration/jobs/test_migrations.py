@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import os
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -10,8 +12,26 @@ import pytest
 from sqlalchemy import inspect
 
 from quantking.common.errors import InvalidPathError
+from quantking.common.paths import is_reparse_point
 from quantking.jobs.adapters.persistence import sqlite as sqlite_adapter
 from quantking.jobs.adapters.persistence.sqlite import create_sqlite_engine, initialize_database
+
+
+def _ensure_link(link: Path, target: Path) -> None:
+    """Create ``link`` as a symlink or junction to ``target``, or skip the test."""
+    with contextlib.suppress(OSError):
+        link.symlink_to(target, target_is_directory=True)
+    if not os.path.lexists(link):
+        junction = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if junction.returncode != 0:
+            pytest.skip("symlink and junction creation unavailable")
+    if not is_reparse_point(link):
+        pytest.skip("link was not created as a reparse point")
 
 
 def _sha256(path: Path) -> str:
@@ -80,17 +100,7 @@ def test_initialization_rejects_a_symlink_or_junction_parent(tmp_path: Path) -> 
     outside = tmp_path / "outside"
     outside.mkdir()
     linked_parent = tmp_path / "linked"
-    try:
-        linked_parent.symlink_to(outside, target_is_directory=True)
-    except OSError as error:
-        junction = subprocess.run(
-            ["cmd.exe", "/d", "/c", "mklink", "/J", str(linked_parent), str(outside)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if junction.returncode != 0:
-            pytest.skip(f"symlink and junction creation unavailable: {error}")
+    _ensure_link(linked_parent, outside)
 
     with pytest.raises(InvalidPathError, match="symbolic link or junction"):
         initialize_database(linked_parent / "jobs.db")
@@ -107,7 +117,7 @@ def test_initialization_reparse_guard_is_exercised_without_platform_skip(
     database = managed_parent / "jobs.db"
     monkeypatch.setattr(
         sqlite_adapter,
-        "_is_reparse_point",
+        "is_reparse_point",
         lambda path: path == managed_parent,
     )
 

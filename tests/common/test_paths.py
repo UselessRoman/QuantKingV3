@@ -1,10 +1,29 @@
+import contextlib
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from quantking.common.errors import InvalidPathError
-from quantking.common.paths import RuntimePaths, resolve_under
+from quantking.common.paths import RuntimePaths, is_reparse_point, resolve_under
+
+
+def _ensure_link(link: Path, target: Path) -> None:
+    """Create ``link`` as a symlink or junction to ``target``, or skip the test."""
+    with contextlib.suppress(OSError):
+        link.symlink_to(target, target_is_directory=True)
+    if not os.path.lexists(link):
+        junction = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if junction.returncode != 0:
+            pytest.skip("symlink and junction creation unavailable")
+    if not is_reparse_point(link):
+        pytest.skip("link was not created as a reparse point")
 
 
 def test_runtime_paths_are_absolute_separate_and_do_not_create_directories(tmp_path: Path) -> None:
@@ -65,17 +84,7 @@ def test_resolve_under_rejects_existing_symlink_or_junction_escape(tmp_path: Pat
     root.mkdir()
     outside.mkdir()
     link = root / "escape"
-    try:
-        link.symlink_to(outside, target_is_directory=True)
-    except OSError as error:
-        junction = subprocess.run(
-            ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(outside)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if junction.returncode != 0:
-            pytest.skip(f"symlink and junction creation unavailable: {error}")
+    _ensure_link(link, outside)
 
     with pytest.raises(InvalidPathError, match="escape"):
         resolve_under(root, Path("escape") / "artifact.json")

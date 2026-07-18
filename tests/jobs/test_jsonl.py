@@ -1,14 +1,34 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from quantking.common.errors import InvalidPathError
+from quantking.common.paths import is_reparse_point
 from quantking.jobs.jsonl import JsonLinesHandler
+
+
+def _ensure_link(link: Path, target: Path) -> None:
+    """Create ``link`` as a symlink or junction to ``target``, or skip the test."""
+    with contextlib.suppress(OSError):
+        link.symlink_to(target, target_is_directory=True)
+    if not os.path.lexists(link):
+        junction = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if junction.returncode != 0:
+            pytest.skip("symlink and junction creation unavailable")
+    if not is_reparse_point(link):
+        pytest.skip("link was not created as a reparse point")
 
 
 def test_jsonl_handler_emits_schema_and_recursively_masks_secrets(tmp_path: Path) -> None:
@@ -94,16 +114,7 @@ def test_jsonl_handler_rejects_symlink_escape(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     escape = managed_root / "escape"
-    try:
-        escape.symlink_to(outside, target_is_directory=True)
-    except OSError:
-        result = subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(escape), str(outside)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
+    _ensure_link(escape, outside)
 
     with pytest.raises(InvalidPathError):
         JsonLinesHandler(managed_root, "escape/leak.jsonl")

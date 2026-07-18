@@ -67,13 +67,20 @@ class TestStage1DocsExist:
         assert "7e4e5b38b7fc91edaf8727ed55b1e26435373aea" in evidence
         assert "S1-01 通过" not in evidence and "Stage 1 完成" not in evidence
         tasks = _read(_STAGE1_DIR / "TASKS.md")
-        assert "S1-02 已获实施授权" in tasks or "S1-02 已获授权" in tasks
+        # After S1-02-R1 lands, TASKS.md records that S1-02 main acceptance
+        # failed and S1-02-R1 is in repair pending main acceptance.
+        assert "S1-02 主验收未通过" in tasks
+        assert "S1-02-R1 修复中、待主验收" in tasks
 
-    def test_s1_02_status_is_authorized_in_progress(self) -> None:
+    def test_s1_02_r1_status_is_in_repair(self) -> None:
         for name in ("README.md", "TASKS.md", "ACCEPTANCE.md"):
             text = _read(_STAGE1_DIR / name)
-            assert "S1-02 已获实施授权并进行中" in text or ("S1-02 已获实施授权" in text), (
-                f"{name} must record S1-02 is authorized in progress"
+            assert "S1-02 主验收未通过" in text, f"{name} must record S1-02 main acceptance failed"
+            assert "S1-02-R1 修复中、待主验收" in text, (
+                f"{name} must record S1-02-R1 is in repair pending main acceptance"
+            )
+            assert "S1-03～S1-08 未开始、未获授权" in text or "未开始、未获授权" in text, (
+                f"{name} must record S1-03～S1-08 are not started and not authorized"
             )
 
     def test_main_acceptance_task_order_is_restored(self) -> None:

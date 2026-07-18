@@ -37,36 +37,59 @@ import contextlib
 import datetime as _dt
 import json
 import os
-import shutil
-import sys
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from quantking.common.errors import IdempotencyConflictError, InvalidPathError
-from quantking.data.adapters.warehouse.errors import RawStoreError
+from quantking.data.adapters.warehouse.errors import ManifestIntegrityError, RawStoreError
 from quantking.data.adapters.warehouse.manifest import (
     RAW_COMPLETE_FILENAME,
     RAW_FAILURE_FILENAME,
     RAW_INPUT_LISTING_FILENAME,
     RAW_MANIFEST_FILENAME,
+    RAW_MANIFEST_SCHEMA_VERSION,
     RawManifest,
     RawManifestFile,
     compute_sha256,
     load_raw_manifest,
     validate_managed_relative,
 )
+from quantking.data.adapters.warehouse.verifier import (
+    assert_path_under_root,
+    verify_data_root,
+    verify_raw_directory,
+)
 
-_INVALID_COMPONENT_CHARS = set('<>"|?*\r\n\t\x00')
+# Characters that are never allowed in a single path component. This is
+# deliberately stricter than ``_MANAGED_RE`` because source/dataset/batch_id
+# become directory names and must never carry path separators, drive
+# letters, namespace colons, control characters or whitespace.
+_INVALID_COMPONENT_CHARS = set('<>"|?*\r\n\t\x00\\/:')
 
 
 def _validate_managed_component(value: str, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise InvalidPathError(f"{field} must be non-empty text")
+    """Validate that ``value`` is a single safe path component.
+
+    A safe component is a non-empty string with no path separators
+    (``/`` or ``\\``), no drive letters, no colons, no control
+    characters, no leading or trailing whitespace, no ``.`` or ``..``
+    relative references, and no reserved ``.incomplete`` suffix
+    (case-insensitive).
+    """
+    if not isinstance(value, str):
+        raise InvalidPathError(f"{field} must be a string")
+    if not value or value != value.strip():
+        raise InvalidPathError(f"{field} must not be empty or carry trailing whitespace")
     if any(ch in _INVALID_COMPONENT_CHARS for ch in value):
-        raise InvalidPathError(f"{field} must not contain control characters")
+        raise InvalidPathError(
+            f"{field} must not contain path separators, colons or control characters"
+        )
     if value in {".", ".."}:
         raise InvalidPathError(f"{field} must not be a relative reference")
+    if value.lower().endswith(".incomplete"):
+        raise InvalidPathError(f"{field} must not use the reserved .incomplete suffix")
     return value
 
 
@@ -117,15 +140,7 @@ class RawBatchPublisher:
     """
 
     def __init__(self, *, data_root: Path) -> None:
-        root = Path(data_root)
-        if not root.is_absolute():
-            raise InvalidPathError("data_root must be an absolute path")
-        if root.is_symlink() or _is_windows_junction(root):
-            raise InvalidPathError(
-                "data_root must not be a symlink or junction",
-                context={"path": str(root)},
-            )
-        self._data_root = root.resolve()
+        self._data_root = verify_data_root(data_root)
 
     # -- public API ---------------------------------------------------------
 
@@ -169,7 +184,7 @@ class RawBatchPublisher:
         except OSError as error:
             raise RawStoreError(
                 "failed to create incomplete directory",
-                context={"batch_id": request.batch_id, "detail": str(error)},
+                context={"batch_id": request.batch_id},
             ) from error
         try:
             self._write_input_listing(incomplete, request)
@@ -182,50 +197,55 @@ class RawBatchPublisher:
             os.replace(incomplete, final)
         except Exception as error:
             self._preserve_failure(incomplete, request, error)
-            if not incomplete.exists():
-                # The atomic rename may have succeeded but the metadata
-                # failed; remove the empty final directory so a retry
-                # with the same batch id starts clean. The incomplete
-                # directory is preserved for forensic review.
-                self._safe_rmdir(final)
             raise RawStoreError(
                 "raw batch publish failed",
-                context={"batch_id": request.batch_id, "detail": str(error)},
+                context={"batch_id": request.batch_id},
             ) from error
-        self._validate_final(final, manifest=manifest)
+        self._validate_final(final)
         return final
 
     def _reconcile_existing(self, final: Path, request: RawBatchPublishRequest) -> Path:
-        manifest_path = final / RAW_MANIFEST_FILENAME
-        if not manifest_path.is_file():
+        # Run the unified strict verifier first. Any on-disk integrity
+        # failure (tampered manifest, mutated file, missing COMPLETE)
+        # surfaces as IdempotencyConflictError here because the caller is
+        # trying to re-publish the same request against a directory that
+        # no longer matches its declared state.
+        try:
+            verified = verify_raw_directory(final, data_root=self._data_root)
+        except ManifestIntegrityError as error:
             raise IdempotencyConflictError(
-                "existing raw directory has no manifest",
+                "existing raw directory failed integrity verification",
                 context={"batch_id": request.batch_id},
-            )
-        previous = load_raw_manifest(final)
-        current = self._build_manifest(request).to_canonical_json()
-        if previous.get("manifest_schema_version") != "raw-manifest.v1":
+            ) from error
+        previous = verified.manifest
+        if previous.get("manifest_schema_version") != RAW_MANIFEST_SCHEMA_VERSION:
             raise IdempotencyConflictError(
                 "raw manifest schema version is unsupported",
                 context={"batch_id": request.batch_id},
             )
-        existing_payload = json.dumps(
-            {
-                "manifest_schema_version": previous.get("manifest_schema_version"),
-                "code_version": previous.get("code_version"),
-                "source": previous.get("source"),
-                "dataset": previous.get("dataset"),
-                "batch_id": previous.get("batch_id"),
-                "adapter_version": previous.get("adapter_version"),
-                "created_at": previous.get("created_at"),
-                "request_params": previous.get("request_params"),
-                "files": previous.get("files"),
-            },
+        # Compare the on-disk manifest against the request's expected
+        # manifest. The request's manifest is deterministic, so the
+        # canonical JSON bytes must match exactly.
+        current_manifest = self._build_manifest(request)
+        current_json = current_manifest.to_canonical_json()
+        previous_json_parts = {
+            "manifest_schema_version": previous.get("manifest_schema_version"),
+            "code_version": previous.get("code_version"),
+            "source": previous.get("source"),
+            "dataset": previous.get("dataset"),
+            "batch_id": previous.get("batch_id"),
+            "adapter_version": previous.get("adapter_version"),
+            "created_at": previous.get("created_at"),
+            "request_params": previous.get("request_params"),
+            "files": previous.get("files"),
+        }
+        previous_json = json.dumps(
+            previous_json_parts,
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
         )
-        if existing_payload != current:
+        if previous_json != current_json:
             raise IdempotencyConflictError(
                 "raw batch is already published with different inputs",
                 context={"batch_id": request.batch_id},
@@ -240,12 +260,7 @@ class RawBatchPublisher:
             self._write_file(target, entry.payload)
 
     def _write_file(self, target: Path, payload: bytes) -> None:
-        """Override this in tests to inject failures.
-
-        The default implementation is :func:`_default_write_file`. We
-        route through a method so subclasses can replace the behaviour
-        without rebinding the instance attribute at construction time.
-        """
+        """Override this in tests to inject failures."""
         _default_write_file(target, payload)
 
     def _write_input_listing(self, directory: Path, request: RawBatchPublishRequest) -> None:
@@ -285,20 +300,16 @@ class RawBatchPublisher:
 
     def _write_manifest(self, directory: Path, manifest: RawManifest) -> None:
         target = directory / RAW_MANIFEST_FILENAME
-        target.write_text(manifest.to_canonical_json(), encoding="utf-8")
+        # Write the signed manifest (with embedded manifest_sha256) so
+        # the on-disk file is self-validating.
+        target.write_text(manifest.to_signed_json(), encoding="utf-8")
 
     def _verify_inventory(self, directory: Path, manifest: RawManifest) -> None:
+        # Pre-rename inventory check: verify every declared file is on
+        # disk with the expected size and SHA. The unified verifier is
+        # not used here because the manifest has not been promoted to
+        # its final form yet (no COMPLETE marker at this stage).
         listed = {entry.relative_path: entry for entry in manifest.files}
-        on_disk: dict[str, tuple[int, str]] = {}
-        for relative in listed:
-            absolute = directory / relative
-            if not absolute.is_file():
-                raise RawStoreError(
-                    "raw manifest file is missing on disk",
-                    context={"relative_path": relative},
-                )
-            payload = absolute.read_bytes()
-            on_disk[relative] = (len(payload), compute_sha256(payload))
         managed_set = {
             RAW_MANIFEST_FILENAME,
             RAW_INPUT_LISTING_FILENAME,
@@ -313,7 +324,6 @@ class RawBatchPublisher:
             except ValueError as error:
                 raise RawStoreError(
                     "raw file escapes its managed directory",
-                    context={"path": str(absolute)},
                 ) from error
             if managed in managed_set:
                 continue
@@ -323,10 +333,21 @@ class RawBatchPublisher:
                     context={"relative_path": managed},
                 )
         for relative, entry in listed.items():
-            size, sha = on_disk[relative]
-            if size != len(entry.payload) or sha != compute_sha256(entry.payload):
+            absolute = directory / relative
+            if not absolute.is_file():
                 raise RawStoreError(
-                    "raw file does not match declared payload",
+                    "raw manifest file is missing on disk",
+                    context={"relative_path": relative},
+                )
+            payload = absolute.read_bytes()
+            if len(payload) != len(entry.payload):
+                raise RawStoreError(
+                    "raw file size does not match the declared payload",
+                    context={"relative_path": relative},
+                )
+            if compute_sha256(payload) != compute_sha256(entry.payload):
+                raise RawStoreError(
+                    "raw file SHA-256 does not match the declared payload",
                     context={"relative_path": relative},
                 )
 
@@ -342,114 +363,107 @@ class RawBatchPublisher:
             encoding="utf-8",
         )
 
-    def _validate_final(self, final: Path, *, manifest: RawManifest) -> None:
-        # Re-verify the inventory after the atomic rename so a corruption
-        # between rename and marker write is caught before the directory
-        # is treated as queryable.
-        self._verify_inventory(final, manifest)
-        marker = final / RAW_COMPLETE_FILENAME
-        if not marker.is_file():
+    def _validate_final(self, final: Path) -> None:
+        # Re-verify the final directory through the unified verifier so
+        # the on-disk state is guaranteed consistent before the caller
+        # treats the directory as published.
+        try:
+            verify_raw_directory(final, data_root=self._data_root)
+        except ManifestIntegrityError as error:
             raise RawStoreError(
-                "raw COMPLETE marker is missing after publish",
-                context={"batch_id": manifest.batch_id},
-            )
-        marker_payload = json.loads(marker.read_text(encoding="utf-8"))
-        expected = manifest.manifest_sha256()
-        if marker_payload.get("manifest_sha256") != expected:
-            raise RawStoreError(
-                "raw COMPLETE marker does not match the manifest SHA-256",
-                context={"batch_id": manifest.batch_id},
-            )
+                "raw published directory failed integrity verification",
+            ) from error
 
     def _assert_managed_target(self, root: Path, target: Path) -> None:
-        # Refuse to follow symlinks, junctions or parent escapes: every
-        # raw directory must be a tree of regular files rooted inside
-        # ``root``.
-        try:
-            resolved = target.resolve()
-            root_resolved = root.resolve()
-        except OSError as error:
-            raise InvalidPathError(
-                "raw target is not resolvable",
-                context={"target": str(target), "detail": str(error)},
-            ) from error
-        if root_resolved != resolved and root_resolved not in resolved.parents:
-            raise InvalidPathError(
-                "raw target escapes the managed data root",
-                context={"target": str(target), "root": str(root_resolved)},
-            )
-        # Refuse symlinks/junctions at the leaf and at every intermediate
-        # level. The leaf check catches the common "fake file" attack;
-        # the parent walk catches escape-via-junction at any depth.
-        if target.is_symlink() or _is_windows_junction(target):
-            raise InvalidPathError(
-                "raw target is a symlink or junction",
-                context={"target": str(target)},
-            )
-        for parent in resolved.parents:
-            if parent == root_resolved:
-                break
-            if not parent.exists():
-                continue
-            if parent.is_symlink():
-                raise InvalidPathError(
-                    "raw target uses a symlink at an intermediate level",
-                    context={"target": str(target), "intermediate": str(parent)},
-                )
-            if _is_windows_junction(parent):
-                raise InvalidPathError(
-                    "raw target uses a Windows junction",
-                    context={"target": str(target), "intermediate": str(parent)},
-                )
+        # Delegate to the shared verifier helper so the symlink/junction
+        # and containment checks are identical across Raw, Canonical and
+        # Query.
+        assert_path_under_root(self._data_root, target)
 
     def _preserve_failure(
         self, incomplete: Path, request: RawBatchPublishRequest, error: BaseException
     ) -> None:
-        failure = {
-            "batch_id": request.batch_id,
-            "source": request.source,
-            "dataset": request.dataset,
-            "failed_at": _now_iso(),
-            "error_type": type(error).__name__,
-            "error_message": str(error),
-        }
+        failure = _sanitize_failure_record(
+            {
+                "batch_id": request.batch_id,
+                "source": request.source,
+                "dataset": request.dataset,
+                "adapter_version": request.adapter_version,
+                "code_version": request.code_version,
+                "failed_at": _now_iso(),
+            },
+            error=error,
+        )
         if incomplete.exists():
             target = incomplete / RAW_FAILURE_FILENAME
             with contextlib.suppress(OSError):
                 target.write_text(
-                    json.dumps(failure, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+                    json.dumps(
+                        failure,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
                     encoding="utf-8",
                 )
+            # The input listing is already on disk (written before any
+            # payload), but we re-write a minimal listing if the failure
+            # happened before _write_input_listing had a chance to run.
+            input_listing_path = incomplete / RAW_INPUT_LISTING_FILENAME
+            if not input_listing_path.is_file():
+                with contextlib.suppress(OSError):
+                    self._write_input_listing(incomplete, request)
 
-    def _safe_rmdir(self, path: Path) -> None:
-        with contextlib.suppress(OSError):
-            if path.is_dir():
-                shutil.rmtree(path)
+
+def _sanitize_failure_record(
+    record: dict[str, object], *, error: BaseException
+) -> dict[str, object]:
+    """Return a failure record with all sensitive content removed.
+
+    The raw exception text and any absolute paths are stripped so the
+    failure.json is safe to inspect without leaking filesystem layout,
+    credentials or request keys. A stable ``error_category`` derived
+    from the exception class replaces the raw message.
+    """
+    sanitized: dict[str, object] = {}
+    for key, value in record.items():
+        if isinstance(value, str):
+            sanitized[key] = _sanitize_text(value)
+        else:
+            sanitized[key] = value
+    sanitized["error_type"] = type(error).__name__
+    sanitized["error_category"] = _classify_error(error)
+    return sanitized
+
+
+_ABSOLUTE_PATH_RE = re.compile(r"[A-Za-z]:[\\/]|^/")
+
+
+def _sanitize_text(value: str) -> str:
+    """Strip absolute paths and control characters from a string."""
+    if not isinstance(value, str):
+        return ""
+    # Replace any absolute path pattern with a redaction marker.
+    redacted = _ABSOLUTE_PATH_RE.sub("[REDACTED]", value)
+    # Remove control characters except for the common whitespace chars.
+    cleaned = "".join(ch if ch >= " " or ch in " \t" else "" for ch in redacted)
+    return cleaned
+
+
+def _classify_error(error: BaseException) -> str:
+    """Return a stable, sanitized error category."""
+    name = type(error).__name__
+    if isinstance(error, OSError):
+        return "IO_FAILURE"
+    if isinstance(error, (KeyError, ValueError, TypeError)):
+        return "CONTRACT_FAILURE"
+    if isinstance(error, (RawStoreError, ManifestIntegrityError)):
+        return "WAREHOUSE_FAILURE"
+    return f"INTERNAL_FAILURE:{name}"
 
 
 def _default_write_file(target: Path, payload: bytes) -> None:
     target.write_bytes(payload)
-
-
-def _is_windows_junction(path: Path) -> bool:
-    """Return True when ``path`` is a Windows symlink or directory junction.
-
-    Python's :meth:`Path.is_symlink` only follows links whose target
-    resolves; the constructor's :meth:`Path.symlink_to` on Windows can
-    silently fail without raising. We therefore use the file attribute
-    API to detect reparse points even when the symlink target cannot be
-    resolved. Returns False on non-Windows platforms.
-    """
-    if sys.platform != "win32":
-        return False
-    try:
-        import ctypes
-
-        FILE_ATTRIBUTE_REPARSE_POINT = 0x400
-        attrs = ctypes.windll.kernel32.GetFileAttributesW(str(path))
-        return attrs != -1 and bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
-    except (OSError, AttributeError):
-        return path.is_symlink()
 
 
 __all__ = [

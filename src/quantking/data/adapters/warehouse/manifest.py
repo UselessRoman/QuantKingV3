@@ -31,6 +31,7 @@ RAW_INPUT_LISTING_FILENAME = "input_listing.json"
 WAREHOUSE_MANIFEST_FILENAME = "manifest.json"
 WAREHOUSE_COMPLETE_FILENAME = "COMPLETE"
 WAREHOUSE_FAILURE_FILENAME = "failure.json"
+WAREHOUSE_INPUT_LISTING_FILENAME = "input_listing.json"
 
 RAW_MANIFEST_SCHEMA_VERSION = "raw-manifest.v1"
 WAREHOUSE_MANIFEST_SCHEMA_VERSION = "warehouse-manifest.v1"
@@ -178,6 +179,20 @@ class RawManifest:
 
     def manifest_sha256(self) -> str:
         return compute_sha256(self.to_canonical_json().encode("utf-8"))
+
+    def to_signed_json(self) -> str:
+        """Return the canonical manifest JSON with ``manifest_sha256`` embedded.
+
+        The SHA-256 is computed from :meth:`to_canonical_json` (which omits
+        the field) and then injected into the output JSON so the on-disk
+        file is self-validating. The unified published-directory verifier
+        re-computes the hash from the canonical bytes and compares.
+        """
+        without_hash = self.to_canonical_json()
+        digest = compute_sha256(without_hash.encode("utf-8"))
+        payload = json.loads(without_hash)
+        payload["manifest_sha256"] = digest
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,6 +392,7 @@ __all__ = [
     "RAW_MANIFEST_SCHEMA_VERSION",
     "WAREHOUSE_COMPLETE_FILENAME",
     "WAREHOUSE_FAILURE_FILENAME",
+    "WAREHOUSE_INPUT_LISTING_FILENAME",
     "WAREHOUSE_MANIFEST_FILENAME",
     "WAREHOUSE_MANIFEST_SCHEMA_VERSION",
     "CanonicalManifest",

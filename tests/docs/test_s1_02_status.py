@@ -1,12 +1,13 @@
-# ruff: noqa: RUF001
-"""Status wording tests for the Stage 1 S1-02 deliverable (this commit).
+# ruff: noqa: RUF001, RUF002, RUF003
+"""Status wording tests for the Stage 1 S1-02-R1 repair.
 
-These tests must pass once the S1-02 implementation lands. They check that:
+These tests assert the post-R1 status wording: S1-02 main acceptance failed
+and S1-02-R1 is in repair pending main acceptance; S1-03～S1-08 are not
+started and not authorized.
 
 * The S1-02 implementation is present under ``src/quantking/data/adapters/warehouse``.
-* The Stage 1 status wording consistently says S1-02 is in progress.
-* The S1-02 implementation is the only warehouse implementation (no S1-03
-  data source adapter has been merged yet).
+* The Stage 1 status wording consistently says S1-02-R1 is in repair.
+* S1-03 has not been started.
 """
 
 from __future__ import annotations
@@ -42,10 +43,11 @@ class TestStage1StatusWording:
         "doc",
         ("README.md", "TASKS.md", "ACCEPTANCE.md"),
     )
-    def test_s1_02_in_progress(self, doc: str) -> None:
+    def test_s1_02_r1_in_repair(self, doc: str) -> None:
         text = (_STAGE1_DIR / doc).read_text(encoding="utf-8")
-        assert "S1-02 已获实施授权并进行中" in text, (
-            f"{doc} must state S1-02 is authorized and in progress"
+        assert "S1-02 主验收未通过" in text, f"{doc} must state S1-02 main acceptance failed"
+        assert "S1-02-R1 修复中、待主验收" in text, (
+            f"{doc} must state S1-02-R1 is in repair pending main acceptance"
         )
 
     @pytest.mark.parametrize(
@@ -55,11 +57,11 @@ class TestStage1StatusWording:
     def test_s1_03_not_started(self, doc: str) -> None:
         text = (_STAGE1_DIR / doc).read_text(encoding="utf-8")
         assert "S1-03" in text
-        # Either S1-03 has not been started or is explicitly forbidden.
-        assert "S1-03～S1-08" in text or "S1-03 尚未开始" in text or "未开始、未获实施授权" in text
+        # S1-03～S1-08 must remain not started and not authorized.
+        assert "S1-03～S1-08 未开始、未获授权" in text or "未开始、未获授权" in text
 
     def test_s1_02_does_not_describe_stage1_complete(self) -> None:
-        # S1-02's landing must not claim Stage 1 itself is complete.
+        # S1-02-R1 must not claim Stage 1 itself is complete.
         for doc in ("README.md", "TASKS.md", "ACCEPTANCE.md"):
             text = (_STAGE1_DIR / doc).read_text(encoding="utf-8")
             assert "Stage 1 已完成验收" not in text

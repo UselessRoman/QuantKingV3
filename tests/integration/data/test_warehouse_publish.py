@@ -669,7 +669,7 @@ class TestPublishAtomicity:
                 code_version="s1-02",
                 rule_version="quality-rules.v1",
             )
-            with pytest.raises(RuntimeError):
+            with pytest.raises(CanonicalWarehouseError):
                 warehouse.publish(request)
             final = (
                 tmp_path

@@ -15,6 +15,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
+from quantking.common.paths import is_reparse_point
 from quantking.common.time import UtcTimestamp
 from quantking.data.adapters.persistence.maintenance import (
     MaintenanceFailureCode,
@@ -288,13 +289,12 @@ class TestRunIdAndManagedPathAttacks:
         database = _build_stage0_database(tmp_path)
         reparse_root = tmp_path / "snapshot-reparse"
         reparse_root.mkdir()
-        method_name = "is_symlink" if reparse_kind == "symlink" else "is_junction"
-        original = getattr(Path, method_name)
+        original = is_reparse_point
 
         def detect_reparse(path: Path) -> bool:
             return path == reparse_root or original(path)
 
-        monkeypatch.setattr(Path, method_name, detect_reparse)
+        monkeypatch.setattr("quantking.common.paths.is_reparse_point", detect_reparse)
         request = MigrationRequest(
             run_id=f"mig-{reparse_kind}",
             database_path=database,

@@ -8,15 +8,24 @@ query is dispatched through DuckDB with a parameterised filter and
 returns a deterministic ``pyarrow.Table`` ordered by the canonical
 sort key.
 
-Before the query is dispatched, the adapter re-validates the on-disk
-file set against the deterministic manifest and refuses to query any
-version whose file inventory is missing, has extra files, has a size
-or SHA-256 mismatch, or whose ``COMPLETE`` marker is tampered with.
+Before the query is dispatched, the adapter routes through the unified
+strict published-directory verifier
+(:func:`quantking.data.adapters.warehouse.verifier.verify_canonical_directory`)
+so the on-disk manifest, COMPLETE marker, file inventory, per-file
+SHA-256/row count and Parquet schema are all revalidated. It then
+compares the disk manifest credentials against the SQLite
+:class:`DatasetVersion` row (manifest_sha256, dataset, version_id,
+schema_version, code_version, rule_version, parent_version_id,
+input_batch_ids, coverage_start/end/summary, row_count,
+security_count) and refuses to query if any credential differs.
+
+Legal empty versions (zero Parquet files) are served as a zero-row
+:class:`pyarrow.Table` with the dataset's canonical schema, without
+ever entering the DuckDB UNION ALL path.
 """
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -24,11 +33,10 @@ from pathlib import Path
 
 import duckdb
 import pyarrow as pa
-import pyarrow.compute as pc
 
 from quantking.common.errors import InvalidPathError
 from quantking.common.time import TradingDate
-from quantking.data.adapters.canonical_schema import sort_key
+from quantking.data.adapters.canonical_schema import canonical_schema, sort_key
 from quantking.data.adapters.persistence.sqlite import DataSqliteUnitOfWorkFactory
 from quantking.data.adapters.warehouse.errors import (
     DatasetVersionNotQueryableError,
@@ -36,22 +44,29 @@ from quantking.data.adapters.warehouse.errors import (
     ManifestIntegrityError,
     QueryContractError,
 )
-from quantking.data.adapters.warehouse.manifest import (
-    WAREHOUSE_COMPLETE_FILENAME,
-    WAREHOUSE_MANIFEST_FILENAME,
-    path_safe_id,
-    validate_managed_relative,
+from quantking.data.adapters.warehouse.manifest import path_safe_id
+from quantking.data.adapters.warehouse.verifier import (
+    VerifiedDirectory,
+    verify_canonical_directory,
+    verify_data_root,
 )
-from quantking.data.adapters.warehouse.partitioning import partition_scheme_for
 from quantking.data.models import DatasetKind, DatasetVersion, DatasetVersionStatus
+from quantking.data.schemas import descriptor_for
 
 _ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*:[0-9a-fA-F-]{36}\Z")
 _PATH_RE = re.compile(r"^[A-Za-z]:[\\/]|^[\\/]")
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
 
 @dataclass(frozen=True, slots=True)
 class CanonicalQueryRequest:
-    """A read-only, schema-allowlist query against one published version."""
+    """A read-only, schema-allowlist query against one published version.
+
+    ``fields`` is ``None`` (the default) to select every canonical
+    field, or a non-empty tuple of canonical field names. An empty
+    tuple is a contract error: callers must either omit ``fields`` or
+    list at least one column.
+    """
 
     version_id: str
     dataset: str
@@ -72,10 +87,26 @@ class CanonicalQueryRequest:
                 "dataset is not a canonical dataset kind",
                 context={"dataset": self.dataset},
             ) from error
-        if self.fields is not None and not isinstance(self.fields, tuple):
-            object.__setattr__(self, "fields", tuple(self.fields))
-        if self.codes is not None and not isinstance(self.codes, tuple):
-            object.__setattr__(self, "codes", tuple(self.codes))
+        if self.fields is not None:
+            if not isinstance(self.fields, tuple):
+                object.__setattr__(self, "fields", tuple(self.fields))
+            if len(self.fields) == 0:
+                raise QueryContractError(
+                    "fields must be None or a non-empty tuple of canonical field names"
+                )
+            for name in self.fields:
+                if not isinstance(name, str) or not name.strip():
+                    raise QueryContractError("fields must contain non-empty strings only")
+        if self.codes is not None:
+            if not isinstance(self.codes, tuple):
+                object.__setattr__(self, "codes", tuple(self.codes))
+            if len(self.codes) == 0:
+                raise QueryContractError(
+                    "codes must be None or a non-empty tuple of canonical security codes"
+                )
+            for code in self.codes:
+                if not isinstance(code, str) or not code.strip():
+                    raise QueryContractError("codes must contain non-empty strings only")
         if self.start_date is not None and not isinstance(self.start_date, TradingDate):
             raise QueryContractError("start_date must be a TradingDate or None")
         if self.end_date is not None and not isinstance(self.end_date, TradingDate):
@@ -112,12 +143,11 @@ class CanonicalQueryAdapter:
     """
 
     def __init__(self, *, data_root: Path, uow_factory: DataSqliteUnitOfWorkFactory) -> None:
-        root = Path(data_root)
-        if not root.is_absolute():
-            raise InvalidPathError("data_root must be an absolute path")
+        # ``verify_data_root`` rejects symlinks and Windows junctions
+        # so an attacker cannot redirect the managed tree.
+        self._data_root = verify_data_root(data_root)
         if uow_factory is None:
             raise QueryContractError("uow_factory is required")
-        self._data_root = root.resolve()
         self._uow_factory = uow_factory
 
     # -- public API ---------------------------------------------------------
@@ -136,13 +166,7 @@ class CanonicalQueryAdapter:
         start_date: TradingDate | None = None,
         end_date: TradingDate | None = None,
     ) -> pa.Table:
-        """Convenience wrapper that builds a :class:`CanonicalQueryRequest`.
-
-        Most call sites only know the version id, dataset and a small
-        set of filters; accepting them as keyword arguments makes the
-        common case ergonomic while still funnelling every query
-        through the same allowlist and parameterised DuckDB path.
-        """
+        """Convenience wrapper that builds a :class:`CanonicalQueryRequest`."""
         request = CanonicalQueryRequest(
             version_id=version_id,
             dataset=dataset,
@@ -165,10 +189,9 @@ class CanonicalQueryAdapter:
         try:
             version = self._load_version(request)
             directory = self._directory_for(version)
-            manifest = self._verify_manifest(directory, version)
-            self._verify_complete(directory, manifest)
-            self._verify_inventory(directory, manifest)
-            return self._run_query(directory, manifest, request, version)
+            verified = verify_canonical_directory(directory, data_root=self._data_root)
+            self._verify_credentials(verified, version)
+            return self._run_query(verified, request, version)
         except (ManifestIntegrityError, IncompatibleInputError) as error:
             raise DatasetVersionNotQueryableError(
                 "dataset version is not queryable",
@@ -240,277 +263,281 @@ class CanonicalQueryAdapter:
             ) from error
         return self._data_root / "warehouse" / version.dataset.value / directory_name
 
-    def _verify_manifest(self, directory: Path, version: DatasetVersion) -> dict[str, object]:
-        target = directory / WAREHOUSE_MANIFEST_FILENAME
-        if not target.is_file():
-            raise ManifestIntegrityError(
-                "canonical manifest is missing",
-                context={"version_id": str(version.version_id)},
+    # -- credential binding -------------------------------------------------
+
+    def _verify_credentials(self, verified: VerifiedDirectory, version: DatasetVersion) -> None:
+        """Compare disk manifest credentials against the SQLite DatasetVersion.
+
+        Every credential field listed in the S1-02-R1 contract must
+        match exactly; any mismatch raises
+        :class:`DatasetVersionNotQueryableError` so callers see a
+        stable, sanitised error rather than silently reading a
+        directory whose on-disk state drifted from the metadata.
+        """
+        manifest = verified.manifest
+        version_id = str(version.version_id)
+        # ``manifest_sha256``: the SQLite row's manifest_sha256 is the
+        # authoritative credential set at VALIDATED time. It must be a
+        # 64-char lowercase hex string and equal the on-disk manifest
+        # SHA (already verified by the unified verifier).
+        sqlite_sha = version.manifest_sha256
+        if not isinstance(sqlite_sha, str) or not _HEX64_RE.match(sqlite_sha):
+            raise DatasetVersionNotQueryableError(
+                "dataset version is missing a valid manifest_sha256",
+                context={"version_id": version_id},
             )
-        raw = target.read_bytes()
-        try:
-            manifest = json.loads(raw.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
-            raise ManifestIntegrityError(
-                "canonical manifest is not valid JSON",
-                context={"version_id": str(version.version_id), "detail": str(error)},
-            ) from error
-        if not isinstance(manifest, dict):
-            raise ManifestIntegrityError("canonical manifest must be a JSON object")
-        # The manifest is written deterministically (sorted keys, fixed
-        # separators, no extraneous whitespace). Re-serialising the parsed
-        # payload with the same rules must reproduce the on-disk bytes
-        # exactly; any divergence (trailing whitespace, reformatted JSON,
-        # injected keys) means the file was tampered with after publishing.
-        canonical_bytes = json.dumps(
-            manifest,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        if raw != canonical_bytes:
-            raise ManifestIntegrityError(
-                "manifest bytes are not in canonical deterministic form",
-                context={"version_id": str(version.version_id)},
+        if sqlite_sha != verified.manifest_sha:
+            raise DatasetVersionNotQueryableError(
+                "SQLite manifest_sha256 does not match the disk manifest",
+                context={"version_id": version_id},
             )
-        if manifest.get("manifest_schema_version") != "warehouse-manifest.v1":
-            raise ManifestIntegrityError(
-                "manifest schema version is unsupported",
-                context={"version_id": str(version.version_id)},
-            )
-        if manifest.get("version_id") != str(version.version_id):
-            raise ManifestIntegrityError(
-                "manifest version_id does not match the dataset version",
-                context={"version_id": str(version.version_id)},
-            )
+        # ``dataset`` and ``version_id``: already cross-checked by
+        # ``_load_version`` and the verifier, but we re-check here so
+        # a tampered manifest cannot bypass the binding.
         if manifest.get("dataset") != version.dataset.value:
-            raise ManifestIntegrityError(
+            raise DatasetVersionNotQueryableError(
                 "manifest dataset does not match the dataset version",
-                context={"version_id": str(version.version_id)},
+                context={"version_id": version_id},
             )
-        declared = manifest.get("manifest_sha256")
-        if not isinstance(declared, str):
-            raise ManifestIntegrityError(
-                "manifest is missing its own SHA-256",
-                context={"version_id": str(version.version_id)},
+        if manifest.get("version_id") != version_id:
+            raise DatasetVersionNotQueryableError(
+                "manifest version_id does not match the dataset version",
+                context={"version_id": version_id},
             )
-        # The on-disk manifest embeds its own SHA-256. The field
-        # itself is excluded from the hash, so to verify we strip the
-        # field, re-serialise, hash and compare. Combined with the
-        # canonical-bytes check above this catches both structural and
-        # whitespace-level tampering.
-        from quantking.data.adapters.warehouse.manifest import compute_sha256
-
-        without_self_hash = {k: v for k, v in manifest.items() if k != "manifest_sha256"}
-        expected = compute_sha256(
-            json.dumps(
-                without_self_hash,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
+        # ``schema_version``: the manifest must use the dataset
+        # descriptor's schema_version so it lines up with the
+        # DatasetVersion's schema_version exactly.
+        expected_schema_version = descriptor_for(version.dataset.value).schema_version
+        if manifest.get("schema_version") != expected_schema_version:
+            raise DatasetVersionNotQueryableError(
+                "manifest schema_version does not match the dataset contract",
+                context={"version_id": version_id},
+            )
+        if manifest.get("schema_version") != version.schema_version:
+            raise DatasetVersionNotQueryableError(
+                "manifest schema_version does not match the SQLite row",
+                context={"version_id": version_id},
+            )
+        # ``code_version`` and ``rule_version``.
+        if manifest.get("code_version") != version.code_version:
+            raise DatasetVersionNotQueryableError(
+                "manifest code_version does not match the SQLite row",
+                context={"version_id": version_id},
+            )
+        if manifest.get("rule_version") != version.rule_version:
+            raise DatasetVersionNotQueryableError(
+                "manifest rule_version does not match the SQLite row",
+                context={"version_id": version_id},
+            )
+        # ``parent_version_id``.
+        manifest_parent = manifest.get("parent_version_id")
+        sqlite_parent = (
+            str(version.parent_version_id) if version.parent_version_id is not None else None
         )
-        if expected != declared:
-            raise ManifestIntegrityError(
-                "manifest SHA-256 does not match the on-disk file",
-                context={"version_id": str(version.version_id)},
+        if manifest_parent != sqlite_parent:
+            raise DatasetVersionNotQueryableError(
+                "manifest parent_version_id does not match the SQLite row",
+                context={"version_id": version_id},
             )
-        files = manifest.get("files")
-        if not isinstance(files, list) or not all(isinstance(entry, dict) for entry in files):
-            raise ManifestIntegrityError(
-                "manifest files entry is not a list of dicts",
-                context={"version_id": str(version.version_id)},
+        # ``input_batch_ids``.
+        manifest_batches_raw = manifest.get("input_batch_ids", [])
+        manifest_batches = (
+            [str(b) for b in manifest_batches_raw] if isinstance(manifest_batches_raw, list) else []
+        )
+        sqlite_batches = [str(b) for b in version.input_batch_ids]
+        if sorted(manifest_batches) != sorted(sqlite_batches):
+            raise DatasetVersionNotQueryableError(
+                "manifest input_batch_ids do not match the SQLite row",
+                context={"version_id": version_id},
             )
-        return manifest
-
-    def _verify_complete(self, directory: Path, manifest: dict[str, object]) -> dict[str, object]:
-        target = directory / WAREHOUSE_COMPLETE_FILENAME
-        if not target.is_file():
-            raise ManifestIntegrityError(
-                "warehouse COMPLETE marker is missing",
-                context={"version_id": str(manifest.get("version_id", ""))},
+        # ``coverage_start`` and ``coverage_end``: stored as ISO
+        # strings in the manifest; the SQLite row carries
+        # :class:`TradingDate` values.
+        manifest_start = manifest.get("coverage_start")
+        sqlite_start = (
+            version.coverage_start.value.isoformat() if version.coverage_start is not None else None
+        )
+        if manifest_start != sqlite_start:
+            raise DatasetVersionNotQueryableError(
+                "manifest coverage_start does not match the SQLite row",
+                context={"version_id": version_id},
             )
-        try:
-            payload = json.loads(target.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as error:
-            raise ManifestIntegrityError(
-                "COMPLETE marker is not valid JSON",
-                context={"detail": str(error)},
-            ) from error
-        if not isinstance(payload, dict):
-            raise ManifestIntegrityError("COMPLETE marker must be a JSON object")
-        if payload.get("version_id") != manifest.get("version_id"):
-            raise ManifestIntegrityError(
-                "COMPLETE marker does not bind to the manifest version_id",
-                context={"version_id": str(manifest.get("version_id", ""))},
+        manifest_end = manifest.get("coverage_end")
+        sqlite_end = (
+            version.coverage_end.value.isoformat() if version.coverage_end is not None else None
+        )
+        if manifest_end != sqlite_end:
+            raise DatasetVersionNotQueryableError(
+                "manifest coverage_end does not match the SQLite row",
+                context={"version_id": version_id},
             )
-        complete_sha = payload.get("manifest_sha256")
-        manifest_sha = manifest.get("manifest_sha256")
-        if (
-            isinstance(complete_sha, str)
-            and isinstance(manifest_sha, str)
-            and complete_sha != manifest_sha
-        ):
-            raise ManifestIntegrityError(
-                "COMPLETE manifest_sha256 does not match the manifest",
-                context={"version_id": str(manifest.get("version_id", ""))},
+        # ``coverage_summary``: the manifest's summary must be a
+        # superset of (or equal to) the SQLite row's summary. The
+        # publish coordinator always writes the full computed summary,
+        # so the SQLite row should also carry the full set.
+        manifest_summary = manifest.get("coverage_summary")
+        if not isinstance(manifest_summary, dict):
+            raise DatasetVersionNotQueryableError(
+                "manifest coverage_summary is not a JSON object",
+                context={"version_id": version_id},
             )
-        return payload
-
-    def _verify_inventory(
-        self, directory: Path, manifest: dict[str, object]
-    ) -> list[dict[str, object]]:
-        listed = manifest.get("files")
-        if not isinstance(listed, list):
-            raise ManifestIntegrityError("manifest files is not a list")
-        declared: list[dict[str, object]] = []
-        for entry in listed:
-            if not isinstance(entry, dict):
-                raise ManifestIntegrityError("manifest file entry is not a dict")
-            relative = entry.get("relative_path")
-            if not isinstance(relative, str):
-                raise ManifestIntegrityError("manifest file relative_path is not a string")
-            try:
-                validate_managed_relative(relative, field="relative_path")
-            except InvalidPathError as error:
-                raise ManifestIntegrityError(
-                    "manifest contains an unsafe relative path",
-                    context={"relative_path": relative, "detail": str(error)},
-                ) from error
-            absolute = (directory / relative).resolve()
-            try:
-                absolute.relative_to(directory.resolve())
-            except ValueError as error:
-                raise ManifestIntegrityError(
-                    "manifest file escapes the managed directory",
-                    context={"relative_path": relative, "detail": str(error)},
-                ) from error
-            if not absolute.is_file():
-                raise ManifestIntegrityError(
-                    "manifest file is missing on disk",
-                    context={"relative_path": relative},
+        for key, expected in version.coverage_summary.items():
+            actual = manifest_summary.get(key)
+            if actual != expected:
+                raise DatasetVersionNotQueryableError(
+                    "manifest coverage_summary does not match the SQLite row",
+                    context={"version_id": version_id, "field": key},
                 )
-            size = entry.get("size")
-            if not isinstance(size, int) or size < 0:
-                raise ManifestIntegrityError(
-                    "manifest file size is not a non-negative integer",
-                    context={"relative_path": relative},
+        # ``row_count`` and ``security_count``: stored as strings in
+        # the manifest's ``coverage_summary`` and as ints in the
+        # SQLite row. The manifest's per-file row counts have already
+        # been summed by the verifier; here we compare the summary
+        # values against the SQLite row's authoritative counts.
+        if version.row_count is not None:
+            manifest_row_count = manifest_summary.get("row_count")
+            if manifest_row_count is None or int(manifest_row_count) != version.row_count:
+                raise DatasetVersionNotQueryableError(
+                    "manifest row_count does not match the SQLite row",
+                    context={"version_id": version_id},
                 )
-            payload = absolute.read_bytes()
-            if len(payload) != size:
-                raise ManifestIntegrityError(
-                    "manifest file size does not match on-disk size",
-                    context={"relative_path": relative},
+        if version.security_count is not None:
+            manifest_security_count = manifest_summary.get("security_count")
+            if (
+                manifest_security_count is None
+                or int(manifest_security_count) != version.security_count
+            ):
+                raise DatasetVersionNotQueryableError(
+                    "manifest security_count does not match the SQLite row",
+                    context={"version_id": version_id},
                 )
-            from quantking.data.adapters.warehouse.manifest import compute_sha256
-
-            digest = compute_sha256(payload)
-            if digest != entry.get("sha256"):
-                raise ManifestIntegrityError(
-                    "manifest file SHA-256 does not match on-disk digest",
-                    context={"relative_path": relative},
-                )
-            declared.append(
-                {
-                    "relative_path": relative,
-                    "absolute": str(absolute),
-                    "row_count": int(entry.get("row_count", 0)),
-                    "size": size,
-                    "partition": dict(entry.get("partition", {})),
-                }
-            )
-        managed_set = {
-            WAREHOUSE_MANIFEST_FILENAME,
-            WAREHOUSE_COMPLETE_FILENAME,
-            "failure.json",
-        }
-        for absolute in directory.rglob("*"):
-            if absolute.is_dir():
-                continue
-            managed = absolute.relative_to(directory).as_posix()
-            if managed in managed_set:
-                continue
-            if not any(item["relative_path"] == managed for item in declared):
-                raise ManifestIntegrityError(
-                    "warehouse directory has unexpected file",
-                    context={"relative_path": managed},
-                )
-        return declared
 
     # -- DuckDB execution ---------------------------------------------------
 
     def _run_query(
         self,
-        directory: Path,
-        manifest: dict[str, object],
+        verified: VerifiedDirectory,
         request: CanonicalQueryRequest,
         version: DatasetVersion,
     ) -> pa.Table:
-        declared = self._verify_inventory(directory, manifest)
         dataset = version.dataset.value
-        descriptor_fields = self._allowed_fields(dataset)
+        descriptor_fields = tuple(canonical_schema(dataset).names)
         selected_fields = self._resolve_fields(request, descriptor_fields)
+        # Legal empty version: zero Parquet files. Return a zero-row
+        # table with the requested fields' schema directly, without
+        # entering the DuckDB UNION ALL path (which would fail on an
+        # empty file list).
+        if not verified.files:
+            return self._empty_result(dataset, selected_fields)
         code_field: str | None = "code" if "code" in descriptor_fields else None
+        from quantking.data.adapters.warehouse.partitioning import partition_scheme_for
+
         date_field: str | None = partition_scheme_for(dataset).date_field
         if date_field not in descriptor_fields:
             date_field = None
         connection = duckdb.connect(":memory:")
         try:
-            # Register each manifest file as a view so the SQL below
-            # can reference a single virtual table ``_warehouse`` that
-            # unions them. ``read_parquet(?)`` does not accept a
-            # parameter inside a prepared statement, but the path
-            # itself comes from the manifest (which has already been
-            # validated against the managed directory) so inlining the
-            # escaped string is safe.
-            for index, entry in enumerate(declared):
-                view = f"_parquet_{index:03d}"
-                escaped = str(entry["absolute"]).replace("'", "''")
-                connection.execute(
-                    f"CREATE VIEW {view} AS "
-                    f"SELECT * FROM read_parquet('{escaped}', hive_partitioning=false)"
+            try:
+                # Register each manifest file as a view so the SQL
+                # below can reference a single virtual table
+                # ``_warehouse`` that unions them.
+                # ``read_parquet(?)`` does not accept a parameter
+                # inside a prepared statement, but the path itself
+                # comes from the verifier (which has already
+                # validated the file is inside the managed
+                # directory) so inlining the escaped string is safe.
+                for index, entry in enumerate(verified.files):
+                    view = f"_parquet_{index:03d}"
+                    escaped = str(entry.absolute_path).replace("'", "''")
+                    connection.execute(
+                        f"CREATE VIEW {view} AS "
+                        f"SELECT * FROM read_parquet('{escaped}', hive_partitioning=false)"
+                    )
+                union_sql = " UNION ALL ".join(
+                    f"SELECT {', '.join(descriptor_fields)} FROM _parquet_{index:03d}"
+                    for index in range(len(verified.files))
                 )
-            union_sql = " UNION ALL ".join(
-                f"SELECT {', '.join(descriptor_fields)} FROM _parquet_{index:03d}"
-                for index in range(len(declared))
-            )
-            connection.execute(f"CREATE TEMPORARY VIEW _warehouse AS {union_sql}")
-            where_clauses: list[str] = []
-            parameters: list[object] = []
-            if code_field is not None and request.codes:
-                placeholders = ",".join(["?"] * len(request.codes))
-                where_clauses.append(f"{code_field} IN ({placeholders})")
-                parameters.extend(request.codes)
-            if date_field is not None and request.start_date is not None:
-                where_clauses.append(f"{date_field} >= ?")
-                parameters.append(request.start_date.value)
-            if date_field is not None and request.end_date is not None:
-                where_clauses.append(f"{date_field} <= ?")
-                parameters.append(request.end_date.value)
-            fields_csv = ", ".join(selected_fields)
-            where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-            sql = (
-                f"SELECT {fields_csv} FROM _warehouse"
-                f"{where_sql}"
-                f" ORDER BY {', '.join(sort_key(dataset))}"
-            )
-            if parameters:
-                result = connection.execute(sql, parameters).to_arrow_table()
-            else:
-                result = connection.execute(sql).to_arrow_table()
+                connection.execute(f"CREATE TEMPORARY VIEW _warehouse AS {union_sql}")
+                where_clauses: list[str] = []
+                parameters: list[object] = []
+                if code_field is not None and request.codes:
+                    placeholders = ",".join(["?"] * len(request.codes))
+                    where_clauses.append(f"{code_field} IN ({placeholders})")
+                    parameters.extend(request.codes)
+                if date_field is not None and request.start_date is not None:
+                    where_clauses.append(f"{date_field} >= ?")
+                    parameters.append(request.start_date.value)
+                if date_field is not None and request.end_date is not None:
+                    where_clauses.append(f"{date_field} <= ?")
+                    parameters.append(request.end_date.value)
+                fields_csv = ", ".join(selected_fields)
+                where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+                # The SQL ORDER BY uses the canonical sort key. If
+                # the caller did not request the sort columns we
+                # still ORDER BY them in SQL (DuckDB allows ordering
+                # by columns that are not in the SELECT list when
+                # they exist on the underlying view), so the result
+                # is already canonically ordered. We deliberately do
+                # NOT re-sort the Arrow result afterwards: that would
+                # require the sort columns to be present in the
+                # projection, which is exactly what the
+                # field-projection-without-sort-keys test forbids.
+                sort_columns = list(sort_key(dataset))
+                # If the sort columns are a subset of the selected
+                # fields, ORDER BY them directly. Otherwise we need
+                # to select them in an outer query so ORDER BY can
+                # reference them, then project them away.
+                missing_sort_columns = [c for c in sort_columns if c not in selected_fields]
+                if not missing_sort_columns:
+                    order_sql = f" ORDER BY {', '.join(sort_columns)}"
+                    sql = f"SELECT {fields_csv} FROM _warehouse{where_sql}{order_sql}"
+                    if parameters:
+                        result = connection.execute(sql, parameters).to_arrow_table()
+                    else:
+                        result = connection.execute(sql).to_arrow_table()
+                else:
+                    # Wrap the projection so ORDER BY can reference
+                    # the hidden sort columns, then project them away
+                    # in the outer SELECT.
+                    inner_fields_csv = ", ".join(sorted(set(selected_fields) | set(sort_columns)))
+                    order_sql = f" ORDER BY {', '.join(sort_columns)}"
+                    sql = (
+                        f"SELECT {fields_csv} FROM ("
+                        f"SELECT {inner_fields_csv} FROM _warehouse{where_sql}{order_sql}"
+                        f")"
+                    )
+                    if parameters:
+                        result = connection.execute(sql, parameters).to_arrow_table()
+                    else:
+                        result = connection.execute(sql).to_arrow_table()
+            except duckdb.Error as error:
+                raise ManifestIntegrityError(
+                    "DuckDB failed to execute the canonical query",
+                    context={"version_id": str(version.version_id), "detail": str(error)},
+                ) from error
+            except (pa.ArrowException, OSError) as error:
+                raise ManifestIntegrityError(
+                    "Arrow/IO failure while reading the canonical Parquet files",
+                    context={"version_id": str(version.version_id), "detail": str(error)},
+                ) from error
         finally:
             connection.close()
-        # DuckDB already applied the order by; the deterministic order
-        # is therefore an implicit guarantee. Defensively re-sort to
-        # match the canonical sort key so callers can rely on it.
-        sort_columns = list(sort_key(dataset))
-        order = pc.sort_indices(result, sort_keys=[(col, "ascending") for col in sort_columns])  # type: ignore[attr-defined]
-        return result.take(order)
+        return result
 
-    def _allowed_fields(self, dataset: str) -> tuple[str, ...]:
-        from quantking.data.adapters.canonical_schema import canonical_schema
-
-        return tuple(canonical_schema(dataset).names)
+    def _empty_result(self, dataset: str, selected_fields: tuple[str, ...]) -> pa.Table:
+        """Return a zero-row table with the requested field schema."""
+        full_schema = canonical_schema(dataset)
+        if tuple(full_schema.names) == selected_fields:
+            return pa.Table.from_arrays(
+                [pa.array([], type=field.type) for field in full_schema],
+                schema=full_schema,
+            )
+        selected_fields_set = set(selected_fields)
+        fields = [field for field in full_schema if field.name in selected_fields_set]
+        schema = pa.schema(fields)
+        return pa.Table.from_arrays(
+            [pa.array([], type=field.type) for field in fields],
+            schema=schema,
+        )
 
     def _resolve_fields(
         self, request: CanonicalQueryRequest, allowed: tuple[str, ...]

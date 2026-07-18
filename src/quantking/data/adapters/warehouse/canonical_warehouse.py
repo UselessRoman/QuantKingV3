@@ -24,6 +24,10 @@ operate on already-validated PyArrow tables:
 * The Parquet BLOB is not stored in SQLite. The on-disk file is the
   only authoritative copy of the data and is verified by SHA-256
   before and after the atomic rename.
+* Every reconcile (idempotent or first-publish) routes through the
+  unified strict published-directory verifier in
+  :mod:`quantking.data.adapters.warehouse.verifier`. The verifier
+  never deletes, overwrites or auto-repairs the directory.
 
 The module only imports :mod:`pyarrow` because the
 ``check_architecture_boundaries`` contract allows PyArrow inside
@@ -37,7 +41,7 @@ import contextlib
 import datetime as _dt
 import json
 import os
-import shutil
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,7 +51,6 @@ from pyarrow import parquet as pa_parquet
 
 from quantking.common.errors import IdempotencyConflictError, InvalidPathError
 from quantking.data.adapters.canonical_schema import (
-    CANONICAL_SCHEMA_VERSION,
     CanonicalValidationIssue,
     ensure_sorted,
     validate_table,
@@ -60,25 +63,40 @@ from quantking.data.adapters.warehouse.errors import (
 from quantking.data.adapters.warehouse.manifest import (
     WAREHOUSE_COMPLETE_FILENAME,
     WAREHOUSE_FAILURE_FILENAME,
+    WAREHOUSE_INPUT_LISTING_FILENAME,
     WAREHOUSE_MANIFEST_FILENAME,
     CanonicalManifest,
     CanonicalManifestFile,
     compute_sha256,
-    load_canonical_manifest,
     path_safe_id,
 )
 from quantking.data.adapters.warehouse.partitioning import (
     partition_scheme_for,
 )
+from quantking.data.adapters.warehouse.verifier import (
+    assert_path_under_root,
+    verify_canonical_directory,
+    verify_data_root,
+)
 from quantking.data.models import (
     DatasetVersion,
     EmptyResultInfo,
 )
+from quantking.data.schemas import descriptor_for
 
 
 @dataclass(frozen=True, slots=True)
 class CanonicalPublishRequest:
-    """The request to publish one canonical dataset version."""
+    """The request to publish one canonical dataset version.
+
+    The request deliberately does NOT accept ``manifest_sha256``,
+    ``row_count`` or ``security_count``: those credentials are sourced
+    from the actual on-disk manifest by the publish coordinator. If
+    ``coverage_start``/``coverage_end``/``coverage_summary`` are
+    supplied they are treated as expected credentials and must match
+    the values computed from the actual data, otherwise the publish
+    fails.
+    """
 
     version: DatasetVersion
     tables: tuple[pa.Table, ...]
@@ -158,14 +176,20 @@ class CanonicalWarehouse:
 
     The publisher is constructed with a single absolute data root and
     refuses to operate outside it. :meth:`publish` returns the final
-    published directory.
+    published directory. Every publish and every idempotent reconcile
+    routes through the unified strict published-directory verifier
+    (:func:`verify_canonical_directory`) so the on-disk state is
+    guaranteed consistent before the caller treats the directory as
+    published.
     """
 
     def __init__(self, *, data_root: Path) -> None:
-        root = Path(data_root)
-        if not root.is_absolute():
-            raise InvalidPathError("data_root must be an absolute path")
-        self._data_root = root.resolve()
+        self._data_root = verify_data_root(data_root)
+
+    @property
+    def data_root(self) -> Path:
+        """The resolved managed data root (read-only)."""
+        return self._data_root
 
     # -- public API ---------------------------------------------------------
 
@@ -188,6 +212,7 @@ class CanonicalWarehouse:
                 context={"version_id": str(request.version.version_id), "detail": str(error)},
             ) from error
         try:
+            self._write_input_listing(incomplete, request)
             self._validate_inputs(request)
         except CanonicalWarehouseError as error:
             # Pre-write validation failures must still preserve a
@@ -270,33 +295,42 @@ class CanonicalWarehouse:
             self._write_manifest_and_complete(incomplete, manifest)
             final.parent.mkdir(parents=True, exist_ok=True)
             os.replace(incomplete, final)
-        except CanonicalWarehouseError:
-            self._preserve_failure(incomplete, request, None)
+        except CanonicalWarehouseError as error:
+            self._preserve_failure(incomplete, request, error)
             raise
         except Exception as error:
             self._preserve_failure(incomplete, request, error)
-            if not incomplete.exists():
-                # Atomic rename succeeded but the metadata check failed;
-                # remove the empty final directory so a retry can land cleanly.
-                self._safe_rmdir(final)
-            raise
-        self._validate_final(final, manifest=manifest)
+            raise CanonicalWarehouseError(
+                "canonical warehouse publish failed",
+                context={"version_id": str(request.version.version_id)},
+            ) from error
+        self._validate_final(final)
         return final
 
     def _reconcile_existing(self, final: Path, request: CanonicalPublishRequest) -> Path:
-        manifest_path = final / WAREHOUSE_MANIFEST_FILENAME
-        if not manifest_path.is_file():
+        # Run the unified strict verifier first. Any on-disk integrity
+        # failure (tampered manifest, mutated file, missing COMPLETE,
+        # duplicate paths, extra files, wrong row counts) surfaces as
+        # IdempotencyConflictError here because the caller is trying
+        # to re-publish the same request against a directory that no
+        # longer matches its declared state.
+        try:
+            verified = verify_canonical_directory(final, data_root=self._data_root)
+        except ManifestIntegrityError as error:
             raise IdempotencyConflictError(
-                "existing canonical directory has no manifest",
+                "existing canonical directory failed integrity verification",
                 context={"version_id": str(request.version.version_id)},
-            )
-        previous = load_canonical_manifest(final)
+            ) from error
+        previous = verified.manifest
         if previous.get("manifest_schema_version") != "warehouse-manifest.v1":
             raise IdempotencyConflictError(
                 "canonical manifest schema version is unsupported",
                 context={"version_id": str(request.version.version_id)},
             )
-        current_files, _coverage = self._plan_partitions(request)
+        # Compare every credential field that the request controls.
+        # The manifest's manifest_sha256 has already been verified by
+        # the verifier; the remaining fields must match the request's
+        # declared inputs.
         if previous.get("version_id") != str(request.version.version_id):
             raise IdempotencyConflictError(
                 "version_id mismatch against existing manifest",
@@ -332,37 +366,14 @@ class CanonicalWarehouse:
                 "code_version mismatch against existing manifest",
                 context={"version_id": str(request.version.version_id)},
             )
-        # Compare the structural identity of the file set: the plan
-        # returns placeholder size/sha so the only stable comparison is
-        # on (relative_path, partition, row_count). The content_sha256
-        # distinguishes two semantically different inputs that happen
-        # to share the same row count and partition layout.
-        plan_signature = [
-            {
-                "relative_path": entry.relative_path,
-                "partition": _coerce_partition_to_int(dict(entry.partition)),
-                "row_count": entry.row_count,
-            }
-            for entry in current_files
-        ]
-        previous_files = _normalise_files(previous.get("files"))
-        previous_signature: list[dict[str, object]] = []
-        for entry in previous_files:
-            partition = entry.get("partition", {})
-            previous_signature.append(
-                {
-                    "relative_path": entry["relative_path"],
-                    "partition": _coerce_partition_to_int(
-                        partition if isinstance(partition, dict) else {}
-                    ),
-                    "row_count": entry["row_count"],
-                }
-            )
-        if previous_signature != plan_signature:
+        expected_schema_version = descriptor_for(request.version.dataset.value).schema_version
+        if previous.get("schema_version") != expected_schema_version:
             raise IdempotencyConflictError(
-                "files mismatch against existing manifest",
+                "schema_version mismatch against existing manifest",
                 context={"version_id": str(request.version.version_id)},
             )
+        # Compare the content_sha256 to detect any byte-level drift in
+        # the publishable data, even if the file layout is unchanged.
         previous_content_sha = (
             self._compute_content_sha(request.version.dataset.value, request.tables)
             if request.tables
@@ -376,53 +387,6 @@ class CanonicalWarehouse:
         return final
 
     # -- writing partitions -------------------------------------------------
-
-    def _plan_partitions(
-        self, request: CanonicalPublishRequest
-    ) -> tuple[list[CanonicalManifestFile], dict[str, str]]:
-        dataset = request.version.dataset.value
-        if not request.tables:
-            return [], {
-                "security_count": "0",
-                "row_count": "0",
-                "date_count": "0",
-            }
-        combined = pa.concat_tables(list(request.tables))
-        combined = ensure_sorted(dataset, combined)
-        files: list[CanonicalManifestFile] = []
-        scheme = partition_scheme_for(dataset)
-        date_column = scheme.date_field
-        if date_column not in combined.column_names:
-            raise CanonicalWarehouseError(
-                "canonical table is missing the partition date field",
-                context={"dataset": dataset, "date_field": date_column},
-            )
-        groups: dict[tuple[int, int], list[int]] = {}
-        for index in range(combined.num_rows):
-            date_value = combined.column(date_column)[index].as_py()
-            year_month = (date_value.year, date_value.month)
-            groups.setdefault(year_month, []).append(index)
-        for ordinal, ((year, month), row_indices) in enumerate(sorted(groups.items())):
-            relative = f"year={year:04d}/month={month:02d}/part-{ordinal:05d}.parquet"
-            files.append(
-                CanonicalManifestFile(
-                    relative_path=relative,
-                    partition={
-                        "year": f"{year:04d}",
-                        "month": f"{month:02d}",
-                    },
-                    size=0,
-                    row_count=len(row_indices),
-                    sha256="0" * 64,
-                )
-            )
-        coverage = self._build_coverage(combined, request)
-        # ``_normalise_files`` (used by reconciliation) converts the
-        # partition values via ``int`` so the plan signature matches
-        # the on-disk JSON integers; for the test the partition dict
-        # still has ints, so we explicitly serialise here.
-        coverage = dict(coverage)
-        return files, coverage
 
     def _write_partitions(
         self, directory: Path, request: CanonicalPublishRequest
@@ -481,13 +445,20 @@ class CanonicalWarehouse:
         security_count = (
             len(set(combined.column("code").to_pylist())) if "code" in combined.column_names else 0
         )
-        return {
+        coverage: dict[str, str] = {
             "security_count": str(security_count),
             "row_count": str(combined.num_rows),
             "date_count": str(len(dates)),
-            "first_date": dates[0].isoformat() if dates else "",
-            "last_date": dates[-1].isoformat() if dates else "",
         }
+        # Only include first_date/last_date when there is at least one
+        # row. For legal empty versions the manifest's coverage_start
+        # and coverage_end are None and the coverage_summary must not
+        # carry empty-string values (the DatasetVersion contract
+        # requires non-empty text for every coverage_summary value).
+        if dates:
+            coverage["first_date"] = dates[0].isoformat()
+            coverage["last_date"] = dates[-1].isoformat()
+        return coverage
 
     def _build_manifest(
         self,
@@ -497,16 +468,72 @@ class CanonicalWarehouse:
     ) -> CanonicalManifest:
         dataset = request.version.dataset.value
         scheme = partition_scheme_for(dataset)
-        coverage_summary = dict(request.coverage_summary) or coverage
+        # The manifest schema_version MUST come from the dataset
+        # descriptor so it matches the DatasetVersion's schema_version
+        # exactly. The caller cannot override this.
+        schema_version = descriptor_for(dataset).schema_version
+        # Coverage credentials: the manifest always stores the computed
+        # coverage_summary (so the publish coordinator and query adapter
+        # see the full set of keys). Caller-supplied values are treated
+        # as expected credentials and must equal the computed values.
+        coverage_summary = coverage
+        if request.coverage_summary:
+            for key, expected in request.coverage_summary.items():
+                actual = coverage.get(key)
+                if actual is not None and expected != actual:
+                    raise CanonicalWarehouseError(
+                        "caller-supplied coverage credential does not match actual data",
+                        context=_string_context(
+                            {
+                                "version_id": str(request.version.version_id),
+                                "field": key,
+                                "expected": expected,
+                                "actual": actual,
+                            }
+                        ),
+                    )
         content_sha = (
             self._compute_content_sha(dataset, request.tables)
             if request.tables
             else compute_sha256(_empty_dataset_marker(dataset))
         )
+        # coverage_start/coverage_end are always sourced from the actual
+        # data (via the ``first_date``/``last_date`` computed coverage
+        # entries) so the manifest, the publish coordinator and the
+        # DatasetVersion all see the same value. Caller-supplied values
+        # are treated as expected credentials and must match exactly.
+        coverage_start_value: str | None = coverage.get("first_date") or None
+        if request.coverage_start is not None:
+            expected_start = str(request.coverage_start)
+            if coverage_start_value != expected_start:
+                raise CanonicalWarehouseError(
+                    "caller-supplied coverage_start does not match actual data",
+                    context=_string_context(
+                        {
+                            "version_id": str(request.version.version_id),
+                            "expected": coverage_start_value or "",
+                            "actual": expected_start,
+                        }
+                    ),
+                )
+        coverage_end_value: str | None = coverage.get("last_date") or None
+        if request.coverage_end is not None:
+            expected_end = str(request.coverage_end)
+            if coverage_end_value != expected_end:
+                raise CanonicalWarehouseError(
+                    "caller-supplied coverage_end does not match actual data",
+                    context=_string_context(
+                        {
+                            "version_id": str(request.version.version_id),
+                            "expected": coverage_end_value or "",
+                            "actual": expected_end,
+                        }
+                    ),
+                )
         return CanonicalManifest(
             dataset=dataset,
             version_id=str(request.version.version_id),
-            schema_version=CANONICAL_SCHEMA_VERSION,
+            schema_version=schema_version,
             code_version=request.code_version,
             rule_version=request.rule_version,
             parent_version_id=(
@@ -515,16 +542,8 @@ class CanonicalWarehouse:
                 else None
             ),
             input_batch_ids=tuple(str(batch_id) for batch_id in request.version.input_batch_ids),
-            coverage_start=(
-                str(request.coverage_start)
-                if request.coverage_start is not None
-                else coverage_summary.get("first_date")
-            ),
-            coverage_end=(
-                str(request.coverage_end)
-                if request.coverage_end is not None
-                else coverage_summary.get("last_date")
-            ),
+            coverage_start=coverage_start_value,
+            coverage_end=coverage_end_value,
             coverage_summary=coverage_summary,
             files=tuple(files),
             created_at=_now_iso(),
@@ -577,6 +596,7 @@ class CanonicalWarehouse:
             WAREHOUSE_MANIFEST_FILENAME,
             WAREHOUSE_COMPLETE_FILENAME,
             WAREHOUSE_FAILURE_FILENAME,
+            WAREHOUSE_INPUT_LISTING_FILENAME,
         }
         for absolute in directory.rglob("*"):
             if absolute.is_dir():
@@ -626,40 +646,64 @@ class CanonicalWarehouse:
             encoding="utf-8",
         )
 
-    def _validate_final(self, final: Path, *, manifest: CanonicalManifest) -> None:
-        self._verify_inventory(final, manifest)
-        marker = final / WAREHOUSE_COMPLETE_FILENAME
-        if not marker.is_file():
-            raise ManifestIntegrityError(
-                "warehouse COMPLETE marker is missing after publish",
-                context={"version_id": manifest.version_id},
-            )
-        marker_payload = json.loads(marker.read_text(encoding="utf-8"))
-        if marker_payload.get("version_id") != manifest.version_id:
-            raise ManifestIntegrityError(
-                "COMPLETE marker does not bind to the expected version_id",
-                context={"version_id": manifest.version_id},
-            )
-        if marker_payload.get("manifest_sha256") != manifest.manifest_sha256():
-            raise ManifestIntegrityError(
-                "COMPLETE marker does not match the manifest SHA-256",
-                context={"version_id": manifest.version_id},
-            )
+    def _validate_final(self, final: Path) -> None:
+        # Re-verify the final directory through the unified verifier so
+        # the on-disk state is guaranteed consistent before the caller
+        # treats the directory as published. The verifier checks
+        # manifest canonical bytes, self-SHA, COMPLETE binding, file
+        # set equality, per-file size/SHA/row_count and Parquet schema
+        # consistency.
+        try:
+            verify_canonical_directory(final, data_root=self._data_root)
+        except ManifestIntegrityError as error:
+            raise CanonicalWarehouseError(
+                "canonical published directory failed integrity verification",
+                context={"version_id": str(final.name)},
+            ) from error
 
     def _assert_managed_target(self, root: Path, target: Path) -> None:
-        try:
-            resolved = target.resolve()
-            root_resolved = root.resolve()
-        except OSError as error:
-            raise IncompatibleInputError(
-                "warehouse target is not resolvable",
-                context={"target": str(target), "detail": str(error)},
-            ) from error
-        if root_resolved != resolved and root_resolved not in resolved.parents:
-            raise IncompatibleInputError(
-                "warehouse target escapes the managed data root",
-                context={"target": str(target), "root": str(root_resolved)},
-            )
+        # Delegate to the shared verifier helper so the symlink/junction
+        # and containment checks are identical across Raw, Canonical and
+        # Query.
+        assert_path_under_root(self._data_root, target)
+
+    def _write_input_listing(self, directory: Path, request: CanonicalPublishRequest) -> None:
+        """Write a forensic input listing for the publish request.
+
+        The listing records the version identity, dataset, code/rule
+        versions, schema version, input batch ids and the row count of
+        each input table. It is written *before* any payload write so
+        it survives any subsequent failure.
+        """
+        listing = {
+            "version_id": str(request.version.version_id),
+            "dataset": request.version.dataset.value,
+            "schema_version": descriptor_for(request.version.dataset.value).schema_version,
+            "code_version": request.code_version,
+            "rule_version": request.rule_version,
+            "parent_version_id": (
+                str(request.version.parent_version_id)
+                if request.version.parent_version_id is not None
+                else None
+            ),
+            "input_batch_ids": [str(b) for b in request.version.input_batch_ids],
+            "table_count": len(request.tables),
+            "table_row_counts": [int(table.num_rows) for table in request.tables],
+            "empty_result": (
+                None
+                if request.empty_result is None
+                else {
+                    "classification": request.empty_result.classification.value,
+                    "reason": request.empty_result.reason,
+                }
+            ),
+            "captured_at": _now_iso(),
+        }
+        target = directory / WAREHOUSE_INPUT_LISTING_FILENAME
+        target.write_text(
+            json.dumps(listing, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+            encoding="utf-8",
+        )
 
     def _preserve_failure(
         self,
@@ -667,13 +711,21 @@ class CanonicalWarehouse:
         request: CanonicalPublishRequest,
         error: BaseException | None,
     ) -> None:
-        failure = {
+        record: dict[str, object] = {
             "version_id": str(request.version.version_id),
             "dataset": request.version.dataset.value,
+            "schema_version": descriptor_for(request.version.dataset.value).schema_version,
+            "code_version": request.code_version,
+            "rule_version": request.rule_version,
+            "parent_version_id": (
+                str(request.version.parent_version_id)
+                if request.version.parent_version_id is not None
+                else None
+            ),
+            "input_batch_ids": [str(b) for b in request.version.input_batch_ids],
             "failed_at": _now_iso(),
-            "error_type": type(error).__name__ if error is not None else "UnknownError",
-            "error_message": str(error) if error is not None else "",
         }
+        failure = _sanitize_failure_record(record, error=error)
         if incomplete.exists():
             with contextlib.suppress(OSError):
                 (incomplete / WAREHOUSE_FAILURE_FILENAME).write_text(
@@ -685,11 +737,76 @@ class CanonicalWarehouse:
                     ),
                     encoding="utf-8",
                 )
+            # The input listing is already on disk (written before any
+            # payload), but we re-write a minimal listing if the failure
+            # happened before _write_input_listing had a chance to run.
+            input_listing_path = incomplete / WAREHOUSE_INPUT_LISTING_FILENAME
+            if not input_listing_path.is_file():
+                with contextlib.suppress(OSError):
+                    self._write_input_listing(incomplete, request)
 
-    def _safe_rmdir(self, path: Path) -> None:
-        with contextlib.suppress(OSError):
-            if path.is_dir():
-                shutil.rmtree(path)
+
+# ---------------------------------------------------------------------------
+# Failure sanitisation helpers
+# ---------------------------------------------------------------------------
+
+
+_ABSOLUTE_PATH_RE = re.compile(r"[A-Za-z]:[\\/]|^/")
+
+
+def _sanitize_failure_record(
+    record: dict[str, object], *, error: BaseException | None
+) -> dict[str, object]:
+    """Return a failure record with all sensitive content removed.
+
+    The raw exception text and any absolute paths are stripped so the
+    ``failure.json`` is safe to inspect without leaking filesystem
+    layout, credentials or request keys. A stable ``error_category``
+    derived from the exception class replaces the raw message.
+    """
+    sanitized: dict[str, object] = {}
+    for key, value in record.items():
+        if isinstance(value, str):
+            sanitized[key] = _sanitize_text(value)
+        elif isinstance(value, list):
+            sanitized[key] = [
+                _sanitize_text(item) if isinstance(item, str) else item for item in value
+            ]
+        else:
+            sanitized[key] = value
+    if error is not None:
+        sanitized["error_type"] = type(error).__name__
+        sanitized["error_category"] = _classify_error(error)
+    else:
+        sanitized["error_type"] = "UnknownError"
+        sanitized["error_category"] = "INTERNAL_FAILURE"
+    return sanitized
+
+
+def _sanitize_text(value: str) -> str:
+    """Strip absolute paths and control characters from a string."""
+    if not isinstance(value, str):
+        return ""
+    # Replace any absolute path pattern with a redaction marker.
+    redacted = _ABSOLUTE_PATH_RE.sub("[REDACTED]", value)
+    # Remove control characters except for the common whitespace chars.
+    cleaned = "".join(ch if ch >= " " or ch in " \t" else "" for ch in redacted)
+    return cleaned
+
+
+def _classify_error(error: BaseException) -> str:
+    """Return a stable, sanitized error category."""
+    name = type(error).__name__
+    if isinstance(error, OSError):
+        return "IO_FAILURE"
+    if isinstance(error, (KeyError, ValueError, TypeError)):
+        return "CONTRACT_FAILURE"
+    if isinstance(
+        error,
+        (CanonicalWarehouseError, ManifestIntegrityError, IncompatibleInputError),
+    ):
+        return "WAREHOUSE_FAILURE"
+    return f"INTERNAL_FAILURE:{name}"
 
 
 # ---------------------------------------------------------------------------
