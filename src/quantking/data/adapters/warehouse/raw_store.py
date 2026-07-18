@@ -74,6 +74,8 @@ _WINDOWS_RESERVED_NAMES = frozenset(
     | {f"COM{index}" for index in range(1, 10)}
     | {f"LPT{index}" for index in range(1, 10)}
 )
+_FAILURE_PARAM_KEYS = frozenset({"adapter_version", "dataset", "request_sha256"})
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _validate_managed_component(value: str, field: str) -> str:
@@ -125,8 +127,8 @@ class RawBatchPublishRequest:
         _validate_managed_component(self.source, "source")
         _validate_managed_component(self.dataset, "dataset")
         _validate_managed_component(self.batch_id, "batch_id")
-        if not isinstance(self.adapter_version, str) or not self.adapter_version.strip():
-            raise InvalidPathError("adapter_version must be non-empty text")
+        _validate_managed_component(self.adapter_version, "adapter_version")
+        _validate_managed_component(self.code_version, "code_version")
         if not isinstance(self.files, tuple):
             object.__setattr__(self, "files", tuple(self.files))
         normalised: dict[str, str] = {}
@@ -156,8 +158,8 @@ class RawBatchFailureRequest:
         _validate_managed_component(self.source, "source")
         _validate_managed_component(self.dataset, "dataset")
         _validate_managed_component(self.batch_id, "batch_id")
-        if not isinstance(self.adapter_version, str) or not self.adapter_version.strip():
-            raise InvalidPathError("adapter_version must be non-empty text")
+        _validate_managed_component(self.adapter_version, "adapter_version")
+        _validate_managed_component(self.code_version, "code_version")
         if (
             not isinstance(self.error_code, str)
             or re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", self.error_code) is None
@@ -167,6 +169,16 @@ class RawBatchFailureRequest:
         for key, value in self.request_params.items():
             if not isinstance(key, str) or not isinstance(value, str):
                 raise TypeError("request_params must be a mapping of str to str")
+            if key not in _FAILURE_PARAM_KEYS:
+                raise InvalidPathError("request_params contains a non-whitelisted key")
+            if key == "request_sha256" and _SHA256_RE.fullmatch(value) is None:
+                raise InvalidPathError("request_params request_sha256 is invalid")
+            if key == "dataset" and value != self.dataset:
+                raise InvalidPathError("request_params dataset does not match failure dataset")
+            if key == "adapter_version" and value != self.adapter_version:
+                raise InvalidPathError(
+                    "request_params adapter_version does not match failure adapter"
+                )
             normalized[key] = value
         object.__setattr__(self, "request_params", dict(sorted(normalized.items())))
         if self.failed_at is None:

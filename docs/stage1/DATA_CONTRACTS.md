@@ -3,7 +3,7 @@
 状态：S1-01 已于 2026-07-16 在提交 `7e4e5b38b7fc91edaf8727ed55b1e26435373aea`
 完成主验收；S1-02（Warehouse、原子发布与显式版本查询）已于 2026-07-18 在提交
 `79f9fa3e682e212cf74e7886a04c6fb52158f302` 完成主验收。Stage 1 已获实施授权并
-进行中，但尚未完成；S1-03 离线实现已提交，等待主验收。S1-04～S1-08
+进行中，但尚未完成；S1-03-R1 修复中/待主验收。S1-04～S1-08
 未开始、未获授权。
 
 本文件固化 Stage 1 六类 Canonical 数据集的可执行合同。权威来源是 `src/quantking/data/schemas.py`（框架无关描述符）和 `src/quantking/data/adapters/canonical_schema.py`（PyArrow 映射与验证）。文档不得替代 schema 与契约测试。
@@ -215,6 +215,28 @@ Fake Gateway 和离线映射测试使用显式 `SupplierResponseContract`。调�
 现有 `RawBatchPublisher`，复验 `manifest.json`、逐文件 SHA-256 和 `COMPLETE` 后才标准化。
 Raw 发布后标准化失败仍保留完整 Raw；payload 产生前失败则使用同一受管理路径防护写入
 不可覆盖的 `.incomplete/failure.json`。不删除失败目录。
+
+S1-03-R1 修复中/待主验收。R1 要求每个非空请求分块保存规范
+`xtquant-raw-response.v1` 信封，信封同时绑定：
+
+- 计划 `request_sha256` 和完整 chunk 序号、dataset、scope、起止日及包含边界；
+- 经验证的供应商字段/单位合同；
+- 标准化前 records、完整性标记和稳定 partial code；
+- JSON 安全的原始 provider payload。
+
+`RawManifestFile.row_count` 必须等于信封内 records 的真实数量。发布并通过统一 Raw verifier
+后，编排器重新读取每个 Raw 文件，按计划顺序重建 `SupplierResponse`，复验 manifest 请求
+参数、chunk 库存、row_count、Raw 与 Gateway records 全部一致，之后才生成 Canonical
+候选。缺失、重复、错序、请求 SHA 漂移、计划外代码/交易所/日期或 Raw/records 漂移均失败。
+
+`FetchChunk` 和 `IncrementalFetchPlan` 的直接构造与每个 Gateway/编排入口都执行同一生成式
+复验；请求参数只允许固定白名单键和值格式。payload 前失败证据只保存 dataset、
+adapter version 和 request SHA，不保存 scope、攻击输入或任意调用参数。
+
+供应商空响应默认是 `UNEXPECTED_EMPTY`。只有调用方同时提供合法 `EmptyResultInfo` 及证据
+原因时才能得到空候选；空交易日历响应不得自动扩展成区间全部闭市。Gateway 返回错误类型、
+Raw/请求构造失败和标准化异常在 `RUNNING` 已持久化后都必须写入稳定终态，不得遗留
+`RUNNING`。显式 SDK loader 加载失败或检测到交易模块时必须恢复进入 loader 前的模块状态。
 
 批次终态如下：
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import date
 
@@ -225,9 +226,15 @@ def _response(
     rows: tuple[dict[str, object], ...] | None = None,
     contract: SupplierResponseContract | None = None,
 ) -> SupplierResponse:
+    records = _rows(dataset) if rows is None else rows
     return SupplierResponse(
-        records=_rows(dataset) if rows is None else rows,
-        raw_payload=b'{"synthetic":"supplier response"}',
+        records=records,
+        raw_payload=json.dumps(
+            [dict(record) for record in records],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8"),
         contract=_contract(dataset) if contract is None else contract,
         complete=True,
         partial_reason=None,

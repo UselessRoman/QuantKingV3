@@ -144,6 +144,79 @@ def test_permission_error_is_chained_but_public_message_is_stable_and_redacted()
     assert isinstance(error.__cause__, PermissionError)
 
 
+def test_empty_calendar_response_is_not_expanded_to_all_closed_days() -> None:
+    class EmptyCalendarModule:
+        @staticmethod
+        def get_trading_dates(*_args: object, **_kwargs: object) -> list[object]:
+            return []
+
+    response = XtQuantMarketDataGateway(module_loader=lambda: EmptyCalendarModule()).fetch(
+        _calendar_chunk()
+    )  # type: ignore[arg-type]
+    assert response.records == ()
+
+
+def test_gateway_revalidates_tampered_chunk_at_entry() -> None:
+    chunk = _calendar_chunk()
+    object.__setattr__(chunk, "scope", ("../escape",))
+    gateway = XtQuantMarketDataGateway(module_loader=lambda: object())
+    with pytest.raises(ValueError):
+        gateway.fetch(chunk)  # type: ignore[arg-type]
+
+
+def test_loader_failure_restores_all_xtquant_import_state(tmp_path: Path) -> None:
+    root = tmp_path / "site-packages"
+    package = root / "xtquant"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("import xtquant.xttrader\n", encoding="utf-8")
+    (package / "xttrader.py").write_text("LOADED = True\n", encoding="utf-8")
+    (package / "xtdata.py").write_text(
+        "raise RuntimeError('sensitive loader failure')\n",
+        encoding="utf-8",
+    )
+    before = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "xtquant" or name.startswith("xtquant.")
+    }
+    with pytest.raises(SourceAdapterError):
+        ExplicitXtQuantModuleLoader(root).load()
+    after = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "xtquant" or name.startswith("xtquant.")
+    }
+    assert after == before
+
+
+def test_loader_rejects_and_removes_new_trading_module_on_successful_import(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "site-packages"
+    package = root / "xtquant"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("import xtquant.xttrader\n", encoding="utf-8")
+    (package / "xttrader.py").write_text("LOADED = True\n", encoding="utf-8")
+    (package / "xtdata.py").write_text(
+        "def get_trading_dates(*args, **kwargs):\n    return []\n",
+        encoding="utf-8",
+    )
+    before = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "xtquant" or name.startswith("xtquant.")
+    }
+    with pytest.raises(SourceAdapterError) as exc_info:
+        ExplicitXtQuantModuleLoader(root).load()
+    assert exc_info.value.code is SourceErrorCode.CAPABILITY_UNAVAILABLE
+    after = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "xtquant" or name.startswith("xtquant.")
+    }
+    assert after == before
+
+
 @pytest.mark.parametrize(
     ("raw", "code", "kind", "retryable"),
     (

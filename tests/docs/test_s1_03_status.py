@@ -1,5 +1,5 @@
 # ruff: noqa: RUF001
-"""S1-03 status must remain offline-implemented and pending main acceptance."""
+"""S1-03-R1 status must remain under repair and pending main acceptance."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ def _read(relative: str) -> str:
     return (_ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_s1_03_is_offline_implemented_but_not_main_accepted() -> None:
+def test_s1_03_r1_is_under_repair_and_not_main_accepted() -> None:
     for relative in (
         "docs/stage1/TASKS.md",
         "docs/stage1/ACCEPTANCE.md",
@@ -20,7 +20,7 @@ def test_s1_03_is_offline_implemented_but_not_main_accepted() -> None:
         "docs/stage1/DATA_CONTRACTS.md",
     ):
         text = _read(relative)
-        assert "S1-03 离线实现已提交，等待主验收" in text
+        assert "S1-03-R1 修复中/待主验收" in text
         assert "S1-03 已主验收" not in text
         assert "Stage 1 已完成" not in text
 

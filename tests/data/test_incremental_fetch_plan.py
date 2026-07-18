@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -106,6 +107,7 @@ def test_empty_universe_produces_no_supplier_chunk() -> None:
         {"max_days_per_chunk": 0},
         {"max_items_per_chunk": 0},
         {"request_start": _day("2026-07-11")},
+        {"adapter_version": r"SECRET E:\private"},
     ),
 )
 def test_invalid_ranges_components_and_chunk_rules_are_rejected(
@@ -113,3 +115,47 @@ def test_invalid_ranges_components_and_chunk_rules_are_rejected(
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
         _request(**changes)
+
+
+def test_direct_chunk_construction_rejects_unsorted_duplicate_scope() -> None:
+    chunk = build_incremental_plan(_request()).chunks[0]
+    with pytest.raises(ValueError):
+        replace(chunk, scope=("600000.SH", "000001.SZ", "000001.SZ"))
+
+
+@pytest.mark.parametrize("mutation", ("missing", "duplicate", "reversed", "request_hash"))
+def test_direct_plan_construction_rejects_chunk_inventory_and_hash_mutation(
+    mutation: str,
+) -> None:
+    plan = build_incremental_plan(_request())
+    with pytest.raises(ValueError):
+        if mutation == "missing":
+            replace(plan, chunks=plan.chunks[1:])
+        elif mutation == "duplicate":
+            replace(plan, chunks=(plan.chunks[0], *plan.chunks))
+        elif mutation == "reversed":
+            replace(plan, chunks=tuple(reversed(plan.chunks)))
+        else:
+            replace(plan, request_sha256="0" * 64)
+
+
+def test_plan_request_params_are_generated_from_an_exact_whitelist() -> None:
+    plan = build_incremental_plan(_request())
+    assert set(plan.request_params) == {
+        "adapter_version",
+        "dataset",
+        "end_inclusive",
+        "known_coverage",
+        "lookback_days",
+        "max_days_per_chunk",
+        "max_items_per_chunk",
+        "request_end",
+        "request_start",
+        "scope",
+        "start_inclusive",
+    }
+    with pytest.raises(ValueError, match="whitelist"):
+        replace(
+            plan,
+            request_params={**plan.request_params, "token": "SECRET"},
+        )

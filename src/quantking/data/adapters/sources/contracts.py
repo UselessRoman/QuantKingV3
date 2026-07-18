@@ -7,8 +7,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
+from typing import Any
 
+from quantking.data.incremental import FetchChunk, validate_fetch_chunk
 from quantking.data.models import BatchFailureKind, DatasetKind
+
+_RAW_RESPONSE_SCHEMA_VERSION = "xtquant-raw-response.v1"
 
 
 class SourceErrorCode(StrEnum):
@@ -171,6 +175,137 @@ class SupplierResponseContract:
             raise ValueError("adjustment_formula must be non-empty text or None")
 
 
+def _contract_payload(contract: SupplierResponseContract) -> dict[str, object]:
+    return {
+        "dataset": contract.dataset.value,
+        "contract_version": contract.contract_version,
+        "required_fields": list(contract.required_fields),
+        "code_format": contract.code_format.value,
+        "date_format": contract.date_format.value,
+        "exchange_map": dict(contract.exchange_map),
+        "volume_unit": contract.volume_unit.value,
+        "amount_unit": contract.amount_unit.value,
+        "point_in_time": contract.point_in_time,
+        "unadjusted": contract.unadjusted,
+        "official_status": contract.official_status,
+        "adjustment_formula": contract.adjustment_formula,
+        "semantics_verified": contract.semantics_verified,
+    }
+
+
+def _contract_from_payload(value: object) -> SupplierResponseContract:
+    keys = {
+        "dataset",
+        "contract_version",
+        "required_fields",
+        "code_format",
+        "date_format",
+        "exchange_map",
+        "volume_unit",
+        "amount_unit",
+        "point_in_time",
+        "unadjusted",
+        "official_status",
+        "adjustment_formula",
+        "semantics_verified",
+    }
+    if not isinstance(value, dict) or set(value) != keys:
+        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+    required_fields = value["required_fields"]
+    exchange_map = value["exchange_map"]
+    if not isinstance(required_fields, list) or any(
+        not isinstance(field, str) for field in required_fields
+    ):
+        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+    if not isinstance(exchange_map, dict) or any(
+        not isinstance(key, str) or not isinstance(item, str) for key, item in exchange_map.items()
+    ):
+        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+    try:
+        return SupplierResponseContract(
+            dataset=DatasetKind(value["dataset"]),
+            contract_version=value["contract_version"],
+            required_fields=tuple(required_fields),
+            code_format=CodeFormat(value["code_format"]),
+            date_format=DateFormat(value["date_format"]),
+            exchange_map=exchange_map,
+            volume_unit=VolumeUnit(value["volume_unit"]),
+            amount_unit=AmountUnit(value["amount_unit"]),
+            point_in_time=value["point_in_time"],
+            unadjusted=value["unadjusted"],
+            official_status=value["official_status"],
+            adjustment_formula=value["adjustment_formula"],
+            semantics_verified=value["semantics_verified"],
+        )
+    except (TypeError, ValueError) as error:
+        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT) from error
+
+
+def _chunk_payload(chunk: FetchChunk) -> dict[str, object]:
+    return {
+        "sequence": chunk.sequence,
+        "dataset": chunk.dataset.value,
+        "scope": list(chunk.scope),
+        "start": str(chunk.start),
+        "end": str(chunk.end),
+        "start_inclusive": chunk.start_inclusive,
+        "end_inclusive": chunk.end_inclusive,
+        "request_sha256": chunk.request_sha256,
+    }
+
+
+def _reject_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON constant")
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _load_canonical_json(payload: bytes) -> object:
+    try:
+        decoded = payload.decode("utf-8")
+        value = json.loads(
+            decoded,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_constant,
+        )
+        canonical = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT) from error
+    if canonical != payload:
+        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+    return value
+
+
+def _plain_records(records: tuple[Mapping[str, object], ...]) -> list[dict[str, object]]:
+    try:
+        payload = json.dumps(
+            [dict(record) for record in records],
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        value = _load_canonical_json(payload)
+    except (TypeError, ValueError) as error:
+        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT) from error
+    if not isinstance(value, list) or any(not isinstance(record, dict) for record in value):
+        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class SupplierResponse:
     """Raw bytes and typed record views returned by a source gateway."""
@@ -180,6 +315,7 @@ class SupplierResponse:
     contract: SupplierResponseContract
     complete: bool
     partial_reason: str | None
+    chunk: FetchChunk | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.records, tuple):
@@ -193,10 +329,6 @@ class SupplierResponse:
         if not isinstance(self.raw_payload, (bytes, bytearray)):
             raise TypeError("raw_payload must be bytes")
         object.__setattr__(self, "raw_payload", bytes(self.raw_payload))
-        try:
-            json.loads(self.raw_payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT) from error
         if not isinstance(self.contract, SupplierResponseContract):
             raise TypeError("contract must be a SupplierResponseContract")
         if not isinstance(self.complete, bool):
@@ -207,6 +339,126 @@ class SupplierResponse:
             not isinstance(self.partial_reason, str) or not self.partial_reason.strip()
         ):
             raise ValueError("partial response requires a non-empty partial_reason")
+        if self.partial_reason is not None and self.partial_reason not in {
+            code.value for code in SourceErrorCode
+        }:
+            raise ValueError("partial_reason must be a stable source error code")
+        raw = _load_canonical_json(self.raw_payload)
+        expected_records = _plain_records(self.records)
+        if self.chunk is None:
+            if raw != expected_records:
+                raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+            return
+        validate_fetch_chunk(self.chunk)
+        expected_keys = {
+            "schema_version",
+            "binding",
+            "contract",
+            "response",
+            "provider_payload",
+        }
+        if not isinstance(raw, dict) or set(raw) != expected_keys:
+            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+        response = raw["response"]
+        if not isinstance(response, dict) or set(response) != {
+            "complete",
+            "partial_reason",
+            "records",
+        }:
+            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+        if raw["schema_version"] != _RAW_RESPONSE_SCHEMA_VERSION:
+            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+        if raw["binding"] != _chunk_payload(self.chunk):
+            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+        if _contract_from_payload(raw["contract"]) != self.contract:
+            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+        if response["records"] != expected_records:
+            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+        if response["complete"] is not self.complete:
+            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+        if response["partial_reason"] != self.partial_reason:
+            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+
+    @classmethod
+    def create_bound(
+        cls,
+        *,
+        chunk: FetchChunk,
+        records: tuple[Mapping[str, object], ...],
+        contract: SupplierResponseContract,
+        complete: bool,
+        partial_reason: str | None,
+        provider_payload: object,
+    ) -> SupplierResponse:
+        """Create the only response form eligible for Raw ingestion."""
+        validate_fetch_chunk(chunk)
+        if contract.dataset is not chunk.dataset:
+            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+        plain_records = _plain_records(records)
+        envelope = {
+            "schema_version": _RAW_RESPONSE_SCHEMA_VERSION,
+            "binding": _chunk_payload(chunk),
+            "contract": _contract_payload(contract),
+            "response": {
+                "complete": complete,
+                "partial_reason": partial_reason,
+                "records": plain_records,
+            },
+            "provider_payload": provider_payload,
+        }
+        try:
+            raw_payload = json.dumps(
+                envelope,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as error:
+            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT) from error
+        return cls(
+            records=tuple(plain_records),
+            raw_payload=raw_payload,
+            contract=contract,
+            complete=complete,
+            partial_reason=partial_reason,
+            chunk=chunk,
+        )
+
+    @classmethod
+    def from_raw_payload(
+        cls,
+        raw_payload: bytes,
+        *,
+        expected_chunk: FetchChunk,
+    ) -> SupplierResponse:
+        """Rebuild a typed response solely from verified Raw bytes."""
+        validate_fetch_chunk(expected_chunk)
+        raw = _load_canonical_json(raw_payload)
+        if not isinstance(raw, dict):
+            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+        try:
+            contract = _contract_from_payload(raw["contract"])
+            response = raw["response"]
+            if not isinstance(response, dict):
+                raise TypeError("response must be an object")
+            records = response["records"]
+            if not isinstance(records, list) or any(
+                not isinstance(record, dict) for record in records
+            ):
+                raise TypeError("records must be an object list")
+            complete = response["complete"]
+            partial_reason = response["partial_reason"]
+        except (KeyError, TypeError) as error:
+            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT) from error
+        return cls(
+            records=tuple(records),
+            raw_payload=raw_payload,
+            contract=contract,
+            complete=complete,
+            partial_reason=partial_reason,
+            chunk=expected_chunk,
+        )
 
 
 __all__ = [

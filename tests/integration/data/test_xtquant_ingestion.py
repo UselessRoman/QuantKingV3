@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 
 from quantking.common.errors import InvalidPathError
@@ -27,11 +29,14 @@ from quantking.data.adapters.sources.contracts import (
     VolumeUnit,
 )
 from quantking.data.adapters.sources.ingestion import XtQuantIngestionService
+from quantking.data.adapters.sources.normalization import normalize_xtquant_response
+from quantking.data.adapters.sources.xtquant import XtQuantMarketDataGateway
 from quantking.data.adapters.warehouse.errors import RawStoreError
 from quantking.data.adapters.warehouse.manifest import path_safe_id
 from quantking.data.adapters.warehouse.raw_store import (
     RawBatchFailureRequest,
     RawBatchPublisher,
+    RawBatchPublishRequest,
 )
 from quantking.data.incremental import IncrementalPlanRequest, build_incremental_plan
 from quantking.data.models import (
@@ -65,12 +70,54 @@ class FakeGateway:
         result = self.responses.pop(0)
         if isinstance(result, BaseException):
             raise result
+        if isinstance(result, SupplierResponse) and result.chunk is None:
+            return SupplierResponse.create_bound(
+                chunk=_chunk,  # type: ignore[arg-type]
+                records=result.records,
+                contract=result.contract,
+                complete=result.complete,
+                partial_reason=result.partial_reason,
+                provider_payload={
+                    "synthetic_records": [dict(record) for record in result.records],
+                },
+            )
         return result
 
 
 class FailingRawPublisher(RawBatchPublisher):
     def _write_file(self, target: Path, payload: bytes) -> None:
         raise OSError(r"secret path E:\private\raw")
+
+
+class SerializationFailingRawPublisher(RawBatchPublisher):
+    def _write_input_listing(
+        self,
+        directory: Path,
+        request: RawBatchPublishRequest,
+    ) -> None:
+        raise TypeError(r"SECRET E:\private serialization")
+
+
+class RewritingRawPublisher(RawBatchPublisher):
+    def publish(self, request: RawBatchPublishRequest) -> Path:
+        first = request.files[0]
+        envelope = json.loads(first.payload)
+        envelope["response"]["records"][0]["close"] = 10.1
+        payload = json.dumps(
+            envelope,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        changed_file = replace(first, payload=payload)
+        return super().publish(replace(request, files=(changed_file, *request.files[1:])))
+
+
+class WrongRowCountRawPublisher(RawBatchPublisher):
+    def publish(self, request: RawBatchPublishRequest) -> Path:
+        first = replace(request.files[0], row_count=request.files[0].row_count + 1)
+        return super().publish(replace(request, files=(first, *request.files[1:])))
 
 
 @pytest.fixture()
@@ -106,6 +153,25 @@ def _plan(
             known_coverage=(),
             lookback_days=0,
             max_days_per_chunk=1,
+            max_items_per_chunk=1,
+            adapter_version="xtquant-s1-03.v1",
+        )
+    )
+
+
+def _calendar_plan(*, batch_id: object | None = None) -> object:
+    return build_incremental_plan(
+        IncrementalPlanRequest(
+            batch_id=batch_id or new_entity_id("data_batch"),  # type: ignore[arg-type]
+            dataset=DatasetKind.EXCHANGE_CALENDAR,
+            scope=("SH",),
+            request_start=TradingDate(date(2026, 7, 17)),
+            request_end=TradingDate(date(2026, 7, 18)),
+            start_inclusive=True,
+            end_inclusive=True,
+            known_coverage=(),
+            lookback_days=0,
+            max_days_per_chunk=2,
             max_items_per_chunk=1,
             adapter_version="xtquant-s1-03.v1",
         )
@@ -210,10 +276,191 @@ def test_success_persists_raw_manifest_complete_request_and_candidate(
     manifest = json.loads((outcome.raw_directory / "manifest.json").read_text(encoding="utf-8"))
     assert len(manifest["manifest_sha256"]) == 64
     assert len(manifest["files"][0]["sha256"]) == 64
+    raw_envelope = json.loads(
+        (outcome.raw_directory / manifest["files"][0]["relative_path"]).read_text(encoding="utf-8")
+    )
+    assert manifest["files"][0]["row_count"] == len(raw_envelope["response"]["records"])
     with factory() as uow:
         persisted = uow.data.get_batch(str(plan.batch_id))  # type: ignore[union-attr]
     assert persisted == outcome.batch
     assert gateway.calls == 1
+
+
+def test_candidate_is_rebuildable_from_verified_raw_bytes(
+    tmp_path: Path,
+    persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
+) -> None:
+    _, factory = persistence
+    plan = _plan()
+    outcome = _service(tmp_path, factory, FakeGateway((_response(),))).run(
+        plan  # type: ignore[arg-type]
+    )
+    assert outcome.canonical_table is not None
+    assert outcome.raw_directory is not None
+    payload = (outcome.raw_directory / "responses" / "chunk-00000.json").read_bytes()
+    rebuilt = SupplierResponse.from_raw_payload(
+        payload,
+        expected_chunk=plan.chunks[0],  # type: ignore[union-attr]
+    )
+    replayed = normalize_xtquant_response(
+        DatasetKind.DAILY_BAR_UNADJUSTED,
+        rebuilt,
+    )
+    assert replayed.equals(outcome.canonical_table)
+
+
+def test_valid_but_rewritten_raw_is_rejected_against_gateway_records(
+    tmp_path: Path,
+    persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
+) -> None:
+    _, factory = persistence
+    outcome = _service(
+        tmp_path,
+        factory,
+        FakeGateway((_response(),)),
+        publisher=RewritingRawPublisher(data_root=tmp_path),
+    ).run(_plan())  # type: ignore[arg-type]
+    assert outcome.batch.status is IngestionBatchStatus.FAILED
+    assert outcome.batch.failure is not None
+    assert outcome.batch.failure.error_type is BatchFailureKind.PARSE
+    assert outcome.canonical_table is None
+    assert outcome.raw_directory is not None
+
+
+def test_manifest_row_count_must_equal_records_inside_raw(
+    tmp_path: Path,
+    persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
+) -> None:
+    _, factory = persistence
+    outcome = _service(
+        tmp_path,
+        factory,
+        FakeGateway((_response(),)),
+        publisher=WrongRowCountRawPublisher(data_root=tmp_path),
+    ).run(_plan())  # type: ignore[arg-type]
+    assert outcome.batch.status is IngestionBatchStatus.FAILED
+    assert outcome.batch.failure is not None
+    assert outcome.batch.failure.error_type is BatchFailureKind.PARSE
+    assert outcome.canonical_table is None
+
+
+def test_raw_object_and_nonempty_records_mismatch_is_rejected() -> None:
+    records = _response().records
+    with pytest.raises(SourceAdapterError) as exc_info:
+        SupplierResponse(
+            records=records,
+            raw_payload=b"{}",
+            contract=_contract(),
+            complete=True,
+            partial_reason=None,
+        )
+    assert exc_info.value.code is SourceErrorCode.RESPONSE_CONTRACT
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("sequence", "scope", "date_range", "request_hash"),
+)
+def test_response_binding_must_match_expected_chunk(
+    mutation: str,
+    tmp_path: Path,
+    persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
+) -> None:
+    _, factory = persistence
+    plan = _plan()
+    expected = plan.chunks[0]  # type: ignore[union-attr]
+    if mutation == "sequence":
+        wrong = replace(expected, sequence=expected.sequence + 1)
+    elif mutation == "scope":
+        wrong = replace(expected, scope=("600000.SH",))
+    elif mutation == "date_range":
+        wrong = replace(
+            expected,
+            start=TradingDate(date(2026, 7, 18)),
+            end=TradingDate(date(2026, 7, 18)),
+        )
+    else:
+        wrong = replace(expected, request_sha256="0" * 64)
+    base = _response()
+    response = SupplierResponse.create_bound(
+        chunk=wrong,
+        records=base.records,
+        contract=base.contract,
+        complete=True,
+        partial_reason=None,
+        provider_payload={"synthetic": True},
+    )
+    outcome = _service(tmp_path, factory, FakeGateway((response,))).run(
+        plan  # type: ignore[arg-type]
+    )
+    assert outcome.batch.status is IngestionBatchStatus.FAILED
+    assert outcome.batch.failure is not None
+    assert outcome.batch.failure.error_type is BatchFailureKind.PARSE
+
+
+def test_response_dataset_must_match_expected_chunk(
+    tmp_path: Path,
+    persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
+) -> None:
+    _, factory = persistence
+
+    class EmptyCalendarModule:
+        @staticmethod
+        def get_trading_dates(*_args: object, **_kwargs: object) -> list[object]:
+            return []
+
+    calendar_plan = _calendar_plan()
+    response = XtQuantMarketDataGateway(module_loader=lambda: EmptyCalendarModule()).fetch(
+        calendar_plan.chunks[0]
+    )  # type: ignore[union-attr]
+    outcome = _service(tmp_path, factory, FakeGateway((response,))).run(
+        _plan()  # type: ignore[arg-type]
+    )
+    assert outcome.batch.status is IngestionBatchStatus.FAILED
+    assert outcome.batch.failure is not None
+    assert outcome.batch.failure.error_type is BatchFailureKind.PARSE
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"stock_code": "600000.SH"},
+        {"date": "2026-07-18"},
+    ),
+)
+def test_candidate_outside_plan_scope_or_date_fails(
+    mutation: dict[str, object],
+    tmp_path: Path,
+    persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
+) -> None:
+    _, factory = persistence
+    record = dict(_response().records[0])
+    record.update(mutation)
+    outcome = _service(
+        tmp_path,
+        factory,
+        FakeGateway((_response(records=(record,)),)),
+    ).run(_plan())  # type: ignore[arg-type]
+    assert outcome.batch.status is IngestionBatchStatus.FAILED
+    assert outcome.batch.failure is not None
+    assert outcome.batch.failure.error_type is BatchFailureKind.PARSE
+
+
+def test_gateway_wrong_return_type_becomes_failed_terminal(
+    tmp_path: Path,
+    persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
+) -> None:
+    _, factory = persistence
+    plan = _plan()
+    outcome = _service(
+        tmp_path,
+        factory,
+        FakeGateway((object(),)),  # type: ignore[arg-type]
+    ).run(plan)  # type: ignore[arg-type]
+    assert outcome.batch.status is IngestionBatchStatus.FAILED
+    with factory() as uow:
+        persisted = uow.data.get_batch(str(plan.batch_id))  # type: ignore[union-attr]
+    assert persisted.status is IngestionBatchStatus.FAILED
 
 
 def test_gateway_failure_before_payload_preserves_managed_failure_evidence(
@@ -243,6 +490,13 @@ def test_gateway_failure_before_payload_preserves_managed_failure_evidence(
     assert "SECRET" not in rendered
     assert "E:\\private" not in rendered
     assert (failure_dir / "input_listing.json").is_file()
+    listing = json.loads((failure_dir / "input_listing.json").read_text(encoding="utf-8"))
+    assert set(listing["request_params"]) == {
+        "adapter_version",
+        "dataset",
+        "request_sha256",
+    }
+    assert "SECRET" not in json.dumps(listing)
 
 
 def test_failed_same_parameters_can_retry_with_new_batch_id(
@@ -289,7 +543,10 @@ def test_partial_response_keeps_raw_but_never_returns_candidate(
     persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
 ) -> None:
     _, factory = persistence
-    response = _response(complete=False, partial_reason="one requested symbol missing")
+    response = _response(
+        complete=False,
+        partial_reason=SourceErrorCode.PARTIAL_RESPONSE.value,
+    )
     outcome = _service(tmp_path, factory, FakeGateway((response,))).run(
         _plan()  # type: ignore[arg-type]
     )
@@ -323,8 +580,8 @@ def test_later_chunk_failure_keeps_received_raw_and_becomes_partial(
     evidence = json.loads(
         (outcome.raw_directory / "responses" / "chunk-00001.json").read_text(encoding="utf-8")
     )
-    assert received[0]["stock_code"] == "000001.SZ"
-    assert evidence["error_code"] == SourceErrorCode.NETWORK.value
+    assert received["response"]["records"][0]["stock_code"] == "000001.SZ"
+    assert evidence["provider_payload"]["error_code"] == SourceErrorCode.NETWORK.value
     assert "SECRET" not in json.dumps(evidence)
     assert "E:\\private" not in json.dumps(evidence)
 
@@ -335,7 +592,8 @@ def test_normalization_failure_keeps_raw_and_cannot_succeed(
 ) -> None:
     _, factory = persistence
     bad = dict(_response().records[0])
-    bad["close"] = float("nan")
+    bad["high"] = 10.0
+    bad["close"] = 10.2
     outcome = _service(tmp_path, factory, FakeGateway((_response(records=(bad,)),))).run(
         _plan()  # type: ignore[arg-type]
     )
@@ -374,6 +632,70 @@ def test_raw_failure_leaves_incomplete_and_no_success_batch(
     assert not incomplete.with_name(incomplete.name.removesuffix(".incomplete")).exists()
 
 
+def test_raw_serialization_failure_becomes_failed_terminal(
+    tmp_path: Path,
+    persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
+) -> None:
+    _, factory = persistence
+    plan = _plan()
+    outcome = _service(
+        tmp_path,
+        factory,
+        FakeGateway((_response(),)),
+        publisher=SerializationFailingRawPublisher(data_root=tmp_path),
+    ).run(plan)  # type: ignore[arg-type]
+    assert outcome.batch.status is IngestionBatchStatus.FAILED
+    with factory() as uow:
+        persisted = uow.data.get_batch(str(plan.batch_id))  # type: ignore[union-attr]
+    assert persisted.status is IngestionBatchStatus.FAILED
+
+
+def test_request_construction_failure_becomes_failed_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
+) -> None:
+    _, factory = persistence
+
+    def fail_request(*_args: object, **_kwargs: object) -> RawBatchPublishRequest:
+        raise ValueError(r"SECRET E:\private request")
+
+    monkeypatch.setattr(XtQuantIngestionService, "_raw_request", staticmethod(fail_request))
+    plan = _plan()
+    outcome = _service(tmp_path, factory, FakeGateway((_response(),))).run(
+        plan  # type: ignore[arg-type]
+    )
+    assert outcome.batch.status is IngestionBatchStatus.FAILED
+    with factory() as uow:
+        persisted = uow.data.get_batch(str(plan.batch_id))  # type: ignore[union-attr]
+    assert persisted.status is IngestionBatchStatus.FAILED
+
+
+def test_unexpected_standardizer_exception_becomes_failed_with_raw(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
+) -> None:
+    _, factory = persistence
+
+    def fail_standardization(*_args: object, **_kwargs: object) -> pa.Table:
+        raise RuntimeError(r"SECRET E:\private standardizer")
+
+    monkeypatch.setattr(
+        "quantking.data.adapters.sources.ingestion.normalize_xtquant_response",
+        fail_standardization,
+    )
+    plan = _plan()
+    outcome = _service(tmp_path, factory, FakeGateway((_response(),))).run(
+        plan  # type: ignore[arg-type]
+    )
+    assert outcome.batch.status is IngestionBatchStatus.FAILED
+    assert outcome.raw_directory is not None
+    assert outcome.batch.failure is not None
+    assert outcome.batch.failure.error_type is BatchFailureKind.INTERNAL
+    assert "SECRET" not in outcome.batch.failure.message
+
+
 def test_legal_empty_universe_succeeds_without_supplier_call(
     tmp_path: Path,
     persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
@@ -409,6 +731,60 @@ def test_unexpected_empty_response_is_failed_not_success(
     assert outcome.batch.status is IngestionBatchStatus.FAILED
     assert outcome.batch.failure is not None
     assert outcome.batch.failure.error_type is BatchFailureKind.UNEXPECTED_EMPTY
+
+
+def test_empty_calendar_requires_explicit_legal_empty_evidence(
+    tmp_path: Path,
+    persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
+) -> None:
+    _, factory = persistence
+
+    class EmptyCalendarModule:
+        @staticmethod
+        def get_trading_dates(*_args: object, **_kwargs: object) -> list[object]:
+            return []
+
+    gateway = XtQuantMarketDataGateway(module_loader=lambda: EmptyCalendarModule())
+    failed_plan = _calendar_plan()
+    failed = XtQuantIngestionService(
+        gateway=gateway,
+        raw_publisher=RawBatchPublisher(data_root=tmp_path),
+        data_root=tmp_path,
+        uow_factory=factory,
+        clock=_clock(),  # type: ignore[arg-type]
+    ).run(failed_plan)  # type: ignore[arg-type]
+    assert failed.batch.status is IngestionBatchStatus.FAILED
+    assert failed.batch.failure is not None
+    assert failed.batch.failure.error_type is BatchFailureKind.UNEXPECTED_EMPTY
+
+    legal_plan = _calendar_plan()
+    legal = EmptyResultInfo(
+        LegalEmptyClassification.NO_TRADING_SESSION,
+        "exchange calendar evidence confirms no session in the explicit range",
+    )
+    succeeded = XtQuantIngestionService(
+        gateway=gateway,
+        raw_publisher=RawBatchPublisher(data_root=tmp_path),
+        data_root=tmp_path,
+        uow_factory=factory,
+        clock=_clock(),  # type: ignore[arg-type]
+    ).run(legal_plan, empty_result=legal)  # type: ignore[arg-type]
+    assert succeeded.batch.status is IngestionBatchStatus.SUCCEEDED
+    assert succeeded.canonical_table is not None
+    assert succeeded.canonical_table.num_rows == 0
+
+
+def test_orchestrator_revalidates_tampered_plan_before_gateway_call(
+    tmp_path: Path,
+    persistence: tuple[Path, DataSqliteUnitOfWorkFactory],
+) -> None:
+    _, factory = persistence
+    plan = _plan()
+    object.__setattr__(plan, "request_sha256", "0" * 64)
+    gateway = FakeGateway((_response(),))
+    with pytest.raises(ValueError):
+        _service(tmp_path, factory, gateway).run(plan)  # type: ignore[arg-type]
+    assert gateway.calls == 0
 
 
 def test_ingestion_never_creates_or_publishes_dataset_version(
@@ -472,6 +848,16 @@ def test_managed_failure_api_is_immutable_and_rejects_unsafe_id(tmp_path: Path) 
             request_params={},
             error_code=SourceErrorCode.NETWORK.value,
             failed_at="not-a-utc-timestamp",
+        )
+    with pytest.raises(InvalidPathError, match="request_params"):
+        RawBatchFailureRequest(
+            source="xtquant",
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED.value,
+            batch_id="data_batch--33333333-3333-4333-8333-333333333333",
+            adapter_version="xtquant-s1-03.v1",
+            request_params={"token": r"SECRET E:\private"},
+            error_code=SourceErrorCode.NETWORK.value,
+            failed_at=_END.to_iso(),
         )
 
 

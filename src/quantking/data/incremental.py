@@ -23,6 +23,23 @@ from quantking.data.schemas import canonical_code_pattern
 
 _EXCHANGE = re.compile(r"(SZ|SH|BJ)\Z")
 _SAFE_SCOPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
+_ADAPTER_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_REQUEST_PARAM_KEYS = frozenset(
+    {
+        "adapter_version",
+        "dataset",
+        "end_inclusive",
+        "known_coverage",
+        "lookback_days",
+        "max_days_per_chunk",
+        "max_items_per_chunk",
+        "request_end",
+        "request_start",
+        "scope",
+        "start_inclusive",
+    }
+)
 
 
 def _validate_scope(dataset: DatasetKind, value: str) -> str:
@@ -112,8 +129,11 @@ class IncrementalPlanRequest:
             raise ValueError("lookback_days must be non-negative")
         if self.max_days_per_chunk <= 0 or self.max_items_per_chunk <= 0:
             raise ValueError("chunk sizes must be positive")
-        if not isinstance(self.adapter_version, str) or not self.adapter_version.strip():
-            raise ValueError("adapter_version must be non-empty text")
+        if (
+            not isinstance(self.adapter_version, str)
+            or _ADAPTER_VERSION.fullmatch(self.adapter_version) is None
+        ):
+            raise ValueError("adapter_version must be a safe stable identifier")
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +145,7 @@ class FetchChunk:
     scope: tuple[str, ...]
     start: TradingDate
     end: TradingDate
+    request_sha256: str
     start_inclusive: bool = True
     end_inclusive: bool = True
 
@@ -137,10 +158,26 @@ class FetchChunk:
             raise ValueError("sequence must be a non-negative integer")
         if not isinstance(self.dataset, DatasetKind):
             raise TypeError("dataset must be a DatasetKind")
-        if not self.scope:
+        if not isinstance(self.scope, tuple) or not self.scope:
             raise ValueError("supplier chunks must never have an empty scope")
+        normalized_scope = tuple(
+            sorted({_validate_scope(self.dataset, value) for value in self.scope})
+        )
+        if normalized_scope != self.scope:
+            raise ValueError("chunk scope must be sorted, unique and canonical")
+        if not isinstance(self.start, TradingDate) or not isinstance(self.end, TradingDate):
+            raise TypeError("chunk boundaries must be TradingDate values")
         if self.end.value < self.start.value:
             raise ValueError("supplier chunk end must not precede start")
+        if not isinstance(self.start_inclusive, bool) or not isinstance(self.end_inclusive, bool):
+            raise TypeError("chunk boundary flags must be bool values")
+        if not self.start_inclusive or not self.end_inclusive:
+            raise ValueError("supplier chunks use inclusive normalized boundaries")
+        if (
+            not isinstance(self.request_sha256, str)
+            or _SHA256.fullmatch(self.request_sha256) is None
+        ):
+            raise ValueError("chunk request_sha256 must be lowercase SHA-256")
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +191,21 @@ class IncrementalFetchPlan:
     adapter_version: str
     request_params: Mapping[str, str]
     request_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request_params, Mapping):
+            raise TypeError("request_params must be a mapping")
+        normalized: dict[str, str] = {}
+        for key, value in self.request_params.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise TypeError("request_params must map text to text")
+            normalized[key] = value
+        object.__setattr__(
+            self,
+            "request_params",
+            MappingProxyType(dict(sorted(normalized.items()))),
+        )
+        validate_incremental_plan(self)
 
 
 def _date_range(start: date, end: date) -> tuple[date, ...]:
@@ -222,10 +274,18 @@ def _params(request: IncrementalPlanRequest) -> Mapping[str, str]:
     return MappingProxyType(dict(sorted(values.items())))
 
 
-def build_incremental_plan(request: IncrementalPlanRequest) -> IncrementalFetchPlan:
-    """Build deterministic chunks without consulting a supplier or "latest" state."""
-    if not isinstance(request, IncrementalPlanRequest):
-        raise TypeError("request must be an IncrementalPlanRequest")
+def _request_sha256(params: Mapping[str, str]) -> str:
+    payload = json.dumps(
+        dict(params), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _build_chunks(
+    request: IncrementalPlanRequest,
+    *,
+    request_sha256: str,
+) -> tuple[FetchChunk, ...]:
     requested_dates = set(_request_dates(request))
     intervals: dict[tuple[date, date], list[str]] = {}
     for scope in request.scope:
@@ -262,20 +322,143 @@ def build_incremental_plan(request: IncrementalPlanRequest) -> IncrementalFetchP
                     scope=chunk_scope,
                     start=TradingDate(start),
                     end=TradingDate(end),
+                    request_sha256=request_sha256,
                 )
             )
+    return tuple(chunks)
+
+
+def _parse_bool(value: str, *, field: str) -> bool:
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ValueError(f"{field} must be canonical boolean text")
+
+
+def _parse_int(value: str, *, field: str) -> int:
+    if not re.fullmatch(r"0|[1-9][0-9]*", value):
+        raise ValueError(f"{field} must be canonical non-negative integer text")
+    return int(value)
+
+
+def _request_from_plan(plan: IncrementalFetchPlan) -> IncrementalPlanRequest:
+    params = dict(plan.request_params)
+    if set(params) != _REQUEST_PARAM_KEYS:
+        raise ValueError("request_params must use the generated whitelist contract")
+    try:
+        dataset = DatasetKind(params["dataset"])
+        raw_scope = json.loads(params["scope"])
+        raw_coverage = json.loads(params["known_coverage"])
+    except (KeyError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("request_params contain invalid generated values") from error
+    if not isinstance(raw_scope, list) or any(not isinstance(item, str) for item in raw_scope):
+        raise ValueError("request_params scope must be a JSON string list")
+    if not isinstance(raw_coverage, list):
+        raise ValueError("request_params known_coverage must be a JSON list")
+    coverage: list[CoverageWindow] = []
+    for item in raw_coverage:
+        if not isinstance(item, dict) or set(item) != {"scope", "start", "end"}:
+            raise ValueError("request_params coverage entries are invalid")
+        if any(not isinstance(item[key], str) for key in ("scope", "start", "end")):
+            raise ValueError("request_params coverage values must be text")
+        coverage.append(
+            CoverageWindow(
+                item["scope"],
+                TradingDate.from_iso(item["start"]),
+                TradingDate.from_iso(item["end"]),
+            )
+        )
+    try:
+        request = IncrementalPlanRequest(
+            batch_id=plan.batch_id,
+            dataset=dataset,
+            scope=tuple(raw_scope),
+            request_start=TradingDate.from_iso(params["request_start"]),
+            request_end=TradingDate.from_iso(params["request_end"]),
+            start_inclusive=_parse_bool(params["start_inclusive"], field="start_inclusive"),
+            end_inclusive=_parse_bool(params["end_inclusive"], field="end_inclusive"),
+            known_coverage=tuple(coverage),
+            lookback_days=_parse_int(params["lookback_days"], field="lookback_days"),
+            max_days_per_chunk=_parse_int(params["max_days_per_chunk"], field="max_days_per_chunk"),
+            max_items_per_chunk=_parse_int(
+                params["max_items_per_chunk"], field="max_items_per_chunk"
+            ),
+            adapter_version=params["adapter_version"],
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("request_params do not reconstruct a valid request") from error
+    if dict(_params(request)) != params:
+        raise ValueError("request_params are not in generated canonical form")
+    return request
+
+
+def validate_fetch_chunk(chunk: FetchChunk) -> None:
+    """Revalidate a chunk at an adapter or orchestration trust boundary."""
+    if not isinstance(chunk, FetchChunk):
+        raise TypeError("chunk must be a FetchChunk")
+    FetchChunk(
+        sequence=chunk.sequence,
+        dataset=chunk.dataset,
+        scope=chunk.scope,
+        start=chunk.start,
+        end=chunk.end,
+        request_sha256=chunk.request_sha256,
+        start_inclusive=chunk.start_inclusive,
+        end_inclusive=chunk.end_inclusive,
+    )
+
+
+def validate_incremental_plan(plan: IncrementalFetchPlan) -> None:
+    """Reconstruct and compare the complete generated plan contract."""
+    if not isinstance(plan, IncrementalFetchPlan):
+        raise TypeError("plan must be an IncrementalFetchPlan")
+    if not isinstance(plan.batch_id, EntityId) or plan.batch_id.namespace != "data_batch":
+        raise ValueError("plan batch_id must use the data_batch namespace")
+    if not isinstance(plan.dataset, DatasetKind):
+        raise TypeError("plan dataset must be a DatasetKind")
+    if not isinstance(plan.scope, tuple):
+        raise TypeError("plan scope must be a tuple")
+    if not isinstance(plan.chunks, tuple):
+        raise TypeError("plan chunks must be a tuple")
+    if (
+        not isinstance(plan.adapter_version, str)
+        or _ADAPTER_VERSION.fullmatch(plan.adapter_version) is None
+    ):
+        raise ValueError("plan adapter_version must be a safe stable identifier")
+    if not isinstance(plan.request_sha256, str) or _SHA256.fullmatch(plan.request_sha256) is None:
+        raise ValueError("plan request_sha256 must be lowercase SHA-256")
+    request = _request_from_plan(plan)
+    if request.dataset is not plan.dataset:
+        raise ValueError("plan dataset does not match generated request_params")
+    if request.scope != plan.scope:
+        raise ValueError("plan scope does not match generated request_params")
+    if request.adapter_version != plan.adapter_version:
+        raise ValueError("plan adapter_version does not match request_params")
+    expected_sha = _request_sha256(plan.request_params)
+    if expected_sha != plan.request_sha256:
+        raise ValueError("plan request_sha256 does not match request_params")
+    expected_chunks = _build_chunks(request, request_sha256=expected_sha)
+    if plan.chunks != expected_chunks:
+        raise ValueError("plan chunk inventory does not match generated request")
+    for chunk in plan.chunks:
+        validate_fetch_chunk(chunk)
+
+
+def build_incremental_plan(request: IncrementalPlanRequest) -> IncrementalFetchPlan:
+    """Build deterministic chunks without consulting a supplier or "latest" state."""
+    if not isinstance(request, IncrementalPlanRequest):
+        raise TypeError("request must be an IncrementalPlanRequest")
     params = _params(request)
-    payload = json.dumps(
-        dict(params), ensure_ascii=False, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+    request_sha256 = _request_sha256(params)
     return IncrementalFetchPlan(
         batch_id=request.batch_id,
         dataset=request.dataset,
         scope=request.scope,
-        chunks=tuple(chunks),
+        chunks=_build_chunks(request, request_sha256=request_sha256),
         adapter_version=request.adapter_version,
         request_params=params,
-        request_sha256=hashlib.sha256(payload).hexdigest(),
+        request_sha256=request_sha256,
     )
 
 
@@ -285,4 +468,6 @@ __all__ = [
     "IncrementalFetchPlan",
     "IncrementalPlanRequest",
     "build_incremental_plan",
+    "validate_fetch_chunk",
+    "validate_incremental_plan",
 ]

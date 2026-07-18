@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import importlib
-import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -24,7 +23,7 @@ from quantking.data.adapters.sources.contracts import (
     VolumeUnit,
     classify_source_error,
 )
-from quantking.data.incremental import FetchChunk
+from quantking.data.incremental import FetchChunk, validate_fetch_chunk
 from quantking.data.models import DatasetKind
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -62,33 +61,55 @@ class ExplicitXtQuantModuleLoader:
 
     def load(self) -> ModuleType:
         """Delay the import and restore ``sys.path`` immediately afterward."""
-        existing = {
+        previous = {
             name: module
             for name, module in sys.modules.items()
             if name == "xtquant" or name.startswith("xtquant.")
         }
-        for module in existing.values():
+        previous_state = {name: dict(vars(module)) for name, module in previous.items()}
+        try:
+            for existing_module in previous.values():
+                module_file = getattr(existing_module, "__file__", None)
+                if not isinstance(module_file, str) or not _is_below(
+                    Path(module_file).resolve(strict=False), self._root
+                ):
+                    raise SourceAdapterError(SourceErrorCode.CAPABILITY_UNAVAILABLE)
+            original_path = tuple(sys.path)
+            try:
+                sys.path.insert(0, str(self._root))
+                importlib.invalidate_caches()
+                module = importlib.import_module("xtquant.xtdata")
+            finally:
+                sys.path[:] = original_path
             module_file = getattr(module, "__file__", None)
             if not isinstance(module_file, str) or not _is_below(
                 Path(module_file).resolve(strict=False), self._root
             ):
                 raise SourceAdapterError(SourceErrorCode.CAPABILITY_UNAVAILABLE)
-        original_path = tuple(sys.path)
-        try:
-            sys.path.insert(0, str(self._root))
-            importlib.invalidate_caches()
-            module = importlib.import_module("xtquant.xtdata")
-        finally:
-            sys.path[:] = original_path
-        module_file = getattr(module, "__file__", None)
-        if not isinstance(module_file, str) or not _is_below(
-            Path(module_file).resolve(strict=False), self._root
-        ):
-            raise SourceAdapterError(SourceErrorCode.CAPABILITY_UNAVAILABLE)
-        trading_name = ".".join(("xtquant", "xt" + "trader"))
-        if trading_name in sys.modules:
-            raise SourceAdapterError(SourceErrorCode.CAPABILITY_UNAVAILABLE)
-        return module
+            trading_name = ".".join(("xtquant", "xt" + "trader"))
+            if trading_name in sys.modules:
+                raise SourceAdapterError(SourceErrorCode.CAPABILITY_UNAVAILABLE)
+            return module
+        except Exception as error:
+            self._restore_modules(previous, previous_state)
+            mapped = classify_source_error(error)
+            if mapped is error:
+                raise
+            raise mapped from error
+
+    @staticmethod
+    def _restore_modules(
+        previous: Mapping[str, ModuleType],
+        previous_state: Mapping[str, dict[str, object]],
+    ) -> None:
+        for name in tuple(sys.modules):
+            if (name == "xtquant" or name.startswith("xtquant.")) and name not in previous:
+                sys.modules.pop(name, None)
+        for name, module in previous.items():
+            sys.modules[name] = module
+            module.__dict__.clear()
+            module.__dict__.update(previous_state[name])
+        importlib.invalidate_caches()
 
 
 def _days(start: date, end: date) -> tuple[date, ...]:
@@ -113,8 +134,7 @@ class XtQuantMarketDataGateway:
         self._module_loader = module_loader
 
     def fetch(self, chunk: FetchChunk) -> SupplierResponse:
-        if not isinstance(chunk, FetchChunk):
-            raise TypeError("chunk must be a FetchChunk")
+        validate_fetch_chunk(chunk)
         capability = capability_for(chunk.dataset)
         if not capability.available:
             raise SourceAdapterError(SourceErrorCode.CAPABILITY_UNAVAILABLE)
@@ -127,6 +147,7 @@ class XtQuantMarketDataGateway:
                 raise SourceAdapterError(SourceErrorCode.CAPABILITY_UNAVAILABLE)
             records: list[dict[str, object]] = []
             raw_results: dict[str, list[int]] = {}
+            empty_markets: list[str] = []
             for market in chunk.scope:
                 returned = function(
                     market,
@@ -149,6 +170,9 @@ class XtQuantMarketDataGateway:
                     for value in timestamps
                     if isinstance(value, int) and not isinstance(value, bool)
                 ]
+                if not timestamps:
+                    empty_markets.append(market)
+                    continue
                 for calendar_date in _days(chunk.start.value, chunk.end.value):
                     records.append(
                         {
@@ -157,7 +181,7 @@ class XtQuantMarketDataGateway:
                             "open_flag": calendar_date in open_dates,
                         }
                     )
-            payload = {
+            provider_payload = {
                 "interface": capability.public_interface,
                 "request": {
                     "scope": list(chunk.scope),
@@ -182,17 +206,14 @@ class XtQuantMarketDataGateway:
                 adjustment_formula=None,
                 semantics_verified=True,
             )
-            return SupplierResponse(
+            complete = not empty_markets or not records
+            return SupplierResponse.create_bound(
+                chunk=chunk,
                 records=tuple(records),
-                raw_payload=json.dumps(
-                    payload,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode("utf-8"),
                 contract=contract,
-                complete=True,
-                partial_reason=None,
+                complete=complete,
+                partial_reason=(None if complete else SourceErrorCode.PARTIAL_RESPONSE.value),
+                provider_payload=provider_payload,
             )
         except SourceAdapterError:
             raise
