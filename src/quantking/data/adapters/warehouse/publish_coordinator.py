@@ -62,8 +62,10 @@ from quantking.data.adapters.warehouse.verifier import verify_canonical_director
 from quantking.data.models import (
     DatasetVersion,
     DatasetVersionStatus,
+    EmptyResultInfo,
     transition_dataset_version,
 )
+from quantking.data.schemas import descriptor_for
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,14 +84,15 @@ class CanonicalPublishCoordinatorRequest:
     tables: tuple[pa.Table, ...]
     code_version: str
     rule_version: str
+    empty_result: EmptyResultInfo | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.version, DatasetVersion):
             raise TypeError("version must be a DatasetVersion")
         if not isinstance(self.tables, tuple):
             object.__setattr__(self, "tables", tuple(self.tables))
-        if not self.tables:
-            raise ValueError("tables must be a non-empty tuple of pa.Table")
+        if not self.tables and self.empty_result is None:
+            raise ValueError("tables or an explicit empty_result is required")
         for table in self.tables:
             if not isinstance(table, pa.Table):
                 raise TypeError("tables must contain pa.Table values")
@@ -97,6 +100,8 @@ class CanonicalPublishCoordinatorRequest:
             raise ValueError("code_version must be non-empty text")
         if not isinstance(self.rule_version, str) or not self.rule_version.strip():
             raise ValueError("rule_version must be non-empty text")
+        if self.empty_result is not None and not isinstance(self.empty_result, EmptyResultInfo):
+            raise TypeError("empty_result must be an EmptyResultInfo or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +147,22 @@ class CanonicalPublishCoordinator:
                     "status": version.status.value,
                 },
             )
+        expected_schema = descriptor_for(version.dataset.value).schema_version
+        if version.schema_version != expected_schema:
+            raise CanonicalWarehouseError(
+                "dataset version schema_version does not match the canonical descriptor",
+                context={"version_id": str(version.version_id)},
+            )
+        if request.code_version != version.code_version:
+            raise CanonicalWarehouseError(
+                "request code_version does not match the dataset version",
+                context={"version_id": str(version.version_id)},
+            )
+        if request.rule_version != version.rule_version:
+            raise CanonicalWarehouseError(
+                "request rule_version does not match the dataset version",
+                context={"version_id": str(version.version_id)},
+            )
         # Step 2: build, validate and atomically publish the on-disk
         # files. ``CanonicalWarehouse.publish`` is idempotent: a
         # re-coordination against an existing directory re-validates
@@ -152,6 +173,7 @@ class CanonicalPublishCoordinator:
             tables=request.tables,
             code_version=request.code_version,
             rule_version=request.rule_version,
+            empty_result=request.empty_result,
         )
         directory = self._warehouse.publish(warehouse_request)
         # Step 3: read the actual manifest credentials from the on-disk
@@ -362,17 +384,11 @@ class CanonicalPublishCoordinator:
                 "stored coverage_end does not match the on-disk manifest",
                 context={"version_id": str(stored.version_id)},
             )
-        # The SQLite row's coverage_summary may be a subset of the
-        # manifest's coverage_summary (older coordinators wrote fewer
-        # keys). Every key the SQLite row declares must match the
-        # manifest exactly.
-        for key, expected in stored.coverage_summary.items():
-            actual = credentials.coverage_summary.get(key)
-            if actual is None or actual != expected:
-                raise CanonicalWarehouseError(
-                    "stored coverage_summary does not match the on-disk manifest",
-                    context={"version_id": str(stored.version_id), "field": key},
-                )
+        if dict(stored.coverage_summary) != credentials.coverage_summary:
+            raise CanonicalWarehouseError(
+                "stored coverage_summary does not exactly match the on-disk manifest",
+                context={"version_id": str(stored.version_id)},
+            )
 
 
 __all__ = [

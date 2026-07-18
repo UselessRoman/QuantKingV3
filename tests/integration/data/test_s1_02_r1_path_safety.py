@@ -152,6 +152,7 @@ class TestRawPathComponentRejection:
             ("source", ".."),
             ("source", "foo "),
             ("source", "foo\tbar"),
+            ("source", "foo\x1fbar"),
             ("source", "foo\x00bar"),
             ("source", "evil.incomplete"),
             ("source", "evil.INCOMPLETE"),
@@ -210,6 +211,34 @@ class TestRawPathComponentRejection:
         # The ``outside`` directory we created must be untouched.
         assert outside.is_dir()
         assert list(outside.iterdir()) == []
+
+    def test_raw_checks_managed_target_before_creating_incomplete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A failed root-boundary check must happen before any directory is created."""
+        publisher = RawBatchPublisher(data_root=tmp_path)
+        request = RawBatchPublishRequest(
+            source="xtquant",
+            dataset="daily_bar_unadjusted",
+            batch_id="b-2026-07-16-preflight",
+            adapter_version="xtquant-probe-1",
+            request_params={"code": "000001.SZ"},
+            files=(_file("rows/000001.SZ.parquet", b"AAA"),),
+        )
+
+        def _reject(*args: object, **kwargs: object) -> Path:
+            raise InvalidPathError("simulated managed-root boundary rejection")
+
+        monkeypatch.setattr(
+            "quantking.data.adapters.warehouse.raw_store.assert_path_under_root",
+            _reject,
+        )
+        with pytest.raises(InvalidPathError):
+            publisher.publish(request)
+        incomplete = (
+            tmp_path / "raw" / request.source / request.dataset / f"{request.batch_id}.incomplete"
+        )
+        assert not incomplete.exists()
 
 
 # ---------------------------------------------------------------------------

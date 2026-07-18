@@ -39,17 +39,16 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from quantking.common.errors import InvalidPathError
 from quantking.common.paths import is_reparse_point
 from quantking.data.adapters.warehouse.errors import ManifestIntegrityError
 from quantking.data.adapters.warehouse.manifest import (
-    RAW_FAILURE_FILENAME,
     RAW_INPUT_LISTING_FILENAME,
     RAW_MANIFEST_SCHEMA_VERSION,
     WAREHOUSE_COMPLETE_FILENAME,
-    WAREHOUSE_FAILURE_FILENAME,
     WAREHOUSE_INPUT_LISTING_FILENAME,
     WAREHOUSE_MANIFEST_FILENAME,
     WAREHOUSE_MANIFEST_SCHEMA_VERSION,
@@ -99,12 +98,23 @@ def verify_data_root(root: Path) -> Path:
         raise InvalidPathError("data_root must be a Path")
     if not root.is_absolute():
         raise InvalidPathError("data_root must be an absolute path")
-    if is_reparse_point(root):
+    current = Path(root.anchor)
+    try:
+        for part in root.parts[1:]:
+            current /= part
+            if current.exists() and is_reparse_point(current):
+                raise InvalidPathError(
+                    "data_root must not contain a symlink or junction",
+                    context={"path": str(root)},
+                )
+        return root.resolve(strict=False)
+    except InvalidPathError:
+        raise
+    except (OSError, RuntimeError) as error:
         raise InvalidPathError(
-            "data_root must not be a symlink or junction",
+            "data_root could not be safely resolved",
             context={"path": str(root)},
-        )
-    return root.resolve()
+        ) from error
 
 
 def assert_path_under_root(root_resolved: Path, target: Path) -> Path:
@@ -116,9 +126,33 @@ def assert_path_under_root(root_resolved: Path, target: Path) -> Path:
     """
     if not isinstance(target, Path):
         raise InvalidPathError("target must be a Path")
+    if not target.is_absolute():
+        raise InvalidPathError("target must be an absolute path")
     try:
-        resolved = target.resolve()
-    except OSError as error:
+        lexical_relative = target.relative_to(root_resolved)
+    except ValueError as error:
+        raise InvalidPathError(
+            "target is not lexically contained by the managed data root",
+            context={"target": str(target), "root": str(root_resolved)},
+        ) from error
+    if ".." in lexical_relative.parts:
+        raise InvalidPathError(
+            "target must not contain parent traversal",
+            context={"target": str(target)},
+        )
+    current = root_resolved
+    try:
+        for part in lexical_relative.parts:
+            current /= part
+            if current.exists() and is_reparse_point(current):
+                raise InvalidPathError(
+                    "managed path contains a symlink or junction",
+                    context={"target": str(target), "intermediate": str(current)},
+                )
+        resolved = target.resolve(strict=False)
+    except InvalidPathError:
+        raise
+    except (OSError, RuntimeError) as error:
         raise InvalidPathError(
             "target path is not resolvable",
             context={"target": str(target), "detail": str(error)},
@@ -127,25 +161,6 @@ def assert_path_under_root(root_resolved: Path, target: Path) -> Path:
         raise InvalidPathError(
             "target escapes the managed data root",
             context={"target": str(target), "root": str(root_resolved)},
-        )
-    # Walk every existing intermediate component between root and target.
-    # ``resolved.parents`` goes from the immediate parent up to the root;
-    # we stop when we reach ``root_resolved``.
-    for parent in resolved.parents:
-        if parent == root_resolved:
-            break
-        if not parent.exists():
-            continue
-        if is_reparse_point(parent):
-            raise InvalidPathError(
-                "intermediate path component is a symlink or junction",
-                context={"target": str(target), "intermediate": str(parent)},
-            )
-    # Also check the leaf itself if it exists.
-    if resolved.exists() and is_reparse_point(resolved):
-        raise InvalidPathError(
-            "target is a symlink or junction",
-            context={"target": str(target)},
         )
     return resolved
 
@@ -191,7 +206,156 @@ def _read_canonical_manifest(
             "manifest schema version is unsupported",
             context={"expected": expected_schema, "actual": str(schema_version)},
         )
+    _verify_manifest_shape(manifest, expected_schema=expected_schema)
     return raw, manifest
+
+
+def _verify_manifest_shape(manifest: dict[str, object], *, expected_schema: str) -> None:
+    """Validate all required v1 manifest fields and their stable JSON types."""
+    text_fields: tuple[str, ...]
+    if expected_schema == RAW_MANIFEST_SCHEMA_VERSION:
+        required = {
+            "manifest_schema_version",
+            "manifest_sha256",
+            "code_version",
+            "source",
+            "dataset",
+            "batch_id",
+            "adapter_version",
+            "created_at",
+            "request_params",
+            "files",
+        }
+        text_fields = (
+            "manifest_schema_version",
+            "manifest_sha256",
+            "code_version",
+            "source",
+            "dataset",
+            "batch_id",
+            "adapter_version",
+            "created_at",
+        )
+    else:
+        required = {
+            "manifest_schema_version",
+            "manifest_sha256",
+            "content_sha256",
+            "coverage_end",
+            "coverage_start",
+            "coverage_summary",
+            "created_at",
+            "dataset",
+            "files",
+            "input_batch_ids",
+            "parent_version_id",
+            "partition_scheme",
+            "rule_version",
+            "schema_version",
+            "code_version",
+            "version_id",
+        }
+        text_fields = (
+            "manifest_schema_version",
+            "manifest_sha256",
+            "content_sha256",
+            "created_at",
+            "dataset",
+            "rule_version",
+            "schema_version",
+            "code_version",
+            "version_id",
+        )
+    actual = set(manifest)
+    if actual != required:
+        raise ManifestIntegrityError(
+            "manifest fields do not match the declared schema",
+            context={
+                "missing": ",".join(sorted(required - actual)),
+                "extra": ",".join(sorted(actual - required)),
+            },
+        )
+    for field in text_fields:
+        value = manifest.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ManifestIntegrityError(
+                "manifest text field is missing or invalid",
+                context={"field": field},
+            )
+    if not isinstance(manifest.get("files"), list):
+        raise ManifestIntegrityError("manifest files entry is not a list")
+    if expected_schema == RAW_MANIFEST_SCHEMA_VERSION:
+        params = manifest.get("request_params")
+        if not isinstance(params, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str) for key, value in params.items()
+        ):
+            raise ManifestIntegrityError("raw request_params must map strings to strings")
+        return
+
+    content_sha = manifest.get("content_sha256")
+    if not isinstance(content_sha, str) or not _HEX64_RE.match(content_sha):
+        raise ManifestIntegrityError("manifest content_sha256 is invalid")
+    parent = manifest.get("parent_version_id")
+    if parent is not None and (not isinstance(parent, str) or not parent.strip()):
+        raise ManifestIntegrityError("manifest parent_version_id is invalid")
+    batch_ids = manifest.get("input_batch_ids")
+    if (
+        not isinstance(batch_ids, list)
+        or any(not isinstance(value, str) or not value.strip() for value in batch_ids)
+        or len(set(batch_ids)) != len(batch_ids)
+    ):
+        raise ManifestIntegrityError("manifest input_batch_ids are invalid")
+    start = manifest.get("coverage_start")
+    end = manifest.get("coverage_end")
+    if (start is None) != (end is None):
+        raise ManifestIntegrityError("coverage_start and coverage_end must both be set or null")
+    for field, value in (("coverage_start", start), ("coverage_end", end)):
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ManifestIntegrityError(
+                "manifest coverage date must be ISO text",
+                context={"field": field},
+            )
+        try:
+            date.fromisoformat(value)
+        except ValueError as error:
+            raise ManifestIntegrityError(
+                "manifest coverage date is invalid",
+                context={"field": field},
+            ) from error
+    summary = manifest.get("coverage_summary")
+    if not isinstance(summary, dict) or any(
+        not isinstance(key, str) or not key or not isinstance(value, str) or not value
+        for key, value in summary.items()
+    ):
+        raise ManifestIntegrityError("manifest coverage_summary must map text to text")
+    for field in ("row_count", "security_count", "date_count"):
+        value = summary.get(field)
+        if not isinstance(value, str) or not value.isdecimal():
+            raise ManifestIntegrityError(
+                "manifest coverage count is invalid",
+                context={"field": field},
+            )
+    partition_scheme = manifest.get("partition_scheme")
+    if not isinstance(partition_scheme, dict) or set(partition_scheme) != {
+        "scheme_id",
+        "scheme_version",
+        "partition_keys",
+        "date_field",
+    }:
+        raise ManifestIntegrityError("manifest partition_scheme is invalid")
+    if (
+        not isinstance(partition_scheme.get("scheme_id"), str)
+        or not isinstance(partition_scheme.get("scheme_version"), str)
+        or not isinstance(partition_scheme.get("date_field"), str)
+    ):
+        raise ManifestIntegrityError("manifest partition_scheme text fields are invalid")
+    partition_keys = partition_scheme.get("partition_keys")
+    if not isinstance(partition_keys, list) or any(
+        not isinstance(value, str) or not value for value in partition_keys
+    ):
+        raise ManifestIntegrityError("manifest partition_keys are invalid")
 
 
 def _verify_manifest_self_sha(manifest: dict[str, object]) -> str:
@@ -273,6 +437,7 @@ def _verify_file_entries(
     if not isinstance(listed, list):
         raise ManifestIntegrityError("manifest files entry is not a list")
     seen_paths: set[str] = set()
+    seen_partitions: set[str] = set()
     declared: list[dict[str, object]] = []
     for entry in listed:
         if not isinstance(entry, dict):
@@ -317,6 +482,19 @@ def _verify_file_entries(
                 "manifest file partition is not a JSON object",
                 context={"relative_path": relative},
             )
+        if require_parquet_checks:
+            partition_fingerprint = json.dumps(
+                partition,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            if partition_fingerprint in seen_partitions:
+                raise ManifestIntegrityError(
+                    "manifest contains a duplicate partition file entry",
+                    context={"relative_path": relative},
+                )
+            seen_partitions.add(partition_fingerprint)
         declared.append(
             {
                 "relative_path": relative,
@@ -380,10 +558,14 @@ def _verify_file_entries(
         {
             WAREHOUSE_MANIFEST_FILENAME,
             WAREHOUSE_COMPLETE_FILENAME,
-            WAREHOUSE_FAILURE_FILENAME,
         }
     ).union(extra_managed)
     for absolute in directory.rglob("*"):
+        if is_reparse_point(absolute):
+            raise ManifestIntegrityError(
+                "published directory contains a symlink or junction",
+                context={"path": str(absolute)},
+            )
         if absolute.is_dir():
             continue
         try:
@@ -428,17 +610,16 @@ def _verify_parquet_schema(path: Path, expected: dict[str, object], *, relative_
             "Parquet schema could not be read",
             context={"relative_path": relative_path, "detail": str(error)},
         ) from error
-    expected_names = expected.get("names")
-    if not isinstance(expected_names, (list, tuple)):
+    expected_schema = expected.get("schema")
+    if expected_schema is None:
         return
-    actual_names = list(actual.names)
-    if actual_names != list(expected_names):
+    if not actual.equals(expected_schema, check_metadata=False):
         raise ManifestIntegrityError(
             "Parquet schema does not match the dataset contract",
             context={
                 "relative_path": relative_path,
-                "expected": ",".join(expected_names),
-                "actual": ",".join(actual_names),
+                "expected": str(expected_schema),
+                "actual": str(actual),
             },
         )
 
@@ -475,7 +656,7 @@ def verify_raw_directory(directory: Path, *, data_root: Path) -> VerifiedDirecto
         manifest,
         directory_resolved,
         root_resolved=root_resolved,
-        extra_managed=frozenset({RAW_INPUT_LISTING_FILENAME, RAW_FAILURE_FILENAME}),
+        extra_managed=frozenset({RAW_INPUT_LISTING_FILENAME}),
         require_parquet_checks=False,
     )
     return VerifiedDirectory(
@@ -517,17 +698,27 @@ def verify_canonical_directory(directory: Path, *, data_root: Path) -> VerifiedD
             from quantking.data.adapters.canonical_schema import canonical_schema
 
             arrow_schema = canonical_schema(dataset)
-            expected_schema = {"names": list(arrow_schema.names)}
+            expected_schema = {"schema": arrow_schema}
         except KeyError:
             expected_schema = None
     files = _verify_file_entries(
         manifest,
         directory_resolved,
         root_resolved=root_resolved,
-        extra_managed=frozenset({WAREHOUSE_FAILURE_FILENAME, WAREHOUSE_INPUT_LISTING_FILENAME}),
+        extra_managed=frozenset({WAREHOUSE_INPUT_LISTING_FILENAME}),
         require_parquet_checks=True,
         expected_schema=expected_schema,
     )
+    summary = manifest["coverage_summary"]
+    if not isinstance(summary, dict):
+        raise ManifestIntegrityError("manifest coverage_summary is invalid")
+    declared_rows = int(str(summary["row_count"]))
+    actual_rows = sum(file.row_count for file in files)
+    if declared_rows != actual_rows:
+        raise ManifestIntegrityError(
+            "manifest total row_count does not match its Parquet files",
+            context={"expected": str(declared_rows), "actual": str(actual_rows)},
+        )
     return VerifiedDirectory(
         manifest=manifest,
         manifest_bytes=raw_bytes,

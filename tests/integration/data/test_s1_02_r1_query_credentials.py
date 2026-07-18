@@ -44,6 +44,7 @@ from quantking.data.adapters.warehouse.query import (
     CanonicalQueryAdapter,
     CanonicalQueryRequest,
     DatasetVersionNotQueryableError,
+    QueryContractError,
 )
 from quantking.data.models import (
     DatasetKind,
@@ -130,8 +131,6 @@ def _publish_and_mark(
     parent_version_id: object | None = None,
     input_batch_ids: tuple[object, ...] = (),
 ) -> Path:
-    if coverage_summary is None:
-        coverage_summary = {"date_count": "1", "security_count": "1"}
     landed = warehouse.publish(
         CanonicalPublishRequest(
             version=version,
@@ -141,6 +140,8 @@ def _publish_and_mark(
         )
     )
     manifest = json.loads((landed / WAREHOUSE_MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    if coverage_summary is None:
+        coverage_summary = dict(manifest["coverage_summary"])
     sha = manifest["manifest_sha256"] if manifest_sha_override is None else manifest_sha_override
     with uow_factory() as uow:
         stored = uow.data.save_version(version)
@@ -392,6 +393,28 @@ class TestCredentialBindingMismatches:
                 )
             )
 
+    def test_coverage_summary_subset_is_not_an_exact_match(
+        self,
+        tmp_path: Path,
+        uow_factory: DataSqliteUnitOfWorkFactory,
+    ) -> None:
+        warehouse = CanonicalWarehouse(data_root=tmp_path)
+        version = _building_version()
+        _publish_and_mark(
+            warehouse,
+            uow_factory,
+            version,
+            coverage_summary={"row_count": "1", "security_count": "1"},
+        )
+        adapter = CanonicalQueryAdapter(data_root=tmp_path, uow_factory=uow_factory)
+        with pytest.raises(DatasetVersionNotQueryableError):
+            adapter.query(
+                CanonicalQueryRequest(
+                    version_id=str(version.version_id),
+                    dataset=DatasetKind.DAILY_BAR_UNADJUSTED.value,
+                )
+            )
+
     def test_input_batch_ids_mismatch_rejected(
         self,
         tmp_path: Path,
@@ -525,6 +548,73 @@ class TestLegalEmptyVersionQuery:
         assert tuple(result.schema.names) == tuple(field.name for field in descriptor)
         for actual, expected in zip(result.schema, descriptor, strict=True):
             assert actual.type == expected.type
+
+    def test_empty_projection_preserves_requested_field_order(
+        self,
+        tmp_path: Path,
+        uow_factory: DataSqliteUnitOfWorkFactory,
+    ) -> None:
+        warehouse = CanonicalWarehouse(data_root=tmp_path)
+        version = _building_version()
+        landed = warehouse.publish(
+            CanonicalPublishRequest(
+                version=version,
+                tables=(_empty_daily_bar_table(),),
+                code_version="s1-02",
+                rule_version="quality-rules.v1",
+                empty_result=EmptyResultInfo(
+                    classification=LegalEmptyClassification.NO_TRADING_SESSION,
+                    reason="calendar is closed for the entire window",
+                ),
+            )
+        )
+        manifest = json.loads((landed / WAREHOUSE_MANIFEST_FILENAME).read_text(encoding="utf-8"))
+        with uow_factory() as uow:
+            stored = uow.data.save_version(version)
+            validated = transition_dataset_version(
+                stored,
+                DatasetVersionStatus.VALIDATED,
+                at=utc_now(),
+                manifest_sha256=manifest["manifest_sha256"],
+                security_count=0,
+                row_count=0,
+                coverage_start=None,
+                coverage_end=None,
+                coverage_summary=dict(manifest["coverage_summary"]),
+            )
+            uow.data.save_version(validated)
+            uow.data.save_version(
+                transition_dataset_version(
+                    validated,
+                    DatasetVersionStatus.PUBLISHED,
+                    at=utc_now(),
+                )
+            )
+            uow.commit()
+        result = CanonicalQueryAdapter(data_root=tmp_path, uow_factory=uow_factory).query(
+            CanonicalQueryRequest(
+                version_id=str(version.version_id),
+                dataset=DatasetKind.DAILY_BAR_UNADJUSTED.value,
+                fields=("close", "open"),
+            )
+        )
+        assert tuple(result.schema.names) == ("close", "open")
+
+
+class TestVersionIdContract:
+    def test_non_uuid4_version_id_is_a_query_contract_error(
+        self,
+        tmp_path: Path,
+        uow_factory: DataSqliteUnitOfWorkFactory,
+    ) -> None:
+        adapter = CanonicalQueryAdapter(data_root=tmp_path, uow_factory=uow_factory)
+        with pytest.raises(QueryContractError):
+            adapter.query(
+                CanonicalQueryRequest(
+                    version_id="data_version:00000000-0000-0000-0000-000000000000",
+                    dataset=DatasetKind.DAILY_BAR_UNADJUSTED.value,
+                )
+            )
 
 
 # ---------------------------------------------------------------------------

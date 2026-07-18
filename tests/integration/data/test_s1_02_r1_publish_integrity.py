@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pytest
+from pyarrow import parquet as pa_parquet
 
 from quantking.common.errors import IdempotencyConflictError
 from quantking.common.ids import new_entity_id
@@ -41,9 +42,15 @@ from quantking.data.adapters.warehouse.canonical_warehouse import (
     CanonicalPublishRequest,
     CanonicalWarehouse,
 )
+from quantking.data.adapters.warehouse.errors import (
+    CanonicalWarehouseError,
+    ManifestIntegrityError,
+)
 from quantking.data.adapters.warehouse.manifest import (
     WAREHOUSE_COMPLETE_FILENAME,
+    WAREHOUSE_FAILURE_FILENAME,
     WAREHOUSE_MANIFEST_FILENAME,
+    compute_sha256,
 )
 from quantking.data.adapters.warehouse.query import (
     CanonicalQueryAdapter,
@@ -55,6 +62,7 @@ from quantking.data.adapters.warehouse.raw_store import (
     RawBatchPublishRequest,
     RawManifestFile,
 )
+from quantking.data.adapters.warehouse.verifier import verify_canonical_directory
 from quantking.data.models import (
     DatasetKind,
     DatasetVersion,
@@ -106,6 +114,30 @@ def _building_version() -> DatasetVersion:
         parent_version_id=None,
         input_batch_ids=(),
         created_at=utc_now(),
+    )
+
+
+def _resign_manifest(landed: Path, payload: dict[str, object]) -> None:
+    without_sha = {key: value for key, value in payload.items() if key != "manifest_sha256"}
+    new_sha = hashlib.sha256(
+        json.dumps(
+            without_sha,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    payload["manifest_sha256"] = new_sha
+    (landed / WAREHOUSE_MANIFEST_FILENAME).write_text(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        encoding="utf-8",
+    )
+    complete_path = landed / WAREHOUSE_COMPLETE_FILENAME
+    complete = json.loads(complete_path.read_text(encoding="utf-8"))
+    complete["manifest_sha256"] = new_sha
+    complete_path.write_text(
+        json.dumps(complete, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        encoding="utf-8",
     )
 
 
@@ -491,6 +523,138 @@ class TestDuplicateManifestPathsAndExtraFiles:
         (landed / "rogue.parquet").write_bytes(b"not in manifest")
         with pytest.raises((IdempotencyConflictError, Exception)):
             warehouse.publish(request)
+
+    def test_verifier_rejects_two_files_for_same_partition(self, tmp_path: Path) -> None:
+        warehouse = CanonicalWarehouse(data_root=tmp_path)
+        version = _building_version()
+        landed = warehouse.publish(
+            CanonicalPublishRequest(
+                version=version,
+                tables=(_canonical_daily_bar_table(),),
+                code_version="s1-02",
+                rule_version="quality-rules.v1",
+            )
+        )
+        manifest_path = landed / WAREHOUSE_MANIFEST_FILENAME
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        original_entry = dict(payload["files"][0])
+        original_path = landed / str(original_entry["relative_path"])
+        duplicate_relative = "year=2026/month=07/part-99999.parquet"
+        duplicate_path = landed / duplicate_relative
+        duplicate_path.write_bytes(original_path.read_bytes())
+        duplicate_entry = dict(original_entry)
+        duplicate_entry["relative_path"] = duplicate_relative
+        payload["files"].append(duplicate_entry)
+        _resign_manifest(landed, payload)
+        with pytest.raises(ManifestIntegrityError):
+            verify_canonical_directory(landed, data_root=tmp_path)
+
+
+class TestStrictCanonicalManifestVerification:
+    def _publish(self, tmp_path: Path) -> Path:
+        warehouse = CanonicalWarehouse(data_root=tmp_path)
+        return warehouse.publish(
+            CanonicalPublishRequest(
+                version=_building_version(),
+                tables=(_canonical_daily_bar_table(),),
+                code_version="s1-02",
+                rule_version="quality-rules.v1",
+            )
+        )
+
+    def test_verifier_rejects_full_arrow_schema_mismatch(self, tmp_path: Path) -> None:
+        landed = self._publish(tmp_path)
+        manifest_path = landed / WAREHOUSE_MANIFEST_FILENAME
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        entry = payload["files"][0]
+        parquet_path = landed / str(entry["relative_path"])
+        table = pa_parquet.ParquetFile(parquet_path).read()
+        arrays: list[pa.ChunkedArray] = []
+        fields: list[pa.Field] = []
+        for field in table.schema:
+            column = table.column(field.name)
+            if field.name == "open":
+                column = column.cast(pa.string())
+                fields.append(pa.field(field.name, pa.string(), nullable=field.nullable))
+            else:
+                fields.append(field)
+            arrays.append(column)
+        wrong_schema = pa.schema(fields)
+        wrong_table = pa.Table.from_arrays(arrays, schema=wrong_schema)
+        pa_parquet.write_table(wrong_table, parquet_path)
+        raw = parquet_path.read_bytes()
+        entry["size"] = len(raw)
+        entry["sha256"] = compute_sha256(raw)
+        _resign_manifest(landed, payload)
+        with pytest.raises(ManifestIntegrityError):
+            verify_canonical_directory(landed, data_root=tmp_path)
+
+    def test_verifier_rejects_manifest_missing_required_field(self, tmp_path: Path) -> None:
+        landed = self._publish(tmp_path)
+        manifest_path = landed / WAREHOUSE_MANIFEST_FILENAME
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload.pop("parent_version_id")
+        _resign_manifest(landed, payload)
+        with pytest.raises(ManifestIntegrityError):
+            verify_canonical_directory(landed, data_root=tmp_path)
+
+    def test_verifier_rejects_summary_row_count_drift(self, tmp_path: Path) -> None:
+        landed = self._publish(tmp_path)
+        manifest_path = landed / WAREHOUSE_MANIFEST_FILENAME
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload["coverage_summary"]["row_count"] = "999"
+        _resign_manifest(landed, payload)
+        with pytest.raises(ManifestIntegrityError):
+            verify_canonical_directory(landed, data_root=tmp_path)
+
+    def test_verifier_rejects_failure_marker_in_published_directory(self, tmp_path: Path) -> None:
+        landed = self._publish(tmp_path)
+        (landed / WAREHOUSE_FAILURE_FILENAME).write_text("{}", encoding="utf-8")
+        with pytest.raises(ManifestIntegrityError):
+            verify_canonical_directory(landed, data_root=tmp_path)
+
+    def test_reconcile_rejects_parent_version_drift(self, tmp_path: Path) -> None:
+        warehouse = CanonicalWarehouse(data_root=tmp_path)
+        original = _building_version()
+        request = CanonicalPublishRequest(
+            version=original,
+            tables=(_canonical_daily_bar_table(),),
+            code_version="s1-02",
+            rule_version="quality-rules.v1",
+        )
+        warehouse.publish(request)
+        changed_lineage = DatasetVersion.building(
+            version_id=original.version_id,
+            dataset=original.dataset,
+            schema_version=original.schema_version,
+            code_version=original.code_version,
+            rule_version=original.rule_version,
+            parent_version_id=new_entity_id("data_version"),
+            input_batch_ids=(),
+            created_at=original.created_at,
+        )
+        with pytest.raises(IdempotencyConflictError):
+            warehouse.publish(
+                CanonicalPublishRequest(
+                    version=changed_lineage,
+                    tables=(_canonical_daily_bar_table(),),
+                    code_version="s1-02",
+                    rule_version="quality-rules.v1",
+                )
+            )
+
+    def test_expected_coverage_summary_must_match_exactly(self, tmp_path: Path) -> None:
+        warehouse = CanonicalWarehouse(data_root=tmp_path)
+        with pytest.raises(CanonicalWarehouseError):
+            warehouse.publish(
+                CanonicalPublishRequest(
+                    version=_building_version(),
+                    tables=(_canonical_daily_bar_table(),),
+                    code_version="s1-02",
+                    rule_version="quality-rules.v1",
+                    coverage_summary={"unexpected": "value"},
+                )
+            )
 
 
 __all__ = [

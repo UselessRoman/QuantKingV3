@@ -67,6 +67,12 @@ from quantking.data.adapters.warehouse.verifier import (
 # become directory names and must never carry path separators, drive
 # letters, namespace colons, control characters or whitespace.
 _INVALID_COMPONENT_CHARS = set('<>"|?*\r\n\t\x00\\/:')
+_SAFE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
 
 
 def _validate_managed_component(value: str, field: str) -> str:
@@ -82,7 +88,7 @@ def _validate_managed_component(value: str, field: str) -> str:
         raise InvalidPathError(f"{field} must be a string")
     if not value or value != value.strip():
         raise InvalidPathError(f"{field} must not be empty or carry trailing whitespace")
-    if any(ch in _INVALID_COMPONENT_CHARS for ch in value):
+    if any(ch in _INVALID_COMPONENT_CHARS or ord(ch) < 0x20 for ch in value):
         raise InvalidPathError(
             f"{field} must not contain path separators, colons or control characters"
         )
@@ -90,6 +96,14 @@ def _validate_managed_component(value: str, field: str) -> str:
         raise InvalidPathError(f"{field} must not be a relative reference")
     if value.lower().endswith(".incomplete"):
         raise InvalidPathError(f"{field} must not use the reserved .incomplete suffix")
+    if not _SAFE_COMPONENT_RE.fullmatch(value):
+        raise InvalidPathError(
+            f"{field} must contain only ASCII letters, digits, dot, underscore or hyphen"
+        )
+    if value.endswith("."):
+        raise InvalidPathError(f"{field} must not end with a dot")
+    if value.split(".", maxsplit=1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+        raise InvalidPathError(f"{field} must not use a reserved Windows device name")
     return value
 
 
@@ -155,6 +169,9 @@ class RawBatchPublisher:
         """
         self._validate_request(request)
         final = self._final_path(request)
+        incomplete = self._incomplete_path(request)
+        self._assert_managed_target(self._data_root, final)
+        self._assert_managed_target(self._data_root, incomplete)
         if final.exists():
             return self._reconcile_existing(final, request)
         return self._publish_fresh(request, final)
@@ -193,6 +210,8 @@ class RawBatchPublisher:
             self._write_manifest(incomplete, manifest)
             self._verify_inventory(incomplete, manifest)
             self._write_complete_marker(incomplete, manifest)
+            self._assert_managed_target(self._data_root, incomplete)
+            self._assert_managed_target(self._data_root, final)
             final.parent.mkdir(parents=True, exist_ok=True)
             os.replace(incomplete, final)
         except Exception as error:

@@ -50,6 +50,8 @@ from quantking.data.models import (
     DatasetKind,
     DatasetVersion,
     DatasetVersionStatus,
+    EmptyResultInfo,
+    LegalEmptyClassification,
     transition_dataset_version,
 )
 from quantking.jobs.adapters.persistence.sqlite import initialize_database
@@ -183,6 +185,81 @@ class TestPublishCoordinatorWritesActualManifestCredentials:
                 )
             )
 
+    @pytest.mark.parametrize(
+        ("version_kwargs", "request_kwargs"),
+        [
+            ({"schema_version": "daily_bar_unadjusted.v999"}, {}),
+            ({"code_version": "version-code"}, {"code_version": "request-code"}),
+            ({"rule_version": "version-rules"}, {"rule_version": "request-rules"}),
+        ],
+    )
+    def test_coordinator_rejects_version_credential_mismatch_before_file_publish(
+        self,
+        tmp_path: Path,
+        uow_factory: DataSqliteUnitOfWorkFactory,
+        version_kwargs: dict[str, str],
+        request_kwargs: dict[str, str],
+    ) -> None:
+        from quantking.data.adapters.warehouse.publish_coordinator import (
+            CanonicalPublishCoordinator,
+            CanonicalPublishCoordinatorRequest,
+        )
+
+        version = DatasetVersion.building(
+            version_id=new_entity_id("data_version"),
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            schema_version=version_kwargs.get("schema_version", "daily_bar_unadjusted.v1"),
+            code_version=version_kwargs.get("code_version", "s1-02"),
+            rule_version=version_kwargs.get("rule_version", "quality-rules.v1"),
+            parent_version_id=None,
+            input_batch_ids=(),
+            created_at=utc_now(),
+        )
+        warehouse = CanonicalWarehouse(data_root=tmp_path)
+        coordinator = CanonicalPublishCoordinator(warehouse=warehouse, uow_factory=uow_factory)
+        request = CanonicalPublishCoordinatorRequest(
+            version=version,
+            tables=(_canonical_daily_bar_table(),),
+            code_version=request_kwargs.get("code_version", version.code_version),
+            rule_version=request_kwargs.get("rule_version", version.rule_version),
+        )
+        with pytest.raises(CanonicalWarehouseError):
+            coordinator.coordinate(request)
+        assert not (tmp_path / "warehouse").exists()
+
+    def test_coordinator_publishes_legal_empty_version_end_to_end(
+        self,
+        tmp_path: Path,
+        uow_factory: DataSqliteUnitOfWorkFactory,
+    ) -> None:
+        from quantking.data.adapters.warehouse.publish_coordinator import (
+            CanonicalPublishCoordinator,
+            CanonicalPublishCoordinatorRequest,
+        )
+
+        schema = canonical_schema("daily_bar_unadjusted")
+        empty = pa.Table.from_arrays(
+            [pa.array([], type=field.type) for field in schema],
+            schema=schema,
+        )
+        warehouse = CanonicalWarehouse(data_root=tmp_path)
+        coordinator = CanonicalPublishCoordinator(warehouse=warehouse, uow_factory=uow_factory)
+        result = coordinator.coordinate(
+            CanonicalPublishCoordinatorRequest(
+                version=_building_version(),
+                tables=(empty,),
+                code_version="s1-02",
+                rule_version="quality-rules.v1",
+                empty_result=EmptyResultInfo(
+                    classification=LegalEmptyClassification.NO_TRADING_SESSION,
+                    reason="calendar is closed for the requested window",
+                ),
+            )
+        )
+        assert result.version.status is DatasetVersionStatus.PUBLISHED
+        assert result.version.row_count == 0
+        assert result.version.security_count == 0
+
 
 # ---------------------------------------------------------------------------
 # Red test 9: recovery when SQLite commit fails post file-publish
@@ -253,7 +330,7 @@ class TestCoordinatorRecoveryAfterCommitFailure:
                 row_count=1,
                 coverage_start=TradingDate(date(2026, 7, 15)),
                 coverage_end=TradingDate(date(2026, 7, 15)),
-                coverage_summary={"date_count": "1", "security_count": "1"},
+                coverage_summary=dict(manifest["coverage_summary"]),
             )
             uow.data.save_version(validated)
             uow.commit()

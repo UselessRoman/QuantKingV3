@@ -34,7 +34,8 @@ from pathlib import Path
 import duckdb
 import pyarrow as pa
 
-from quantking.common.errors import InvalidPathError
+from quantking.common.errors import InvalidIdError, InvalidPathError
+from quantking.common.ids import EntityId
 from quantking.common.time import TradingDate
 from quantking.data.adapters.canonical_schema import canonical_schema, sort_key
 from quantking.data.adapters.persistence.sqlite import DataSqliteUnitOfWorkFactory
@@ -53,7 +54,6 @@ from quantking.data.adapters.warehouse.verifier import (
 from quantking.data.models import DatasetKind, DatasetVersion, DatasetVersionStatus
 from quantking.data.schemas import descriptor_for
 
-_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*:[0-9a-fA-F-]{36}\Z")
 _PATH_RE = re.compile(r"^[A-Za-z]:[\\/]|^[\\/]")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
@@ -97,6 +97,8 @@ class CanonicalQueryRequest:
             for name in self.fields:
                 if not isinstance(name, str) or not name.strip():
                     raise QueryContractError("fields must contain non-empty strings only")
+            if len(set(self.fields)) != len(self.fields):
+                raise QueryContractError("fields must not contain duplicates")
         if self.codes is not None:
             if not isinstance(self.codes, tuple):
                 object.__setattr__(self, "codes", tuple(self.codes))
@@ -220,14 +222,26 @@ class CanonicalQueryAdapter:
                 "version_id must be an entity id, not a filesystem path",
                 context={"version_id": request.version_id},
             )
-        if not _ID_RE.match(request.version_id):
+        try:
+            parsed_version_id = EntityId.parse(request.version_id)
+        except InvalidIdError as error:
             raise QueryContractError(
                 "version_id must be a namespaced UUID4",
+                context={"version_id": request.version_id},
+            ) from error
+        if parsed_version_id.namespace != "data_version":
+            raise QueryContractError(
+                "version_id must use the data_version namespace",
                 context={"version_id": request.version_id},
             )
         if not _is_known_dataset(request.dataset):
             raise QueryContractError(
                 "dataset is not a canonical dataset",
+                context={"dataset": request.dataset},
+            )
+        if request.codes and "code" not in canonical_schema(request.dataset).names:
+            raise QueryContractError(
+                "code filtering is not supported for this dataset",
                 context={"dataset": request.dataset},
             )
 
@@ -371,23 +385,19 @@ class CanonicalQueryAdapter:
                 "manifest coverage_end does not match the SQLite row",
                 context={"version_id": version_id},
             )
-        # ``coverage_summary``: the manifest's summary must be a
-        # superset of (or equal to) the SQLite row's summary. The
-        # publish coordinator always writes the full computed summary,
-        # so the SQLite row should also carry the full set.
+        # ``coverage_summary`` must match exactly. A subset match would
+        # allow SQLite to omit coverage facts present on disk.
         manifest_summary = manifest.get("coverage_summary")
         if not isinstance(manifest_summary, dict):
             raise DatasetVersionNotQueryableError(
                 "manifest coverage_summary is not a JSON object",
                 context={"version_id": version_id},
             )
-        for key, expected in version.coverage_summary.items():
-            actual = manifest_summary.get(key)
-            if actual != expected:
-                raise DatasetVersionNotQueryableError(
-                    "manifest coverage_summary does not match the SQLite row",
-                    context={"version_id": version_id, "field": key},
-                )
+        if manifest_summary != dict(version.coverage_summary):
+            raise DatasetVersionNotQueryableError(
+                "manifest coverage_summary does not exactly match the SQLite row",
+                context={"version_id": version_id},
+            )
         # ``row_count`` and ``security_count``: stored as strings in
         # the manifest's ``coverage_summary`` and as ints in the
         # SQLite row. The manifest's per-file row counts have already
@@ -531,8 +541,7 @@ class CanonicalQueryAdapter:
                 [pa.array([], type=field.type) for field in full_schema],
                 schema=full_schema,
             )
-        selected_fields_set = set(selected_fields)
-        fields = [field for field in full_schema if field.name in selected_fields_set]
+        fields = [full_schema.field(name) for name in selected_fields]
         schema = pa.schema(fields)
         return pa.Table.from_arrays(
             [pa.array([], type=field.type) for field in fields],

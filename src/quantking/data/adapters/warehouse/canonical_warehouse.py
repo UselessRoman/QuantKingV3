@@ -80,6 +80,7 @@ from quantking.data.adapters.warehouse.verifier import (
 )
 from quantking.data.models import (
     DatasetVersion,
+    DatasetVersionStatus,
     EmptyResultInfo,
 )
 from quantking.data.schemas import descriptor_for
@@ -195,10 +196,15 @@ class CanonicalWarehouse:
 
     def publish(self, request: CanonicalPublishRequest) -> Path:
         """Validate, partition, write and atomically publish a canonical version."""
+        self._validate_version_identity(request)
         final = self._final_path(request)
-        if final.exists():
-            return self._reconcile_existing(final, request)
         incomplete = self._incomplete_path(request)
+        self._assert_managed_target(self._data_root, final)
+        self._assert_managed_target(self._data_root, incomplete)
+        if final.exists():
+            self._validate_inputs(request)
+            return self._reconcile_existing(final, request)
+        self._validate_request_credentials(request)
         # Create the ``.incomplete`` directory first so any failure
         # (including pre-write validation rejection) leaves the
         # forensic evidence in place. We do this before validation so
@@ -260,6 +266,33 @@ class CanonicalWarehouse:
                     ),
                 )
 
+    def _validate_version_identity(self, request: CanonicalPublishRequest) -> None:
+        version = request.version
+        if version.status is not DatasetVersionStatus.BUILDING:
+            raise CanonicalWarehouseError(
+                "canonical publish requires a BUILDING dataset version",
+                context={"version_id": str(version.version_id), "status": version.status.value},
+            )
+        expected_schema = descriptor_for(version.dataset.value).schema_version
+        if version.schema_version != expected_schema:
+            raise CanonicalWarehouseError(
+                "dataset version schema_version does not match the canonical descriptor",
+                context={"version_id": str(version.version_id)},
+            )
+
+    def _validate_request_credentials(self, request: CanonicalPublishRequest) -> None:
+        version = request.version
+        if request.code_version != version.code_version:
+            raise CanonicalWarehouseError(
+                "request code_version does not match the dataset version",
+                context={"version_id": str(version.version_id)},
+            )
+        if request.rule_version != version.rule_version:
+            raise CanonicalWarehouseError(
+                "request rule_version does not match the dataset version",
+                context={"version_id": str(version.version_id)},
+            )
+
     def _final_path(self, request: CanonicalPublishRequest) -> Path:
         try:
             directory_name = path_safe_id(str(request.version.version_id))
@@ -293,6 +326,8 @@ class CanonicalWarehouse:
             files, coverage = self._write_partitions(incomplete, request)
             manifest = self._build_manifest(request, files, coverage)
             self._write_manifest_and_complete(incomplete, manifest)
+            self._assert_managed_target(self._data_root, incomplete)
+            self._assert_managed_target(self._data_root, final)
             final.parent.mkdir(parents=True, exist_ok=True)
             os.replace(incomplete, final)
         except CanonicalWarehouseError as error:
@@ -341,6 +376,16 @@ class CanonicalWarehouse:
                 "dataset mismatch against existing manifest",
                 context={"version_id": str(request.version.version_id)},
             )
+        expected_parent = (
+            str(request.version.parent_version_id)
+            if request.version.parent_version_id is not None
+            else None
+        )
+        if previous.get("parent_version_id") != expected_parent:
+            raise IdempotencyConflictError(
+                "parent_version_id mismatch against existing manifest",
+                context={"version_id": str(request.version.version_id)},
+            )
         # ``input_batch_ids`` is the historical list of raw batch ids that
         # contributed to this version; for a repeat publish the request
         # must carry the same list in the same order.
@@ -370,6 +415,47 @@ class CanonicalWarehouse:
         if previous.get("schema_version") != expected_schema_version:
             raise IdempotencyConflictError(
                 "schema_version mismatch against existing manifest",
+                context={"version_id": str(request.version.version_id)},
+            )
+        if request.tables:
+            combined = ensure_sorted(
+                request.version.dataset.value,
+                pa.concat_tables(list(request.tables)),
+            )
+            expected_coverage = self._build_coverage(combined, request)
+        else:
+            expected_coverage = {
+                "security_count": "0",
+                "row_count": "0",
+                "date_count": "0",
+            }
+        if previous.get("coverage_summary") != expected_coverage:
+            raise IdempotencyConflictError(
+                "coverage_summary mismatch against existing manifest",
+                context={"version_id": str(request.version.version_id)},
+            )
+        expected_start = expected_coverage.get("first_date")
+        expected_end = expected_coverage.get("last_date")
+        if previous.get("coverage_start") != expected_start:
+            raise IdempotencyConflictError(
+                "coverage_start mismatch against existing manifest",
+                context={"version_id": str(request.version.version_id)},
+            )
+        if previous.get("coverage_end") != expected_end:
+            raise IdempotencyConflictError(
+                "coverage_end mismatch against existing manifest",
+                context={"version_id": str(request.version.version_id)},
+            )
+        scheme = partition_scheme_for(request.version.dataset.value)
+        expected_partition_scheme = {
+            "scheme_id": scheme.scheme_id,
+            "scheme_version": scheme.scheme_version,
+            "partition_keys": list(scheme.partition_keys),
+            "date_field": scheme.date_field,
+        }
+        if previous.get("partition_scheme") != expected_partition_scheme:
+            raise IdempotencyConflictError(
+                "partition_scheme mismatch against existing manifest",
                 context={"version_id": str(request.version.version_id)},
             )
         # Compare the content_sha256 to detect any byte-level drift in
@@ -477,21 +563,11 @@ class CanonicalWarehouse:
         # see the full set of keys). Caller-supplied values are treated
         # as expected credentials and must equal the computed values.
         coverage_summary = coverage
-        if request.coverage_summary:
-            for key, expected in request.coverage_summary.items():
-                actual = coverage.get(key)
-                if actual is not None and expected != actual:
-                    raise CanonicalWarehouseError(
-                        "caller-supplied coverage credential does not match actual data",
-                        context=_string_context(
-                            {
-                                "version_id": str(request.version.version_id),
-                                "field": key,
-                                "expected": expected,
-                                "actual": actual,
-                            }
-                        ),
-                    )
+        if request.coverage_summary and request.coverage_summary != coverage:
+            raise CanonicalWarehouseError(
+                "caller-supplied coverage_summary does not exactly match actual data",
+                context={"version_id": str(request.version.version_id)},
+            )
         content_sha = (
             self._compute_content_sha(dataset, request.tables)
             if request.tables
