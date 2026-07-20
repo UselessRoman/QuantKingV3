@@ -324,6 +324,14 @@ def _publish_and_mark(
             rule_version="quality-rules.v1",
         )
     )
+    # The quality run must bind to the SQLite candidate metadata; the later
+    # query must still reject that metadata against the published manifest.
+    if schema_version is not None:
+        object.__setattr__(version, "schema_version", schema_version)
+    if code_version is not None:
+        object.__setattr__(version, "code_version", code_version)
+    if rule_version is not None:
+        object.__setattr__(version, "rule_version", rule_version)
     # Persist a PASSED quality run bound to the candidate content so
     # the SQLite trigger allows the PUBLISHED transition.
     _make_passed_quality_run(
@@ -338,29 +346,8 @@ def _publish_and_mark(
     sha = manifest["manifest_sha256"] if manifest_sha_override is None else manifest_sha_override
     with uow_factory() as uow:
         stored = uow.data.save_version(version)
-        # Override stored version fields to simulate credential drift.
-        if (
-            schema_version is not None
-            or code_version is not None
-            or rule_version is not None
-            or parent_version_id is not None
-            or input_batch_ids != ()
-        ):
-            object.__setattr__(
-                stored,
-                "schema_version",
-                schema_version if schema_version is not None else stored.schema_version,
-            )
-            object.__setattr__(
-                stored,
-                "code_version",
-                code_version if code_version is not None else stored.code_version,
-            )
-            object.__setattr__(
-                stored,
-                "rule_version",
-                rule_version if rule_version is not None else "quality-rules.v1",
-            )
+        # Override remaining lineage fields to simulate credential drift.
+        if parent_version_id is not None or input_batch_ids != ():
             object.__setattr__(
                 stored,
                 "parent_version_id",

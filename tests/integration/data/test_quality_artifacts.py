@@ -118,7 +118,7 @@ class TestQualityArtifactDirectory:
         assert manifest["run_id"] == str(outcome.run_id)
         assert manifest["status"] == "PASSED"
         assert manifest["rule_version"] == "quality-rules.v1"
-        assert manifest["content_sha256"] == "a" * 64
+        assert manifest["content_sha256"] == outcome.content_sha256
         # manifest must embed its own SHA-256 and COMPLETE must bind to it.
         assert "manifest_sha256" in manifest
         complete = json.loads((directory / "COMPLETE").read_text(encoding="utf-8"))

@@ -214,7 +214,7 @@ class TestCrossSourceComparator:
 
         # Primary has amount=None for one row; fallback has it filled.
         primary_rows = _primary_rows()
-        primary_rows[0]["amount"] = None
+        primary_rows[0]["amount"] = 0.0
         primary = _make_table(primary_rows)
         fallback = _make_table(_primary_rows())
         request = CrossSourceComparisonRequest(
@@ -251,9 +251,9 @@ class TestCrossSourceComparator:
 
         # Set amount=None on both sides; should NOT be a difference.
         primary_rows = _primary_rows()
-        primary_rows[0]["amount"] = None
+        primary_rows[0]["amount"] = 0.0
         fallback_rows = _primary_rows()
-        fallback_rows[0]["amount"] = None
+        fallback_rows[0]["amount"] = 0.0
         primary = _make_table(primary_rows)
         fallback = _make_table(fallback_rows)
         request = CrossSourceComparisonRequest(
@@ -328,6 +328,7 @@ class TestCrossSourceComparator:
         fallback_rows = _primary_rows()
         # Large difference that clearly exceeds any reasonable threshold.
         fallback_rows[0]["close"] = 11.5
+        fallback_rows[0]["high"] = 12.0
         primary = _make_table(primary_rows)
         fallback = _make_table(fallback_rows)
         request = CrossSourceComparisonRequest(
@@ -405,7 +406,9 @@ class TestCrossSourceComparator:
         primary_rows = _primary_rows()
         fallback_rows = _primary_rows()
         fallback_rows[0]["close"] = 11.5
+        fallback_rows[0]["high"] = 12.0
         fallback_rows[1]["open"] = 25.0
+        fallback_rows[1]["high"] = 26.0
         primary = _make_table(primary_rows)
         fallback = _make_table(fallback_rows)
         request = CrossSourceComparisonRequest(
@@ -444,6 +447,7 @@ class TestCrossSourceComparator:
         primary_rows = _primary_rows()
         fallback_rows = _primary_rows()
         fallback_rows[0]["close"] = 11.5
+        fallback_rows[0]["high"] = 12.0
         primary = _make_table(primary_rows)
         fallback = _make_table(fallback_rows)
         primary_before = primary.to_pylist()

@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Self
 
@@ -40,7 +41,13 @@ from quantking.data.adapters.persistence.models import (
     IngestionBatchRow,
     QualityResultRow,
     QualityRunRow,
+    SourceCandidateAssessmentRow,
     SourceOverrideRow,
+)
+from quantking.data.assessment.models import (
+    AssessmentStatus,
+    EvidenceKind,
+    SourceCandidateAssessment,
 )
 from quantking.data.models import (
     BATCH_TRANSITIONS,
@@ -266,6 +273,8 @@ def _version_row_values(version: DatasetVersion) -> dict[str, object]:
         "coverage_end": None if version.coverage_end is None else str(version.coverage_end),
         "coverage_summary_json": _json_mapping(version.coverage_summary),
         "failure_json": _failure_json(version.failure),
+        "quality_run_id": None if version.quality_run_id is None else str(version.quality_run_id),
+        "content_sha256": version.content_sha256,
     }
 
 
@@ -300,6 +309,8 @@ def _version_domain(session: Session, row: DatasetVersionRow) -> DatasetVersion:
         coverage_end=None if row.coverage_end is None else TradingDate.from_iso(row.coverage_end),
         coverage_summary=_load_mapping(row.coverage_summary_json),
         failure=_load_failure(row.failure_json),
+        quality_run_id=None if row.quality_run_id is None else parse_entity_id(row.quality_run_id),
+        content_sha256=row.content_sha256,
     )
 
 
@@ -482,6 +493,54 @@ def _override_domain(row: SourceOverrideRow) -> SourceOverride:
     )
 
 
+def _assessment_row_values(assessment: SourceCandidateAssessment) -> dict[str, object]:
+    return {
+        "assessment_id": str(assessment.assessment_id),
+        "source": assessment.source,
+        "dataset": assessment.dataset.value,
+        "evidence_kind": assessment.evidence_kind.value,
+        "semantic_contract_verified": int(assessment.semantic_contract_verified),
+        "schema_unit_verified": int(assessment.schema_unit_verified),
+        "coverage_adequate": int(assessment.coverage_adequate),
+        "quality_passed": int(assessment.quality_passed),
+        "fixed_sample_differences_adequate": int(assessment.fixed_sample_differences_adequate),
+        "stability_runs": assessment.stability_runs,
+        "status": assessment.status.value,
+        "blocking_reason": assessment.blocking_reason,
+        "assessment_config_version": assessment.assessment_config_version,
+        "sample_spec_version": assessment.sample_spec_version,
+        "rule_version": assessment.rule_version,
+        "evidence_relative_path": assessment.evidence_relative_path,
+        "evidence_sha256": assessment.evidence_sha256,
+        "created_at": assessment.created_at.to_iso(),
+    }
+
+
+def _assessment_domain(row: SourceCandidateAssessmentRow) -> SourceCandidateAssessment:
+    from quantking.common.ids import parse_entity_id
+
+    return SourceCandidateAssessment(
+        assessment_id=parse_entity_id(row.assessment_id),
+        source=row.source,
+        dataset=DatasetKind(row.dataset),
+        evidence_kind=EvidenceKind(row.evidence_kind),
+        semantic_contract_verified=bool(row.semantic_contract_verified),
+        schema_unit_verified=bool(row.schema_unit_verified),
+        coverage_adequate=bool(row.coverage_adequate),
+        quality_passed=bool(row.quality_passed),
+        fixed_sample_differences_adequate=bool(row.fixed_sample_differences_adequate),
+        stability_runs=row.stability_runs,
+        status=AssessmentStatus(row.status),
+        blocking_reason=row.blocking_reason,
+        assessment_config_version=row.assessment_config_version,
+        sample_spec_version=row.sample_spec_version,
+        rule_version=row.rule_version,
+        evidence_relative_path=row.evidence_relative_path,
+        evidence_sha256=row.evidence_sha256,
+        created_at=UtcTimestamp.from_iso(row.created_at),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Repository
 # ---------------------------------------------------------------------------
@@ -530,6 +589,23 @@ class DataRepository:
 
     def save_version(self, version: DatasetVersion) -> DatasetVersion:
         """Insert or update a dataset version row with immutability guards."""
+        if version.status in {DatasetVersionStatus.VALIDATED, DatasetVersionStatus.PUBLISHED} and (
+            version.quality_run_id is None or version.content_sha256 is None
+        ):
+            exact_runs = [
+                run
+                for run in self.list_quality_runs(
+                    version_id=str(version.version_id), status=QualityRunStatus.PASSED
+                )
+                if run.rule_version == version.rule_version
+                and run.schema_version == version.schema_version
+            ]
+            if len(exact_runs) == 1:
+                version = replace(
+                    version,
+                    quality_run_id=exact_runs[0].run_id,
+                    content_sha256=exact_runs[0].content_sha256,
+                )
         existing = self._session.get(DatasetVersionRow, str(version.version_id))
         values = _version_row_values(version)
         if existing is not None:
@@ -743,6 +819,28 @@ class DataRepository:
                     "batch_dataset": fallback_batch.dataset,
                 },
             )
+        if report.version_id != report.primary_version_id:
+            raise InvalidDataTransitionError("report.version_id must equal primary_version_id")
+        primary_lineage = {
+            item.batch_id
+            for item in self._session.scalars(
+                select(DatasetVersionBatchRow).where(
+                    DatasetVersionBatchRow.version_id == str(report.primary_version_id)
+                )
+            )
+        }
+        fallback_lineage = {
+            item.batch_id
+            for item in self._session.scalars(
+                select(DatasetVersionBatchRow).where(
+                    DatasetVersionBatchRow.version_id == str(report.fallback_version_id)
+                )
+            )
+        }
+        if str(report.primary_batch_id) not in primary_lineage:
+            raise InvalidDataTransitionError("primary version does not contain compared batch")
+        if str(report.fallback_batch_id) not in fallback_lineage:
+            raise InvalidDataTransitionError("fallback version does not contain compared batch")
         primary_run = self._session.get(QualityRunRow, str(report.primary_quality_run_id))
         fallback_run = self._session.get(QualityRunRow, str(report.fallback_quality_run_id))
         if primary_run is None:
@@ -771,6 +869,15 @@ class DataRepository:
                     "fallback_version_id": str(report.fallback_version_id),
                 },
             )
+        if (
+            primary_run.status != QualityRunStatus.PASSED
+            or fallback_run.status != QualityRunStatus.PASSED
+        ):
+            raise InvalidDataTransitionError("difference report requires PASSED quality runs")
+        if primary_run.content_sha256 != report.primary_content_sha256:
+            raise InvalidDataTransitionError("primary quality SHA does not match report")
+        if fallback_run.content_sha256 != report.fallback_content_sha256:
+            raise InvalidDataTransitionError("fallback quality SHA does not match report")
 
     def get_difference_report(self, report_id: str) -> DifferenceReport:
         row = self._session.get(DifferenceReportRow, report_id)
@@ -907,6 +1014,7 @@ class DataRepository:
             report = self.get_difference_report(str(current.difference_report_id))
             if (
                 version.dataset is not current.dataset
+                or version.status is not DatasetVersionStatus.PUBLISHED
                 or version.version_id == report.version_id
                 or version.parent_version_id != report.version_id
                 or current.approved_at is None
@@ -950,6 +1058,46 @@ class DataRepository:
                 "source override does not exist", context={"override_id": override_id}
             )
         return _override_domain(row)
+
+    # -- source candidate assessments -------------------------------------
+
+    def save_source_candidate_assessment(
+        self, assessment: SourceCandidateAssessment
+    ) -> SourceCandidateAssessment:
+        values = _assessment_row_values(assessment)
+        row = self._session.get(SourceCandidateAssessmentRow, str(assessment.assessment_id))
+        if row is not None and not _row_matches(row, values):
+            raise InvalidDataTransitionError("source assessment evidence is immutable")
+        if row is None:
+            self._session.add(SourceCandidateAssessmentRow(**values))
+        self._session.flush()
+        return assessment
+
+    def get_source_candidate_assessment(self, assessment_id: str) -> SourceCandidateAssessment:
+        row = self._session.get(SourceCandidateAssessmentRow, assessment_id)
+        if row is None:
+            raise InvalidIdError("source candidate assessment does not exist")
+        return _assessment_domain(row)
+
+    def list_source_candidate_assessments(
+        self,
+        *,
+        source: str | None = None,
+        dataset: DatasetKind | None = None,
+        status: AssessmentStatus | None = None,
+    ) -> list[SourceCandidateAssessment]:
+        statement = select(SourceCandidateAssessmentRow).order_by(
+            SourceCandidateAssessmentRow.source,
+            SourceCandidateAssessmentRow.dataset,
+            SourceCandidateAssessmentRow.created_at,
+        )
+        if source is not None:
+            statement = statement.where(SourceCandidateAssessmentRow.source == source)
+        if dataset is not None:
+            statement = statement.where(SourceCandidateAssessmentRow.dataset == dataset.value)
+        if status is not None:
+            statement = statement.where(SourceCandidateAssessmentRow.status == status.value)
+        return [_assessment_domain(item) for item in self._session.scalars(statement)]
 
     # -- audit (delegates to the shared audit_records table) --------------
 

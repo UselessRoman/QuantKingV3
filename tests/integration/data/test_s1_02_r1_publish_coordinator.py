@@ -22,8 +22,6 @@ All tests use only ``tmp_path`` and synthetic data.
 
 from __future__ import annotations
 
-import hashlib
-import io
 import json
 import re
 from datetime import date
@@ -123,10 +121,16 @@ def _request(version: DatasetVersion) -> CanonicalPublishRequest:
 
 
 def _compute_content_sha(table: pa.Table) -> str:
-    """Compute a deterministic SHA-256 of the publishable data."""
-    buffer = io.BytesIO()
-    pa.parquet.write_table(table, buffer, compression="snappy")  # type: ignore[no-untyped-call]
-    return hashlib.sha256(buffer.getvalue()).hexdigest()
+    from quantking.data.adapters.canonical_content import EMPTY_CANONICAL_CONTENT_SHA256
+    from quantking.data.content import canonical_content_sha256
+
+    if table.num_rows == 0:
+        return EMPTY_CANONICAL_CONTENT_SHA256
+
+    return canonical_content_sha256(
+        DatasetKind.DAILY_BAR_UNADJUSTED,
+        (table,),
+    )
 
 
 def _calendar_table() -> pa.Table:

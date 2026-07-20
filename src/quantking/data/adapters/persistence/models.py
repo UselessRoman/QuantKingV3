@@ -105,6 +105,10 @@ class DatasetVersionRow(Base):
     coverage_end: Mapped[str | None] = mapped_column(String(10))
     coverage_summary_json: Mapped[str] = mapped_column(Text, nullable=False)
     failure_json: Mapped[str | None] = mapped_column(Text)
+    quality_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("quality_runs.run_id", ondelete="RESTRICT"), nullable=True
+    )
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class DatasetVersionBatchRow(Base):
@@ -248,3 +252,35 @@ class SourceOverrideRow(Base):
     applied_version_id: Mapped[str | None] = mapped_column(
         ForeignKey("dataset_versions.version_id", ondelete="RESTRICT")
     )
+
+
+class SourceCandidateAssessmentRow(Base):
+    __tablename__ = "source_candidate_assessments"
+    __table_args__ = (
+        CheckConstraint("evidence_kind IN ('SYNTHETIC','REAL')", name="ck_assessment_evidence"),
+        CheckConstraint(
+            "status IN ('UNVERIFIED','BLOCKED_EXTERNAL_VALIDATION','PRODUCTION_READY')",
+            name="ck_assessment_status",
+        ),
+        CheckConstraint("stability_runs >= 0", name="ck_assessment_stability_runs"),
+        Index("ix_assessments_source_dataset", "source", "dataset", "created_at"),
+    )
+
+    assessment_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    dataset: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    semantic_contract_verified: Mapped[int] = mapped_column(Integer, nullable=False)
+    schema_unit_verified: Mapped[int] = mapped_column(Integer, nullable=False)
+    coverage_adequate: Mapped[int] = mapped_column(Integer, nullable=False)
+    quality_passed: Mapped[int] = mapped_column(Integer, nullable=False)
+    fixed_sample_differences_adequate: Mapped[int] = mapped_column(Integer, nullable=False)
+    stability_runs: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False)
+    blocking_reason: Mapped[str | None] = mapped_column(Text)
+    assessment_config_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    sample_spec_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    rule_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    evidence_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)

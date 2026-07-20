@@ -1,17 +1,16 @@
 # Stage 1 数据源矩阵
 
-状态：S1-04 离线实现已提交、待主验收。本文件固化 Stage 1 数据源的生产角色与当前评估
+状态：S1-04-R1 修复已提交、等待主验收。本文件固化 Stage 1 数据源的生产角色与当前评估
 状态。权威来源是 `src/quantking/data/assessment/matrix.py` 的 `default_source_matrix()`；
 文档不得替代源码与契约测试。
 
 ## 生产矩阵
 
-| 源 | 角色 | 当前状态 | 阻塞原因 | auto_switch |
-|---|---|---|---|---|
-| XTQUANT | PRIMARY | PRODUCTION_READY | - | False |
-| BAOSTOCK | FALLBACK | BLOCKED_EXTERNAL_VALIDATION | BaoStock requires authorized external validation before production use | False |
-| AKSHARE | FALLBACK | BLOCKED_EXTERNAL_VALIDATION | AKShare requires authorized external validation before production use | False |
-| TUSHARE | FALLBACK | BLOCKED_EXTERNAL_VALIDATION | Tushare requires authorized external validation before production use | False |
+| 源 | 数据集 | 角色 | 当前状态 | 阻塞原因 | auto_switch |
+|---|---|---|---|---|---|
+| XTQUANT | exchange_calendar | PRIMARY | PRODUCTION_READY | - | False |
+| XTQUANT | 其余五类 | PRIMARY | BLOCKED_EXTERNAL_VALIDATION | dataset semantics require external validation | False |
+| BAOSTOCK/AKSHARE/TUSHARE | 六类 | FALLBACK | BLOCKED_EXTERNAL_VALIDATION | requires authorized external validation | False |
 
 ## 规则
 
@@ -38,5 +37,5 @@ FALLBACK 源的真实外部验证须在 S1-07 或专项验收中按项单独授�
 ## 不变量
 
 - 矩阵不得声明 `auto_switch=True`；fallback 选择必须显式审批。
-- 矩阵必须列出所有已知数据源；条目按 `source` 唯一。
+- 矩阵必须按 `source × dataset` 列出所有已知组合；条目按组合唯一。
 - 主源变更必须通过架构决策，不得在任务级别静默修改。

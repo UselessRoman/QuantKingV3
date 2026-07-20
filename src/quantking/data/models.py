@@ -417,6 +417,8 @@ class DatasetVersion:
     coverage_end: TradingDate | None
     coverage_summary: Mapping[str, str]
     failure: BatchFailureInfo | None
+    quality_run_id: EntityId | None = None
+    content_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.version_id, EntityId):
@@ -454,6 +456,15 @@ class DatasetVersion:
         if self.manifest_sha256 is not None:
             object.__setattr__(
                 self, "manifest_sha256", _sha256(self.manifest_sha256, field="manifest_sha256")
+            )
+        if self.quality_run_id is not None and (
+            not isinstance(self.quality_run_id, EntityId)
+            or self.quality_run_id.namespace != "data_quality"
+        ):
+            raise ValueError("quality_run_id must use the data_quality namespace")
+        if self.content_sha256 is not None:
+            object.__setattr__(
+                self, "content_sha256", _sha256(self.content_sha256, field="content_sha256")
             )
         for field in ("security_count", "row_count"):
             value = getattr(self, field)
@@ -501,6 +512,8 @@ class DatasetVersion:
                         self.coverage_start,
                         self.coverage_end,
                         self.failure,
+                        self.quality_run_id,
+                        self.content_sha256,
                     )
                 )
                 or self.coverage_summary
@@ -562,6 +575,8 @@ class DatasetVersion:
             coverage_end=None,
             coverage_summary={},
             failure=None,
+            quality_run_id=None,
+            content_sha256=None,
         )
 
 
@@ -941,6 +956,8 @@ def transition_dataset_version(
     coverage_end: TradingDate | None = None,
     coverage_summary: Mapping[str, str] | None = None,
     failure: BatchFailureInfo | None = None,
+    quality_run_id: EntityId | None = None,
+    content_sha256: str | None = None,
 ) -> DatasetVersion:
     """Apply the authoritative dataset-version transition table."""
     if version.status is DatasetVersionStatus.PUBLISHED:
@@ -991,6 +1008,12 @@ def transition_dataset_version(
         if target is DatasetVersionStatus.VALIDATED and coverage_summary is not None
         else version.coverage_summary,
         failure=failure,
+        quality_run_id=quality_run_id
+        if target is DatasetVersionStatus.VALIDATED
+        else version.quality_run_id,
+        content_sha256=content_sha256
+        if target is DatasetVersionStatus.VALIDATED
+        else version.content_sha256,
     )
 
 

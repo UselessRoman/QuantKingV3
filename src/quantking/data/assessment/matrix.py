@@ -18,6 +18,7 @@ from quantking.data.assessment.models import (
     SourceRole,
     _text,
 )
+from quantking.data.models import DatasetKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +32,7 @@ class SourceMatrixEntry:
     """
 
     source: str
+    dataset: DatasetKind
     role: SourceRole
     status: AssessmentStatus
     blocking_reason: str | None
@@ -38,6 +40,8 @@ class SourceMatrixEntry:
 
     def __post_init__(self) -> None:
         _text(self.source, field_name="source")
+        if not isinstance(self.dataset, DatasetKind):
+            raise TypeError("dataset must be a DatasetKind")
         if not isinstance(self.role, SourceRole):
             raise TypeError("role must be a SourceRole")
         if not isinstance(self.status, AssessmentStatus):
@@ -72,9 +76,9 @@ class SourceMatrix:
         for entry in self.entries:
             if not isinstance(entry, SourceMatrixEntry):
                 raise TypeError("entries must contain SourceMatrixEntry values")
-        sources = [entry.source for entry in self.entries]
-        if len(set(sources)) != len(sources):
-            raise ValueError("source matrix entries must be unique by source")
+        keys = [(entry.source, entry.dataset) for entry in self.entries]
+        if len(set(keys)) != len(keys):
+            raise ValueError("source matrix entries must be unique by source and dataset")
 
 
 def default_source_matrix() -> SourceMatrix:
@@ -85,44 +89,37 @@ def default_source_matrix() -> SourceMatrix:
     ``BLOCKED_EXTERNAL_VALIDATION`` until a real external validation run
     is authorized and executed; none of them declare ``auto_switch``.
     """
-    return SourceMatrix(
-        entries=(
+    entries: list[SourceMatrixEntry] = []
+    for dataset in DatasetKind:
+        xt_verified = dataset is DatasetKind.EXCHANGE_CALENDAR
+        entries.append(
             SourceMatrixEntry(
                 source="XTQUANT",
+                dataset=dataset,
                 role=SourceRole.PRIMARY,
-                status=AssessmentStatus.PRODUCTION_READY,
-                blocking_reason=None,
-                auto_switch=False,
-            ),
-            SourceMatrixEntry(
-                source="BAOSTOCK",
-                role=SourceRole.FALLBACK,
-                status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
+                status=(
+                    AssessmentStatus.PRODUCTION_READY
+                    if xt_verified
+                    else AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION
+                ),
                 blocking_reason=(
-                    "BaoStock requires authorized external validation before production use"
+                    None if xt_verified else "XTQuant dataset semantics require external validation"
                 ),
                 auto_switch=False,
-            ),
-            SourceMatrixEntry(
-                source="AKSHARE",
-                role=SourceRole.FALLBACK,
-                status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
-                blocking_reason=(
-                    "AKShare requires authorized external validation before production use"
-                ),
-                auto_switch=False,
-            ),
-            SourceMatrixEntry(
-                source="TUSHARE",
-                role=SourceRole.FALLBACK,
-                status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
-                blocking_reason=(
-                    "Tushare requires authorized external validation before production use"
-                ),
-                auto_switch=False,
-            ),
+            )
         )
-    )
+        for source in ("BAOSTOCK", "AKSHARE", "TUSHARE"):
+            entries.append(
+                SourceMatrixEntry(
+                    source=source,
+                    dataset=dataset,
+                    role=SourceRole.FALLBACK,
+                    status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
+                    blocking_reason=f"{source} requires authorized external validation",
+                    auto_switch=False,
+                )
+            )
+    return SourceMatrix(entries=tuple(entries))
 
 
 __all__ = [

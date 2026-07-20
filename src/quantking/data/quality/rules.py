@@ -17,7 +17,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
-from typing import Protocol
+from itertools import pairwise
+from typing import Protocol, cast
 
 import pyarrow as pa
 
@@ -349,23 +350,43 @@ def _evaluate_listing_effective_range(
     table: pa.Table,
     reference_tables: Mapping[str, pa.Table],
 ) -> QualityOutcomeResult:
-    # security_master: list_date <= delist_date (if both present); code/exchange consistent.
+    # Validate point-in-time listing chronology and non-overlapping effective ranges.
     if request.dataset is not DatasetKind.SECURITY_MASTER:
         return _skipped(
             "listing_effective_range",
             summary="listing effective range rule applies only to security_master",
         )
     bad = 0
-    list_dates = table.column("list_date").to_pylist() if "list_date" in table.column_names else []
-    delist_dates = (
-        table.column("delist_date").to_pylist() if "delist_date" in table.column_names else []
-    )
-    for list_date, delist_date in zip(list_dates, delist_dates, strict=True):
-        if list_date is None:
+    rows = table.to_pylist()
+    by_code: dict[str, list[dict[str, object]]] = {}
+    for row in rows:
+        listing_date = row["listing_date"]
+        delisting_date = row["delisting_date"]
+        effective_from = row["effective_from"]
+        effective_to = row["effective_to"]
+        status = row["listing_status"]
+        if listing_date is None or effective_from is None:
             bad += 1
             continue
-        if delist_date is not None and delist_date < list_date:
+        if delisting_date is not None and delisting_date < listing_date:
             bad += 1
+        if effective_to is not None and effective_to < effective_from:
+            bad += 1
+        if effective_from < listing_date:
+            bad += 1
+        if status == "DELISTED" and delisting_date is None:
+            bad += 1
+        if status != "DELISTED" and delisting_date is not None and effective_from > delisting_date:
+            bad += 1
+        by_code.setdefault(str(row["code"]), []).append(row)
+    for records in by_code.values():
+        records.sort(key=lambda row: row["effective_from"])  # type: ignore[arg-type,return-value]
+        for previous, current in pairwise(records):
+            previous_end = previous["effective_to"]
+            if previous_end is None or cast(date, current["effective_from"]) <= cast(
+                date, previous_end
+            ):
+                bad += 1
     if bad == 0:
         return _passed(
             "listing_effective_range",
@@ -389,18 +410,11 @@ def _evaluate_positive_adjustment_factor(
             "positive_adjustment_factor",
             summary="adjustment factor rule applies only to adjustment_factor",
         )
-    if "adjustment_factor" not in table.column_names:
-        return _failed(
-            "positive_adjustment_factor",
-            summary="adjustment_factor column is missing",
-            affected=1,
-        )
     bad = 0
-    for value in table.column("adjustment_factor").to_pylist():
-        if value is None:
-            continue
-        if not (isinstance(value, (int, float)) and value > 0):
-            bad += 1
+    for field_name in ("price_multiplier", "volume_multiplier"):
+        for value in table.column(field_name).to_pylist():
+            if not (isinstance(value, (int, float)) and value > 0):
+                bad += 1
     if bad == 0:
         return _passed("positive_adjustment_factor", summary="all adjustment factors are positive")
     return _failed(

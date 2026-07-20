@@ -56,19 +56,18 @@ PUBLISHED transition that lacks a matching PASSED quality run.
 
 from __future__ import annotations
 
-import hashlib
-import io
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from quantking.common.errors import DatasetVersionNotFoundError
 from quantking.common.ids import EntityId
 from quantking.common.time import TradingDate, utc_now
+from quantking.data.adapters.canonical_content import canonical_content_sha256
+from quantking.data.adapters.canonical_schema import canonical_schema
 from quantking.data.adapters.persistence.sqlite import DataSqliteUnitOfWorkFactory
 from quantking.data.adapters.warehouse.canonical_warehouse import (
     CanonicalPublishRequest,
@@ -80,6 +79,7 @@ from quantking.data.adapters.warehouse.verifier import verify_canonical_director
 from quantking.data.models import (
     BatchFailureInfo,
     BatchFailureKind,
+    DatasetKind,
     DatasetVersion,
     DatasetVersionStatus,
     EmptyResultInfo,
@@ -90,7 +90,12 @@ from quantking.data.models import (
 from quantking.data.schemas import descriptor_for
 
 
-def compute_content_sha256(tables: tuple[pa.Table, ...]) -> str:
+def compute_content_sha256(
+    tables: tuple[pa.Table, ...],
+    *,
+    dataset: object | None = None,
+    empty_result: EmptyResultInfo | None = None,
+) -> str:
     """Compute a deterministic SHA-256 over the parquet bytes of ``tables``.
 
     The same algorithm is used by the quality rule engine's
@@ -101,14 +106,17 @@ def compute_content_sha256(tables: tuple[pa.Table, ...]) -> str:
     """
     if not isinstance(tables, tuple):
         raise TypeError("tables must be a tuple")
-    hasher = hashlib.sha256()
-    for table in tables:
-        if not isinstance(table, pa.Table):
-            raise TypeError("tables must contain pa.Table values")
-        buffer = io.BytesIO()
-        pq.write_table(table, buffer, compression="snappy")  # type: ignore[no-untyped-call]
-        hasher.update(buffer.getvalue())
-    return hasher.hexdigest()
+    if dataset is None:
+        matches = [
+            kind
+            for kind in DatasetKind
+            if tables and tables[0].schema.equals(canonical_schema(kind.value))
+        ]
+        if len(matches) != 1:
+            raise ValueError("dataset is required when it cannot be inferred")
+        dataset = matches[0]
+    kind = dataset if isinstance(dataset, DatasetKind) else DatasetKind(str(dataset))
+    return canonical_content_sha256(kind, tables, empty_result=empty_result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +230,9 @@ class CanonicalPublishCoordinator:
         # schema_version and content_sha256. A FAILED/SKIPPED/mismatched
         # run transitions the version to FAILED with a QUALITY failure
         # and aborts before any file is written.
-        candidate_content_sha = compute_content_sha256(request.tables)
+        candidate_content_sha = compute_content_sha256(
+            request.tables, dataset=version.dataset, empty_result=request.empty_result
+        )
         self._enforce_quality_gate(
             version=version,
             quality_run_id=request.quality_run_id,
@@ -250,7 +260,7 @@ class CanonicalPublishCoordinator:
         # the real manifest SHA and the actual coverage metadata. If
         # the version is already VALIDATED, verify the stored
         # credentials match the on-disk manifest.
-        self._transition_to_validated(version, credentials)
+        self._transition_to_validated(version, credentials, request.quality_run_id)
         # Step 6: re-verify the final published directory through the
         # unified strict verifier. The warehouse already verified the
         # directory at publish time, but we re-verify here so a
@@ -350,6 +360,7 @@ class CanonicalPublishCoordinator:
         coverage_start: TradingDate | None
         coverage_end: TradingDate | None
         coverage_summary: dict[str, str]
+        content_sha256: str
 
     def _read_manifest_credentials(self, directory: Path) -> _ManifestCredentials:
         """Read the on-disk manifest and extract the coordinator credentials."""
@@ -372,6 +383,9 @@ class CanonicalPublishCoordinator:
                 "published manifest is missing a valid manifest_sha256",
                 context={"directory": str(directory)},
             )
+        content_sha = manifest.get("content_sha256")
+        if not isinstance(content_sha, str) or len(content_sha) != 64:
+            raise CanonicalWarehouseError("published manifest has invalid content_sha256")
         coverage_summary_raw = manifest.get("coverage_summary", {})
         if not isinstance(coverage_summary_raw, dict):
             raise CanonicalWarehouseError(
@@ -410,12 +424,14 @@ class CanonicalPublishCoordinator:
             coverage_start=coverage_start,
             coverage_end=coverage_end,
             coverage_summary=coverage_summary,
+            content_sha256=content_sha,
         )
 
     def _transition_to_validated(
         self,
         version: DatasetVersion,
         credentials: _ManifestCredentials,
+        quality_run_id: EntityId,
     ) -> DatasetVersion:
         """Save the BUILDING version (if needed) and transition to VALIDATED."""
         with self._uow_factory() as uow:
@@ -439,6 +455,8 @@ class CanonicalPublishCoordinator:
                     coverage_start=credentials.coverage_start,
                     coverage_end=credentials.coverage_end,
                     coverage_summary=credentials.coverage_summary,
+                    quality_run_id=quality_run_id,
+                    content_sha256=credentials.content_sha256,
                 )
                 uow.data.save_version(validated)
                 uow.commit()
@@ -450,6 +468,30 @@ class CanonicalPublishCoordinator:
                 # manifest, then return the stored VALIDATED version
                 # so the caller can proceed to the PUBLISHED transition.
                 self._verify_validated_credentials(stored, credentials)
+                if stored.quality_run_id is None or stored.content_sha256 is None:
+                    matching = uow.data.list_quality_runs(
+                        version_id=str(stored.version_id), status=QualityRunStatus.PASSED
+                    )
+                    exact = [
+                        run
+                        for run in matching
+                        if run.run_id == quality_run_id
+                        and run.rule_version == stored.rule_version
+                        and run.schema_version == stored.schema_version
+                        and run.content_sha256 == credentials.content_sha256
+                    ]
+                    if len(exact) != 1:
+                        raise CanonicalWarehouseError(
+                            "validated version is missing its exact quality credentials"
+                        )
+                    upgraded = replace(
+                        stored,
+                        quality_run_id=quality_run_id,
+                        content_sha256=credentials.content_sha256,
+                    )
+                    uow.data.save_version(upgraded)
+                    uow.commit()
+                    return upgraded
                 uow.rollback()
                 return stored
             if stored.status is DatasetVersionStatus.PUBLISHED:
@@ -503,6 +545,11 @@ class CanonicalPublishCoordinator:
         if stored.manifest_sha256 != credentials.manifest_sha256:
             raise CanonicalWarehouseError(
                 "stored manifest_sha256 does not match the on-disk manifest",
+                context={"version_id": str(stored.version_id)},
+            )
+        if stored.content_sha256 != credentials.content_sha256:
+            raise CanonicalWarehouseError(
+                "stored content_sha256 does not match the on-disk manifest",
                 context={"version_id": str(stored.version_id)},
             )
         if stored.security_count != credentials.security_count:

@@ -50,6 +50,7 @@ import pyarrow as pa
 from pyarrow import parquet as pa_parquet
 
 from quantking.common.errors import IdempotencyConflictError, InvalidPathError
+from quantking.data.adapters.canonical_content import canonical_content_sha256
 from quantking.data.adapters.canonical_schema import (
     CanonicalValidationIssue,
     ensure_sorted,
@@ -121,16 +122,6 @@ class CanonicalPublishRequest:
             raise TypeError("empty_result must be an EmptyResultInfo or None")
         if self.coverage_summary and not isinstance(self.coverage_summary, dict):
             object.__setattr__(self, "coverage_summary", dict(self.coverage_summary))
-
-
-def _empty_dataset_marker(dataset: str) -> bytes:
-    """Return a deterministic empty-dataset marker for a given dataset.
-
-    Used as the content payload when publishing a legal empty version
-    so the manifest's ``content_sha256`` still has a stable value to
-    compare against during idempotent reconciliation.
-    """
-    return f"quantking.warehouse:{dataset}:empty".encode()
 
 
 def _coerce_partition_to_int(partition: Mapping[str, object]) -> dict[str, int]:
@@ -460,11 +451,7 @@ class CanonicalWarehouse:
             )
         # Compare the content_sha256 to detect any byte-level drift in
         # the publishable data, even if the file layout is unchanged.
-        previous_content_sha = (
-            self._compute_content_sha(request.version.dataset.value, request.tables)
-            if request.tables
-            else compute_sha256(_empty_dataset_marker(request.version.dataset.value))
-        )
+        previous_content_sha = self._compute_content_sha(request.version.dataset, request.tables)
         if previous.get("content_sha256") != previous_content_sha:
             raise IdempotencyConflictError(
                 "content mismatch against existing manifest",
@@ -568,10 +555,10 @@ class CanonicalWarehouse:
                 "caller-supplied coverage_summary does not exactly match actual data",
                 context={"version_id": str(request.version.version_id)},
             )
-        content_sha = (
-            self._compute_content_sha(dataset, request.tables)
-            if request.tables
-            else compute_sha256(_empty_dataset_marker(dataset))
+        content_sha = canonical_content_sha256(
+            request.version.dataset,
+            request.tables,
+            empty_result=request.empty_result,
         )
         # coverage_start/coverage_end are always sourced from the actual
         # data (via the ``first_date``/``last_date`` computed coverage
@@ -633,23 +620,12 @@ class CanonicalWarehouse:
         )
 
     @staticmethod
-    def _compute_content_sha(dataset: str, tables: Sequence[pa.Table]) -> str:
-        """Return a deterministic SHA-256 of the publishable data.
+    def _compute_content_sha(dataset: object, tables: Sequence[pa.Table]) -> str:
+        """Compatibility wrapper around the shared logical-content digest."""
+        from quantking.data.models import DatasetKind
 
-        The combined table is sorted by the canonical sort key and
-        written to an in-memory Parquet buffer. Sorting the data first
-        keeps the byte stream identical for the same logical contents
-        regardless of input chunk ordering.
-        """
-        if not tables:
-            return compute_sha256(_empty_dataset_marker(dataset))
-        combined = pa.concat_tables(list(tables))
-        combined = ensure_sorted(dataset, combined)
-        import io
-
-        buffer = io.BytesIO()
-        pa_parquet.write_table(combined, buffer, compression="snappy")  # type: ignore[no-untyped-call]
-        return compute_sha256(buffer.getvalue())
+        kind = dataset if isinstance(dataset, DatasetKind) else DatasetKind(str(dataset))
+        return canonical_content_sha256(kind, tables)
 
     def _write_manifest(self, directory: Path, manifest: CanonicalManifest) -> None:
         target = directory / WAREHOUSE_MANIFEST_FILENAME

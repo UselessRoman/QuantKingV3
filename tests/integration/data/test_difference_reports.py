@@ -158,7 +158,7 @@ class TestDifferenceReportArtifactDirectory:
         )
         outcome = CrossSourceComparator().compare(request=request)
         writer = DifferenceReportArtifactWriter(artifacts_root=tmp_path)
-        writer.write(outcome=outcome, row_evidence_bytes=b"{}")
+        writer.write(outcome=outcome)
         directory = tmp_path / "data-diff" / str(outcome.report_id).replace(":", "--")
         assert (directory / "manifest.json").is_file()
         assert (directory / "COMPLETE").is_file()
@@ -198,11 +198,11 @@ class TestDifferenceReportArtifactDirectory:
         )
         outcome = CrossSourceComparator().compare(request=request)
         writer = DifferenceReportArtifactWriter(artifacts_root=tmp_path)
-        writer.write(outcome=outcome, row_evidence_bytes=b"{}")
+        writer.write(outcome=outcome)
         directory = tmp_path / "data-diff" / str(outcome.report_id).replace(":", "--")
         manifest_bytes = (directory / "manifest.json").read_bytes()
         # Idempotent rewrite must succeed and produce identical bytes.
-        writer.write(outcome=outcome, row_evidence_bytes=b"{}")
+        writer.write(outcome=outcome)
         assert (directory / "manifest.json").read_bytes() == manifest_bytes
 
     def test_writer_rejects_overwrite_with_different_input(self, tmp_path: Path) -> None:
@@ -241,11 +241,11 @@ class TestDifferenceReportArtifactDirectory:
         )
         outcome = CrossSourceComparator().compare(request=request)
         writer = DifferenceReportArtifactWriter(artifacts_root=tmp_path)
-        writer.write(outcome=outcome, row_evidence_bytes=b"{}")
-        # Same report_id but different row_evidence_bytes must conflict.
+        writer.write(outcome=outcome)
+        # Same report_id but different outcome content must conflict.
         conflict = replace(outcome, total_differences=outcome.total_differences + 1)
         with pytest.raises(DifferenceReportConflictError):
-            writer.write(outcome=conflict, row_evidence_bytes=b'{"different":true}')
+            writer.write(outcome=conflict)
 
     def test_writer_rejects_non_absolute_root(self) -> None:
         from quantking.data.comparison.artifacts import DifferenceReportArtifactWriter

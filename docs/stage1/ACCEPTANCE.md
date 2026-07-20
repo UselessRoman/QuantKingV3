@@ -79,7 +79,7 @@ S1-03-R1 修复中/待主验收。当前离线门禁不得写成已经通过主�
 
 ## S1-04 验收标准
 
-S1-04 离线实现已提交、待主验收。当前离线门禁不得写成已经通过主验收：
+S1-04-R1 修复已提交、等待主验收。当前离线门禁不得写成已经通过主验收：
 
 | 验收项 | 状态 | 证据 |
 |---|---|---|
@@ -89,12 +89,12 @@ S1-04 离线实现已提交、待主验收。当前离线门禁不得写成已�
 | 备用源候选评估：合成证据不得标 `PRODUCTION_READY`，阻塞原因必填 | 待主验收 | `data/assessment/`；`test_source_candidate_assessment.py` |
 | 默认生产矩阵：XTQuant PRIMARY，三个 FALLBACK `BLOCKED_EXTERNAL_VALIDATION`，无自动切换 | 待主验收 | `default_source_matrix()`；`SOURCE_MATRIX.md` |
 | SourceOverride 创建/审批/拒绝/应用失败路径与审计事务 | 待主验收 | `data/override/`；`test_source_override_*.py` |
-| `apply_override` 完整工作流（直接子版本+质量门重跑+原子发布+APPLIED） | 未实现 | 延后到 CanonicalWarehouse/QualityEngine/PublishCoordinator 联调阶段 |
+| `apply_override` 完整工作流（直接子版本+质量门重跑+原子发布+APPLIED） | 已实现待主验收 | `data/override/`；`test_override_transform.py`；SourceOverride workflow tests |
 | 真实备用源（BAOSTOCK/AKSHARE/TUSHARE）外部验证 | 未授权 | 须在 S1-07 或专项验收逐项授权 |
 | 默认门禁无网络、QMT、正式根和真实供应商访问 | 待主验收 | 离线守卫；未运行 `real_*` |
 
 合成测试不构成真实备用源能力证明；真实 XTQuant 样本验证仍须逐项授权；合成数据不能标生产可用。
-S1-04 离线实现已提交、待主验收；离线测试通过不等于主验收通过。
+S1-04-R1 修复已提交、等待主验收；离线测试通过不等于主验收通过。S1-05～S1-08 未开始、未获授权；真实 XTQuant 和备用源验证仍延期并阻断 Stage 1 最终验收。
 
 ## S1-05～S1-08 验收
 

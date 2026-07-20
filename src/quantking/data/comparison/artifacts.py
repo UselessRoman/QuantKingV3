@@ -125,9 +125,8 @@ class DifferenceReportArtifactWriter:
         manifest_bytes, manifest_sha = _signed_manifest(manifest_payload)
         complete_bytes = _complete_marker_bytes(manifest_sha)
         if row_evidence_bytes is not None:
-            rows_bytes = row_evidence_bytes
-        else:
-            rows_bytes = _row_differences_bytes(outcome)
+            raise ValueError("row_evidence_bytes is not accepted; evidence is derived from outcome")
+        rows_bytes = _row_differences_bytes(outcome)
         if directory.exists():
             self._verify_idempotent(directory, manifest_bytes, rows_bytes, outcome)
             return directory
@@ -186,6 +185,20 @@ class DifferenceReportArtifactWriter:
             raise DifferenceReportConflictError(
                 "existing artifact directory is missing COMPLETE marker",
             )
+        try:
+            marker = json.loads(complete_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise DifferenceReportConflictError("existing COMPLETE marker is invalid") from error
+        if marker != {"manifest_sha256": _manifest_sha_from_signed(existing_manifest)}:
+            raise DifferenceReportConflictError("existing COMPLETE marker is not bound to manifest")
+
+
+def _manifest_sha_from_signed(manifest_bytes: bytes) -> str:
+    payload = json.loads(manifest_bytes.decode("utf-8"))
+    embedded = payload.pop("manifest_sha256", None)
+    if not isinstance(embedded, str):
+        raise DifferenceReportConflictError("manifest_sha256 is missing")
+    return compute_sha256(_canonical_json(payload).encode("utf-8"))
 
 
 def _remove_tree(path: Path) -> None:

@@ -451,14 +451,12 @@ class TestQualityAndDifferencePersistence:
 
 
 class TestSourceOverrideTransactions:
-    def test_approval_and_application_are_audited_and_preserve_approved_facts(
+    def test_unpublished_child_cannot_be_marked_applied(
         self, factory: DataSqliteUnitOfWorkFactory
     ) -> None:
         pending, compared, fallback = _persist_override_graph(factory)
         with factory() as uow:
-            approved = uow.data.approve_override(
-                str(pending.override_id), actor="analyst", at=_DECIDED
-            )
+            uow.data.approve_override(str(pending.override_id), actor="analyst", at=_DECIDED)
             uow.commit()
         child = _building_version(
             (fallback.batch_id,),
@@ -467,35 +465,19 @@ class TestSourceOverrideTransactions:
         )
         with factory() as uow:
             uow.data.save_version(child)
-            applied = uow.data.apply_override(
-                str(pending.override_id),
-                actor="analyst",
-                at=_LATER,
-                applied_version_id=str(child.version_id),
-            )
-            uow.commit()
-        immutable_fields = (
-            "dataset",
-            "difference_report_id",
-            "primary_batch_id",
-            "fallback_batch_id",
-            "primary_source",
-            "fallback_source",
-            "scope_codes",
-            "scope_dates",
-            "fields",
-            "reason",
-            "created_at",
-            "approved_at",
-            "approved_by",
-        )
-        assert all(getattr(approved, name) == getattr(applied, name) for name in immutable_fields)
+            with pytest.raises(OverrideNotApplicableError):
+                uow.data.apply_override(
+                    str(pending.override_id),
+                    actor="analyst",
+                    at=_LATER,
+                    applied_version_id=str(child.version_id),
+                )
+            uow.rollback()
         with factory() as uow:
-            audits = uow.data.list_audits(action=None, limit=10)
-        assert [audit.action for audit in audits[-2:]] == [
-            "override_approved",
-            "override_applied",
-        ]
+            assert (
+                uow.data.get_override(str(pending.override_id)).status
+                is SourceOverrideStatus.APPROVED
+            )
 
     def test_direct_save_cannot_bypass_audit(self, factory: DataSqliteUnitOfWorkFactory) -> None:
         pending, _, _ = _persist_override_graph(factory)

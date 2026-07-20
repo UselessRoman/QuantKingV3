@@ -17,11 +17,13 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 
 import pyarrow as pa
 
 from quantking.common.ids import EntityId
 from quantking.common.time import utc_now
+from quantking.data.adapters.canonical_content import canonical_content_sha256
 from quantking.data.models import (
     BatchFailureInfo,
     BatchFailureKind,
@@ -93,7 +95,14 @@ class QualityEngine:
         if not isinstance(reference_tables, Mapping):
             raise TypeError("reference_tables must be a mapping")
         started_at = utc_now()
-        run_id = _deterministic_run_id(request, self._rule_set.rule_version)
+        actual_content_sha = canonical_content_sha256(
+            request.dataset,
+            (table,),
+            empty_result=request.empty_result,
+            validate=False,
+        )
+        request_for_identity = replace(request, content_sha256=actual_content_sha)
+        run_id = _deterministic_run_id(request_for_identity, self._rule_set.rule_version)
         applicable = self._rule_set.for_dataset(request.dataset)
         results: list[QualityOutcomeResult] = []
         for rule in applicable:
@@ -128,7 +137,7 @@ class QualityEngine:
             version_id=request.version_id,
             rule_version=self._rule_set.rule_version,
             schema_version=request.schema_version,
-            content_sha256=request.content_sha256,
+            content_sha256=actual_content_sha,
             started_at=started_at,
             ended_at=ended_at,
             status=status,

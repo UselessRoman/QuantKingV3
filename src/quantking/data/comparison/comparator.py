@@ -34,7 +34,7 @@ import pyarrow as pa
 
 from quantking.common.ids import EntityId
 from quantking.common.time import UtcTimestamp
-from quantking.data.adapters.canonical_schema import canonical_schema
+from quantking.data.adapters.canonical_schema import canonical_schema, validate_table
 from quantking.data.comparison.thresholds import ThresholdSet, ThresholdSpec
 from quantking.data.models import DatasetKind, DataSource
 from quantking.data.schemas import descriptor_for
@@ -323,16 +323,15 @@ class CrossSourceComparator:
             ("fallback_table", request.fallback_table),
         )
         for table_name, table in canonical_tables:
-            if table.num_columns != len(canonical):
-                raise ValueError(f"{table_name} column count does not match canonical schema")
-            for col, field in zip(table.column_names, canonical, strict=True):
-                if col != field.name:
-                    raise ValueError(f"{table_name} column order does not match canonical schema")
+            validation = validate_table(request.dataset.value, table)
+            if not validation.ok:
+                issue = validation.issues[0]
+                raise ValueError(f"{table_name} is not canonical: {issue.rule}: {issue.message}")
 
         primary_rows = request.primary_table.to_pylist()
         fallback_rows = request.fallback_table.to_pylist()
-        primary_by_key = {_row_key(row, descriptor.primary_key): row for row in primary_rows}
-        fallback_by_key = {_row_key(row, descriptor.primary_key): row for row in fallback_rows}
+        primary_by_key = _index_rows(primary_rows, descriptor.primary_key, "primary")
+        fallback_by_key = _index_rows(fallback_rows, descriptor.primary_key, "fallback")
 
         all_keys = sorted(primary_by_key.keys() | fallback_by_key.keys())
         thresholds = request.thresholds.for_dataset(request.dataset)
@@ -428,7 +427,22 @@ class CrossSourceComparator:
 
 
 def _row_key(row: dict[str, Any], primary_key: tuple[str, ...]) -> tuple[Any, ...]:
-    return tuple(row.get(name) for name in primary_key)
+    values = tuple(row.get(name) for name in primary_key)
+    if any(value is None for value in values):
+        raise ValueError("primary key values must not be null")
+    return values
+
+
+def _index_rows(
+    rows: list[dict[str, Any]], primary_key: tuple[str, ...], side: str
+) -> dict[tuple[Any, ...], dict[str, Any]]:
+    indexed: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        key = _row_key(row, primary_key)
+        if key in indexed:
+            raise ValueError(f"{side} table contains duplicate primary key {key!r}")
+        indexed[key] = row
+    return indexed
 
 
 def _key_dict(key: tuple[Any, ...], primary_key: tuple[str, ...]) -> dict[str, Any]:

@@ -14,17 +14,32 @@ overrides) are enforced here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from typing import Any
 
 from quantking.common.errors import OverrideNotApplicableError
 from quantking.common.ids import EntityId, new_entity_id
 from quantking.common.time import TradingDate, UtcTimestamp
+from quantking.data.adapters.override_transform import apply_override_to_table
 from quantking.data.adapters.persistence.sqlite import DataSqliteUnitOfWorkFactory
+from quantking.data.adapters.warehouse.publish_coordinator import (
+    CanonicalPublishCoordinator,
+    CanonicalPublishCoordinatorRequest,
+)
+from quantking.data.adapters.warehouse.query import CanonicalQueryAdapter
 from quantking.data.models import (
+    DatasetVersion,
+    DatasetVersionStatus,
     DataSource,
+    QualityResult,
+    QualityRun,
+    QualityRunStatus,
     SourceOverride,
     SourceOverrideStatus,
 )
+from quantking.data.quality.engine import QualityEngine
+from quantking.data.quality.models import QualityRequest, RuleOutcomeStatus
 from quantking.data.schemas import DatasetSchemaDescriptor
 
 # ---------------------------------------------------------------------------
@@ -167,8 +182,18 @@ class SourceOverrideService:
     on top of the SQLite repository.
     """
 
-    def __init__(self, uow_factory: DataSqliteUnitOfWorkFactory) -> None:
+    def __init__(
+        self,
+        uow_factory: DataSqliteUnitOfWorkFactory,
+        *,
+        query_adapter: CanonicalQueryAdapter | None = None,
+        quality_engine: QualityEngine | None = None,
+        publish_coordinator: CanonicalPublishCoordinator | None = None,
+    ) -> None:
         self._uow_factory = uow_factory
+        self._query_adapter = query_adapter
+        self._quality_engine = quality_engine
+        self._publish_coordinator = publish_coordinator
 
     def create_override(
         self, request: CreateOverrideRequest, created_at: UtcTimestamp
@@ -220,27 +245,126 @@ class SourceOverrideService:
         applied_at: UtcTimestamp,
         *,
         actor: str = "system",
+        quality_request: QualityRequest | None = None,
+        reference_tables: Mapping[str, Any] | None = None,
     ) -> SourceOverride:
-        """Apply an APPROVED override to a new direct-child DatasetVersion.
-
-        The full workflow (create a new direct-child version, re-run the
-        quality gate, atomic-publish, mark APPLIED in the same audited
-        transaction) requires the CanonicalWarehouse, quality engine and
-        publish coordinator and is deferred to a later stage. This method
-        enforces the failure paths: non-existent, PENDING, REJECTED or
-        already-APPLIED overrides must raise before any state change.
-        """
+        """Apply an approved override through transformation and quality-gated publish."""
         with self._uow_factory() as uow:
             current = uow.data.get_override(str(override_id))
+            if current.status is SourceOverrideStatus.APPLIED:
+                return current
             if current.status is not SourceOverrideStatus.APPROVED:
                 raise OverrideNotApplicableError(
                     "only APPROVED overrides can be applied",
                     context={"current": current.status.value},
                 )
-            raise NotImplementedError(
-                "apply_override workflow requires CanonicalWarehouse, "
-                "QualityEngine and PublishCoordinator; deferred to a later stage"
+            if (
+                self._query_adapter is None
+                or self._quality_engine is None
+                or self._publish_coordinator is None
+            ):
+                raise OverrideNotApplicableError("override application dependencies are required")
+            if quality_request is None:
+                raise OverrideNotApplicableError("quality_request is required")
+            report = uow.data.get_difference_report(str(current.difference_report_id))
+            parent = uow.data.get_version(str(report.primary_version_id))
+            fallback = uow.data.get_version(str(report.fallback_version_id))
+            if (
+                parent.status is not DatasetVersionStatus.PUBLISHED
+                or fallback.status is not DatasetVersionStatus.PUBLISHED
+                or report.version_id != report.primary_version_id
+            ):
+                raise OverrideNotApplicableError(
+                    "override requires frozen PUBLISHED compared versions"
+                )
+            child = DatasetVersion.building(
+                version_id=new_entity_id("data_version"),
+                dataset=current.dataset,
+                schema_version=parent.schema_version,
+                code_version=parent.code_version,
+                rule_version=parent.rule_version,
+                parent_version_id=parent.version_id,
+                input_batch_ids=(current.primary_batch_id, current.fallback_batch_id),
+                created_at=applied_at,
             )
+            uow.data.save_version(child)
+            uow.commit()
+
+        primary_table = self._query_adapter.query_by_id(
+            version_id=str(report.primary_version_id),
+            dataset=current.dataset.value,
+            fields=None,
+        )
+        fallback_table = self._query_adapter.query_by_id(
+            version_id=str(report.fallback_version_id),
+            dataset=current.dataset.value,
+            fields=None,
+        )
+        transformed = apply_override_to_table(
+            dataset=current.dataset,
+            primary_table=primary_table,
+            fallback_table=fallback_table,
+            scope_codes=frozenset(current.scope_codes),
+            scope_dates=frozenset(item.value for item in current.scope_dates),
+            fields=frozenset(current.fields),
+        )
+        request = quality_request
+        if request.version_id != child.version_id:
+            request = replace(
+                request, version_id=child.version_id, input_batch_ids=child.input_batch_ids
+            )
+        outcome = self._quality_engine.execute(
+            request=request, table=transformed.table, reference_tables=reference_tables or {}
+        )
+        results = tuple(
+            QualityResult(
+                rule_code=item.rule_code,
+                passed=item.status is RuleOutcomeStatus.PASSED,
+                affected_count=item.affected_count,
+                summary=item.summary,
+                report_relative_path=item.row_evidence_relative_path,
+            )
+            for item in outcome.results
+            if item.status is not RuleOutcomeStatus.SKIPPED
+        )
+        run = QualityRun(
+            run_id=outcome.run_id,
+            version_id=child.version_id,
+            status=outcome.status,
+            rule_version=outcome.rule_version,
+            schema_version=outcome.schema_version,
+            content_sha256=outcome.content_sha256,
+            started_at=outcome.started_at,
+            ended_at=outcome.ended_at,
+            results=results,
+            summary_report_relative_path=None,
+            failure=outcome.failure,
+        )
+        with self._uow_factory() as uow:
+            uow.data.save_quality_run(run)
+            uow.commit()
+        if run.status is not QualityRunStatus.PASSED:
+            raise OverrideNotApplicableError(
+                "override candidate failed quality; override remains APPROVED"
+            )
+        self._publish_coordinator.coordinate(
+            CanonicalPublishCoordinatorRequest(
+                version=child,
+                tables=(transformed.table,),
+                code_version=child.code_version,
+                rule_version=child.rule_version,
+                quality_run_id=run.run_id,
+            )
+        )
+        with self._uow_factory() as uow:
+            result = uow.data.apply_override(
+                str(override_id),
+                actor=actor,
+                at=applied_at,
+                applied_version_id=str(child.version_id),
+            )
+            uow.commit()
+        return result
 
 
 __all__ = [

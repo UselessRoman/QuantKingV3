@@ -97,6 +97,7 @@ class SourceRole(StrEnum):
 _BLOCKED_STATUSES = frozenset(
     {AssessmentStatus.UNVERIFIED, AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION}
 )
+MIN_PRODUCTION_STABILITY_RUNS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,9 +188,26 @@ class SourceCandidateAssessment:
             raise ValueError(f"{self.status.value} status requires a blocking reason")
         if self.status is AssessmentStatus.PRODUCTION_READY and self.blocking_reason is not None:
             raise ValueError("PRODUCTION_READY status cannot carry a blocking reason")
+        if self.status is AssessmentStatus.PRODUCTION_READY and (
+            self.evidence_kind is not EvidenceKind.REAL
+            or not all(
+                (
+                    self.semantic_contract_verified,
+                    self.schema_unit_verified,
+                    self.coverage_adequate,
+                    self.quality_passed,
+                    self.fixed_sample_differences_adequate,
+                )
+            )
+            or self.stability_runs < MIN_PRODUCTION_STABILITY_RUNS
+        ):
+            raise ValueError(
+                "production readiness requires REAL evidence, every gate, and three stability runs"
+            )
 
 
 __all__ = [
+    "MIN_PRODUCTION_STABILITY_RUNS",
     "AssessmentStatus",
     "EvidenceKind",
     "SourceCandidateAssessment",
