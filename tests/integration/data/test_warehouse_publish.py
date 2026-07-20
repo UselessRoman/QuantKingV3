@@ -26,6 +26,8 @@ All tests use only ``tmp_path`` and synthetic data.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -68,6 +70,9 @@ from quantking.data.models import (
     DatasetVersionStatus,
     EmptyResultInfo,
     LegalEmptyClassification,
+    QualityResult,
+    QualityRun,
+    QualityRunStatus,
     transition_dataset_version,
 )
 from quantking.jobs.adapters.persistence.sqlite import initialize_database
@@ -295,6 +300,91 @@ def _building_version(
         input_batch_ids=(),
         created_at=utc_now(),
     )
+
+
+def _compute_content_sha(table: pa.Table) -> str:
+    """Compute a deterministic SHA-256 of the publishable data."""
+    buffer = io.BytesIO()
+    pa.parquet.write_table(table, buffer, compression="snappy")  # type: ignore[no-untyped-call]
+    return hashlib.sha256(buffer.getvalue()).hexdigest()
+
+
+def _make_passed_quality_run(
+    version: DatasetVersion,
+    table: pa.Table,
+    *,
+    uow_factory: DataSqliteUnitOfWorkFactory,
+    artifacts_root: Path,
+) -> QualityRun:
+    """Build, persist and artifact-write a PASSED QualityRun for the version."""
+    from quantking.data.quality.artifacts import QualityArtifactWriter
+    from quantking.data.quality.engine import QualityEngine
+    from quantking.data.quality.models import (
+        QualityRequest,
+        ReferenceDataBinding,
+        RuleOutcomeStatus,
+    )
+    from quantking.data.quality.rules import default_rule_set
+
+    request = QualityRequest(
+        dataset=version.dataset,
+        version_id=version.version_id,
+        rule_version=version.rule_version,
+        schema_version=version.schema_version,
+        code_version=version.code_version,
+        content_sha256=_compute_content_sha(table),
+        input_batch_ids=version.input_batch_ids,
+        expected_securities=("000001.SZ",),
+        expected_exchanges=("SZ",),
+        coverage_start=TradingDate(date(2026, 7, 15)),
+        coverage_end=TradingDate(date(2026, 7, 16)),
+        reference_data={
+            "exchange_calendar": ReferenceDataBinding(
+                dataset=DatasetKind.EXCHANGE_CALENDAR,
+                version_id=new_entity_id("data_version"),
+                content_sha256="b" * 64,
+            )
+        },
+        empty_result=None,
+    )
+    engine = QualityEngine(rule_set=default_rule_set())
+    outcome = engine.execute(
+        request=request,
+        table=table,
+        reference_tables={"exchange_calendar": _build_exchange_calendar_table()},
+    )
+    assert outcome.status is QualityRunStatus.PASSED
+    writer = QualityArtifactWriter(artifacts_root=artifacts_root)
+    writer.write(outcome=outcome, row_evidence_tables={})
+    results = tuple(
+        QualityResult(
+            rule_code=result.rule_code,
+            passed=result.status is RuleOutcomeStatus.PASSED,
+            affected_count=result.affected_count,
+            summary=result.summary,
+            report_relative_path=result.row_evidence_relative_path,
+        )
+        for result in outcome.results
+        if result.status is not RuleOutcomeStatus.SKIPPED
+    )
+    run = QualityRun(
+        run_id=outcome.run_id,
+        version_id=version.version_id,
+        status=QualityRunStatus.PASSED,
+        rule_version=version.rule_version,
+        schema_version=version.schema_version,
+        content_sha256=_compute_content_sha(table),
+        started_at=outcome.started_at,
+        ended_at=outcome.ended_at,  # type: ignore[arg-type]
+        results=results,
+        summary_report_relative_path=None,
+        failure=None,
+    )
+    with uow_factory() as uow:
+        uow.data.save_version(version)
+        uow.data.save_quality_run(run)
+        uow.commit()
+    return run
 
 
 class TestCanonicalPublishHappyPath:
@@ -715,13 +805,22 @@ class TestPublishMetadataCoordination:
         database_uow: DataSqliteUnitOfWorkFactory,
     ) -> None:
         version = _building_version(dataset=DatasetKind.DAILY_BAR_UNADJUSTED)
+        table = _build_daily_bar_table(_daily_bar_rows())
         request = CanonicalPublishRequest(
             version=version,
-            tables=(_build_daily_bar_table(_daily_bar_rows()),),
+            tables=(table,),
             code_version="s1-02",
             rule_version="quality-rules.v1",
         )
         warehouse.publish(request)
+        # Persist a PASSED quality run bound to the candidate content so
+        # the SQLite trigger allows the PUBLISHED transition.
+        _make_passed_quality_run(
+            version,
+            table,
+            uow_factory=database_uow,
+            artifacts_root=tmp_path / "artifacts",
+        )
         # Move from BUILDING to VALIDATED then PUBLISHED through the repository,
         # the same way the application layer would.
         with database_uow() as uow:
@@ -866,13 +965,20 @@ class TestPublishQueryCoordination:
         database_uow: DataSqliteUnitOfWorkFactory,
     ) -> None:
         version = _building_version(dataset=DatasetKind.DAILY_BAR_UNADJUSTED)
+        table = _build_daily_bar_table(_daily_bar_rows())
         request = CanonicalPublishRequest(
             version=version,
-            tables=(_build_daily_bar_table(_daily_bar_rows()),),
+            tables=(table,),
             code_version="s1-02",
             rule_version="quality-rules.v1",
         )
         landed = warehouse.publish(request)
+        _make_passed_quality_run(
+            version,
+            table,
+            uow_factory=database_uow,
+            artifacts_root=tmp_path / "artifacts",
+        )
         with database_uow() as uow:
             stored = uow.data.save_version(version)
             validated = transition_dataset_version(
@@ -909,13 +1015,20 @@ class TestPublishQueryCoordination:
         database_uow: DataSqliteUnitOfWorkFactory,
     ) -> None:
         version = _building_version(dataset=DatasetKind.DAILY_BAR_UNADJUSTED)
+        table = _build_daily_bar_table(_daily_bar_rows())
         request = CanonicalPublishRequest(
             version=version,
-            tables=(_build_daily_bar_table(_daily_bar_rows()),),
+            tables=(table,),
             code_version="s1-02",
             rule_version="quality-rules.v1",
         )
         landed = warehouse.publish(request)
+        _make_passed_quality_run(
+            version,
+            table,
+            uow_factory=database_uow,
+            artifacts_root=tmp_path / "artifacts",
+        )
         with database_uow() as uow:
             stored = uow.data.save_version(version)
             validated = transition_dataset_version(
@@ -952,13 +1065,20 @@ class TestPublishQueryCoordination:
         database_uow: DataSqliteUnitOfWorkFactory,
     ) -> None:
         version = _building_version(dataset=DatasetKind.DAILY_BAR_UNADJUSTED)
+        table = _build_daily_bar_table(_daily_bar_rows())
         request = CanonicalPublishRequest(
             version=version,
-            tables=(_build_daily_bar_table(_daily_bar_rows()),),
+            tables=(table,),
             code_version="s1-02",
             rule_version="quality-rules.v1",
         )
         landed = warehouse.publish(request)
+        _make_passed_quality_run(
+            version,
+            table,
+            uow_factory=database_uow,
+            artifacts_root=tmp_path / "artifacts",
+        )
         with database_uow() as uow:
             stored = uow.data.save_version(version)
             validated = transition_dataset_version(

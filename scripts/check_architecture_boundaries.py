@@ -82,7 +82,12 @@ def _allowed(top_level: str, parts: tuple[str, ...]) -> tuple[bool, str] | None:
     if top_level in {"alembic", "sqlalchemy"}:
         return _has_persistence_adapter(parts), "*/adapters/persistence"
     if top_level in {"duckdb", "pyarrow"}:
-        return _starts_with(parts, ("data", "adapters")), "data/adapters"
+        allowed = (
+            _starts_with(parts, ("data", "adapters"))
+            or _starts_with(parts, ("data", "quality"))
+            or _starts_with(parts, ("data", "comparison"))
+        )
+        return allowed, "data/adapters, data/quality or data/comparison"
     if top_level == "fastapi":
         return _fastapi_allowed(parts), "web entry or schema modules"
     return None

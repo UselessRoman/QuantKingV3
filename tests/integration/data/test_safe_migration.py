@@ -37,7 +37,7 @@ from quantking.jobs.backup.services import (
 
 _NOW = UtcTimestamp(datetime(2026, 7, 16, 3, 0, tzinfo=UTC))
 _STAGE0_REVISION = "20260715_0001"
-_HEAD = "20260716_0003"
+_HEAD = "20260716_0005"
 
 
 def _alembic_config(database: Path) -> Config:

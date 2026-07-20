@@ -329,6 +329,8 @@ def _quality_run_row_values(run: QualityRun) -> dict[str, object]:
         "version_id": str(run.version_id),
         "status": run.status.value,
         "rule_version": run.rule_version,
+        "schema_version": run.schema_version,
+        "content_sha256": run.content_sha256,
         "started_at": run.started_at.to_iso(),
         "ended_at": None if run.ended_at is None else run.ended_at.to_iso(),
         "results_json": results_json,
@@ -360,6 +362,8 @@ def _quality_run_domain(session: Session, row: QualityRunRow) -> QualityRun:
         version_id=parse_entity_id(row.version_id),
         status=QualityRunStatus(row.status),
         rule_version=row.rule_version,
+        schema_version=row.schema_version,
+        content_sha256=row.content_sha256,
         started_at=UtcTimestamp.from_iso(row.started_at),
         ended_at=_timestamp(row.ended_at),
         results=results,
@@ -379,6 +383,17 @@ def _difference_row_values(report: DifferenceReport) -> dict[str, object]:
         "total_compared": report.total_compared,
         "total_differences": report.total_differences,
         "report_relative_path": report.report_relative_path,
+        "primary_batch_id": str(report.primary_batch_id),
+        "fallback_batch_id": str(report.fallback_batch_id),
+        "primary_version_id": str(report.primary_version_id),
+        "fallback_version_id": str(report.fallback_version_id),
+        "primary_content_sha256": report.primary_content_sha256,
+        "fallback_content_sha256": report.fallback_content_sha256,
+        "primary_quality_run_id": str(report.primary_quality_run_id),
+        "fallback_quality_run_id": str(report.fallback_quality_run_id),
+        "sample_spec_sha256": report.sample_spec_sha256,
+        "threshold_rule_version": report.threshold_rule_version,
+        "report_sha256": report.report_sha256,
     }
 
 
@@ -395,6 +410,17 @@ def _difference_domain(row: DifferenceReportRow) -> DifferenceReport:
         total_compared=row.total_compared,
         total_differences=row.total_differences,
         report_relative_path=row.report_relative_path,
+        primary_batch_id=parse_entity_id(row.primary_batch_id),
+        fallback_batch_id=parse_entity_id(row.fallback_batch_id),
+        primary_version_id=parse_entity_id(row.primary_version_id),
+        fallback_version_id=parse_entity_id(row.fallback_version_id),
+        primary_content_sha256=row.primary_content_sha256,
+        fallback_content_sha256=row.fallback_content_sha256,
+        primary_quality_run_id=parse_entity_id(row.primary_quality_run_id),
+        fallback_quality_run_id=parse_entity_id(row.fallback_quality_run_id),
+        sample_spec_sha256=row.sample_spec_sha256,
+        threshold_rule_version=row.threshold_rule_version,
+        report_sha256=row.report_sha256,
     )
 
 
@@ -635,6 +661,7 @@ class DataRepository:
     def save_difference_report(self, report: DifferenceReport) -> DifferenceReport:
         if self._session.get(DatasetVersionRow, str(report.version_id)) is None:
             raise DatasetVersionNotFoundError("difference report dataset version does not exist")
+        self._validate_difference_report_bindings(report)
         row = self._session.get(DifferenceReportRow, str(report.report_id))
         values = _difference_row_values(report)
         if row is None:
@@ -643,6 +670,107 @@ class DataRepository:
             raise InvalidDataTransitionError("difference reports are immutable")
         self._session.flush()
         return report
+
+    def _validate_difference_report_bindings(self, report: DifferenceReport) -> None:
+        """Verify both-side batches, sources, datasets and quality runs exist and match.
+
+        A DifferenceReport must not be persisted if either side references a
+        batch, version or quality run that does not exist or whose source,
+        dataset or version does not match the report's binding. This blocks
+        reports that compare unrelated batches from being committed.
+        """
+        primary_batch = self._session.get(IngestionBatchRow, str(report.primary_batch_id))
+        fallback_batch = self._session.get(IngestionBatchRow, str(report.fallback_batch_id))
+        if primary_batch is None:
+            raise InvalidDataTransitionError(
+                "difference report primary_batch_id does not exist",
+                context={"primary_batch_id": str(report.primary_batch_id)},
+            )
+        if fallback_batch is None:
+            raise InvalidDataTransitionError(
+                "difference report fallback_batch_id does not exist",
+                context={"fallback_batch_id": str(report.fallback_batch_id)},
+            )
+        if primary_batch.source != report.primary_source.value:
+            raise InvalidDataTransitionError(
+                "difference report primary_source does not match primary batch source",
+                context={
+                    "primary_source": report.primary_source.value,
+                    "batch_source": primary_batch.source,
+                },
+            )
+        if fallback_batch.source != report.fallback_source.value:
+            raise InvalidDataTransitionError(
+                "difference report fallback_source does not match fallback batch source",
+                context={
+                    "fallback_source": report.fallback_source.value,
+                    "batch_source": fallback_batch.source,
+                },
+            )
+        if primary_batch.dataset != fallback_batch.dataset:
+            raise InvalidDataTransitionError(
+                "difference report primary and fallback batches must share the same dataset",
+                context={
+                    "primary_dataset": primary_batch.dataset,
+                    "fallback_dataset": fallback_batch.dataset,
+                },
+            )
+        primary_version = self._session.get(DatasetVersionRow, str(report.primary_version_id))
+        fallback_version = self._session.get(DatasetVersionRow, str(report.fallback_version_id))
+        if primary_version is None:
+            raise InvalidDataTransitionError(
+                "difference report primary_version_id does not exist",
+                context={"primary_version_id": str(report.primary_version_id)},
+            )
+        if fallback_version is None:
+            raise InvalidDataTransitionError(
+                "difference report fallback_version_id does not exist",
+                context={"fallback_version_id": str(report.fallback_version_id)},
+            )
+        if primary_version.dataset != primary_batch.dataset:
+            raise InvalidDataTransitionError(
+                "difference report primary_version dataset does not match primary batch dataset",
+                context={
+                    "version_dataset": primary_version.dataset,
+                    "batch_dataset": primary_batch.dataset,
+                },
+            )
+        if fallback_version.dataset != fallback_batch.dataset:
+            raise InvalidDataTransitionError(
+                "difference report fallback_version dataset does not match fallback batch dataset",
+                context={
+                    "version_dataset": fallback_version.dataset,
+                    "batch_dataset": fallback_batch.dataset,
+                },
+            )
+        primary_run = self._session.get(QualityRunRow, str(report.primary_quality_run_id))
+        fallback_run = self._session.get(QualityRunRow, str(report.fallback_quality_run_id))
+        if primary_run is None:
+            raise InvalidDataTransitionError(
+                "difference report primary_quality_run_id does not exist",
+                context={"primary_quality_run_id": str(report.primary_quality_run_id)},
+            )
+        if fallback_run is None:
+            raise InvalidDataTransitionError(
+                "difference report fallback_quality_run_id does not exist",
+                context={"fallback_quality_run_id": str(report.fallback_quality_run_id)},
+            )
+        if str(primary_run.version_id) != str(report.primary_version_id):
+            raise InvalidDataTransitionError(
+                "difference report primary_quality_run_id is not bound to primary_version_id",
+                context={
+                    "quality_run_version_id": str(primary_run.version_id),
+                    "primary_version_id": str(report.primary_version_id),
+                },
+            )
+        if str(fallback_run.version_id) != str(report.fallback_version_id):
+            raise InvalidDataTransitionError(
+                "difference report fallback_quality_run_id is not bound to fallback_version_id",
+                context={
+                    "quality_run_version_id": str(fallback_run.version_id),
+                    "fallback_version_id": str(report.fallback_version_id),
+                },
+            )
 
     def get_difference_report(self, report_id: str) -> DifferenceReport:
         row = self._session.get(DifferenceReportRow, report_id)
@@ -708,6 +836,15 @@ class DataRepository:
             or fallback.status not in {"SUCCEEDED", "PARTIAL"}
         ):
             raise OverrideNotApplicableError("override source or batch lineage is inconsistent")
+        # The override's primary/fallback batches must match the difference
+        # report's bindings; an override cannot be bound to a report that
+        # compared different batches.
+        if str(report_row.primary_batch_id) != str(override.primary_batch_id) or str(
+            report_row.fallback_batch_id
+        ) != str(override.fallback_batch_id):
+            raise OverrideNotApplicableError(
+                "override batches must match the difference report's compared batches"
+            )
 
     def approve_override(self, override_id: str, *, actor: str, at: UtcTimestamp) -> SourceOverride:
         return self._decide_override(

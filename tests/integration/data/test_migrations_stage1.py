@@ -27,7 +27,7 @@ STAGE1_TABLES = {
     "source_overrides",
 }
 STAGE0_TABLES = {"job_runs", "job_dependencies", "job_events", "audit_records"}
-HEAD = "20260716_0003"
+HEAD = "20260716_0005"
 
 
 def _alembic_config(database: Path) -> Config:
@@ -162,3 +162,134 @@ def test_append_only_audit_trigger_remains_active(tmp_path: Path) -> None:
         connection.commit()
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute("DELETE FROM audit_records")
+
+
+# ---------------------------------------------------------------------------
+# S1-04: quality gate migration head and trigger enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_new_database_initializes_to_quality_gate_head(tmp_path: Path) -> None:
+    database = tmp_path / "s1_04.db"
+    initialize_database(database)
+    assert _revision(database) == HEAD
+
+
+def test_stage0_revision_upgrades_to_quality_gate_head(tmp_path: Path) -> None:
+    database = tmp_path / "s1_04_upgrade.db"
+    _reserve_new_database(database)
+    _upgrade(database, "20260715_0001")
+    _upgrade(database, "20260716_0003")
+    assert _revision(database) == "20260716_0003"
+    _upgrade(database)
+    assert _revision(database) == HEAD
+
+
+def test_stage1_r2_revision_upgrades_to_quality_gate_head(tmp_path: Path) -> None:
+    database = tmp_path / "s1_04_from_r2.db"
+    _reserve_new_database(database)
+    _upgrade(database, "20260716_0003")
+    _upgrade(database)
+    assert _revision(database) == HEAD
+
+
+def test_quality_gate_trigger_blocks_published_without_passed_quality_run(
+    tmp_path: Path,
+) -> None:
+    """A direct SQL UPDATE to PUBLISHED must raise when no PASSED run exists."""
+    database = tmp_path / "gate.db"
+    initialize_database(database)
+    version_id = "data_version:55555555-5555-4555-8555-555555555555"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO dataset_versions (version_id, dataset, status, "
+            "schema_version, code_version, rule_version, parent_version_id, "
+            "input_batch_ids_json, created_at, validated_at, published_at, "
+            "manifest_sha256, security_count, row_count, coverage_start, "
+            "coverage_end, coverage_summary_json, failure_json) "
+            "VALUES (?, ?, 'VALIDATED', ?, ?, ?, NULL, '[]', ?, ?, NULL, "
+            "?, 1, 1, '2026-07-15', '2026-07-15', "
+            '\'{"date_count":"1","row_count":"1",'
+            '"security_count":"1","first_date":"2026-07-15",'
+            '"last_date":"2026-07-15"}\', NULL)',
+            (
+                version_id,
+                "daily_bar_unadjusted",
+                "daily_bar_unadjusted.v1",
+                "s1-04",
+                "quality-rules.v1",
+                "2026-07-20T00:00:00Z",
+                "2026-07-20T00:01:00Z",
+                "a" * 64,
+            ),
+        )
+        connection.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE dataset_versions SET status='PUBLISHED', "
+                "published_at='2026-07-20T00:02:00Z' WHERE version_id=?",
+                (version_id,),
+            )
+
+
+def test_quality_gate_trigger_allows_published_with_passed_quality_run(
+    tmp_path: Path,
+) -> None:
+    """A direct SQL UPDATE to PUBLISHED must succeed when a PASSED run matches."""
+    database = tmp_path / "gate_pass.db"
+    initialize_database(database)
+    version_id = "data_version:66666666-6666-4666-8666-666666666666"
+    run_id = "data_quality:77777777-7777-4777-8777-777777777777"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO dataset_versions (version_id, dataset, status, "
+            "schema_version, code_version, rule_version, parent_version_id, "
+            "input_batch_ids_json, created_at, validated_at, published_at, "
+            "manifest_sha256, security_count, row_count, coverage_start, "
+            "coverage_end, coverage_summary_json, failure_json) "
+            "VALUES (?, ?, 'VALIDATED', ?, ?, ?, NULL, '[]', ?, ?, NULL, "
+            "?, 1, 1, '2026-07-15', '2026-07-15', "
+            '\'{"date_count":"1","row_count":"1",'
+            '"security_count":"1","first_date":"2026-07-15",'
+            '"last_date":"2026-07-15"}\', NULL)',
+            (
+                version_id,
+                "daily_bar_unadjusted",
+                "daily_bar_unadjusted.v1",
+                "s1-04",
+                "quality-rules.v1",
+                "2026-07-20T00:00:00Z",
+                "2026-07-20T00:01:00Z",
+                "a" * 64,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO quality_runs (run_id, version_id, status, rule_version, "
+            "schema_version, content_sha256, "
+            "started_at, ended_at, results_json, summary_report_relative_path, "
+            "failure_json) VALUES (?, ?, 'PASSED', ?, ?, ?, ?, ?, "
+            '\'[{"rule_code":"schema_conformance","passed":1,'
+            '"affected_count":0,"summary":"ok",'
+            '"report_relative_path":null}]\', NULL, NULL)',
+            (
+                run_id,
+                version_id,
+                "quality-rules.v1",
+                "daily_bar_unadjusted.v1",
+                "a" * 64,
+                "2026-07-20T00:00:30Z",
+                "2026-07-20T00:00:40Z",
+            ),
+        )
+        connection.commit()
+        # Should succeed because a PASSED quality run exists.
+        connection.execute(
+            "UPDATE dataset_versions SET status='PUBLISHED', "
+            "published_at='2026-07-20T00:02:00Z' WHERE version_id=?",
+            (version_id,),
+        )
+        connection.commit()
+        row = connection.execute(
+            "SELECT status FROM dataset_versions WHERE version_id=?", (version_id,)
+        ).fetchone()
+        assert row == ("PUBLISHED",)

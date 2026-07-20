@@ -140,6 +140,8 @@ class QualityRunRow(Base):
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     rule_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     started_at: Mapped[str] = mapped_column(String(40), nullable=False)
     ended_at: Mapped[str | None] = mapped_column(String(40))
     results_json: Mapped[str] = mapped_column(Text, nullable=False)
@@ -169,7 +171,11 @@ class QualityResultRow(Base):
 
 class DifferenceReportRow(Base):
     __tablename__ = "difference_reports"
-    __table_args__ = (Index("ix_difference_reports_version", "version_id"),)
+    __table_args__ = (
+        Index("ix_difference_reports_version", "version_id"),
+        Index("ix_difference_reports_primary_batch", "primary_batch_id"),
+        Index("ix_difference_reports_fallback_batch", "fallback_batch_id"),
+    )
 
     report_id: Mapped[str] = mapped_column(String(96), primary_key=True)
     version_id: Mapped[str] = mapped_column(
@@ -182,6 +188,29 @@ class DifferenceReportRow(Base):
     total_compared: Mapped[int] = mapped_column(Integer, nullable=False)
     total_differences: Mapped[int] = mapped_column(Integer, nullable=False)
     report_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    primary_batch_id: Mapped[str] = mapped_column(
+        ForeignKey("ingestion_batches.batch_id", ondelete="RESTRICT"), nullable=False
+    )
+    fallback_batch_id: Mapped[str] = mapped_column(
+        ForeignKey("ingestion_batches.batch_id", ondelete="RESTRICT"), nullable=False
+    )
+    primary_version_id: Mapped[str] = mapped_column(
+        ForeignKey("dataset_versions.version_id", ondelete="RESTRICT"), nullable=False
+    )
+    fallback_version_id: Mapped[str] = mapped_column(
+        ForeignKey("dataset_versions.version_id", ondelete="RESTRICT"), nullable=False
+    )
+    primary_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    fallback_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    primary_quality_run_id: Mapped[str] = mapped_column(
+        ForeignKey("quality_runs.run_id", ondelete="RESTRICT"), nullable=False
+    )
+    fallback_quality_run_id: Mapped[str] = mapped_column(
+        ForeignKey("quality_runs.run_id", ondelete="RESTRICT"), nullable=False
+    )
+    sample_spec_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    threshold_rule_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    report_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
 class SourceOverrideRow(Base):

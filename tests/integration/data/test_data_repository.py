@@ -127,6 +127,49 @@ def _persist_override_graph(
     primary = _succeeded_batch(source=DataSource.XTQUANT)
     fallback = _succeeded_batch(source=DataSource.BAOSTOCK)
     compared_version = _building_version((primary.batch_id,))
+    fallback_version = _building_version((fallback.batch_id,))
+    primary_quality_run = QualityRun(
+        run_id=new_entity_id("data_quality"),
+        version_id=compared_version.version_id,
+        status=QualityRunStatus.PASSED,
+        rule_version="quality-rules.v1",
+        schema_version="daily_bar_unadjusted.v1",
+        content_sha256="a" * 64,
+        started_at=_NOW,
+        ended_at=_DECIDED,
+        results=(
+            QualityResult(
+                rule_code="schema_exact",
+                passed=True,
+                affected_count=0,
+                summary="exact schema",
+                report_relative_path=None,
+            ),
+        ),
+        summary_report_relative_path=None,
+        failure=None,
+    )
+    fallback_quality_run = QualityRun(
+        run_id=new_entity_id("data_quality"),
+        version_id=fallback_version.version_id,
+        status=QualityRunStatus.PASSED,
+        rule_version="quality-rules.v1",
+        schema_version="daily_bar_unadjusted.v1",
+        content_sha256="b" * 64,
+        started_at=_NOW,
+        ended_at=_DECIDED,
+        results=(
+            QualityResult(
+                rule_code="schema_exact",
+                passed=True,
+                affected_count=0,
+                summary="exact schema",
+                report_relative_path=None,
+            ),
+        ),
+        summary_report_relative_path=None,
+        failure=None,
+    )
     report = DifferenceReport(
         report_id=new_entity_id("data_diff"),
         version_id=compared_version.version_id,
@@ -137,6 +180,17 @@ def _persist_override_graph(
         total_compared=100,
         total_differences=1,
         report_relative_path="reports/diff.json",
+        primary_batch_id=primary.batch_id,
+        fallback_batch_id=fallback.batch_id,
+        primary_version_id=compared_version.version_id,
+        fallback_version_id=fallback_version.version_id,
+        primary_content_sha256="a" * 64,
+        fallback_content_sha256="b" * 64,
+        primary_quality_run_id=primary_quality_run.run_id,
+        fallback_quality_run_id=fallback_quality_run.run_id,
+        sample_spec_sha256="c" * 64,
+        threshold_rule_version="comparison-thresholds.v1",
+        report_sha256="d" * 64,
     )
     override = SourceOverride.pending(
         override_id=new_entity_id("data_override"),
@@ -156,6 +210,9 @@ def _persist_override_graph(
         uow.data.save_batch(primary)
         uow.data.save_batch(fallback)
         uow.data.save_version(compared_version)
+        uow.data.save_version(fallback_version)
+        uow.data.save_quality_run(primary_quality_run)
+        uow.data.save_quality_run(fallback_quality_run)
         uow.data.save_difference_report(report)
         uow.data.save_override(override)
         uow.commit()
@@ -270,6 +327,8 @@ class TestQualityAndDifferencePersistence:
             version_id=version.version_id,
             status=QualityRunStatus.PASSED,
             rule_version="quality-rules.v1",
+            schema_version="daily_bar_unadjusted.v1",
+            content_sha256="a" * 64,
             started_at=_NOW,
             ended_at=_DECIDED,
             results=(
@@ -307,11 +366,55 @@ class TestQualityAndDifferencePersistence:
     def test_difference_report_save_read_and_query(
         self, factory: DataSqliteUnitOfWorkFactory
     ) -> None:
-        batch = _succeeded_batch()
-        version = _building_version((batch.batch_id,))
+        primary_batch = _succeeded_batch(source=DataSource.XTQUANT)
+        fallback_batch = _succeeded_batch(source=DataSource.BAOSTOCK)
+        primary_version = _building_version((primary_batch.batch_id,))
+        fallback_version = _building_version((fallback_batch.batch_id,))
+        primary_quality_run = QualityRun(
+            run_id=new_entity_id("data_quality"),
+            version_id=primary_version.version_id,
+            status=QualityRunStatus.PASSED,
+            rule_version="quality-rules.v1",
+            schema_version="daily_bar_unadjusted.v1",
+            content_sha256="a" * 64,
+            started_at=_NOW,
+            ended_at=_DECIDED,
+            results=(
+                QualityResult(
+                    rule_code="schema_exact",
+                    passed=True,
+                    affected_count=0,
+                    summary="exact schema",
+                    report_relative_path=None,
+                ),
+            ),
+            summary_report_relative_path=None,
+            failure=None,
+        )
+        fallback_quality_run = QualityRun(
+            run_id=new_entity_id("data_quality"),
+            version_id=fallback_version.version_id,
+            status=QualityRunStatus.PASSED,
+            rule_version="quality-rules.v1",
+            schema_version="daily_bar_unadjusted.v1",
+            content_sha256="b" * 64,
+            started_at=_NOW,
+            ended_at=_DECIDED,
+            results=(
+                QualityResult(
+                    rule_code="schema_exact",
+                    passed=True,
+                    affected_count=0,
+                    summary="exact schema",
+                    report_relative_path=None,
+                ),
+            ),
+            summary_report_relative_path=None,
+            failure=None,
+        )
         report = DifferenceReport(
             report_id=new_entity_id("data_diff"),
-            version_id=version.version_id,
+            version_id=primary_version.version_id,
             primary_source=DataSource.XTQUANT,
             fallback_source=DataSource.BAOSTOCK,
             created_at=_DECIDED,
@@ -319,16 +422,31 @@ class TestQualityAndDifferencePersistence:
             total_compared=100,
             total_differences=3,
             report_relative_path="reports/diff.json",
+            primary_batch_id=primary_batch.batch_id,
+            fallback_batch_id=fallback_batch.batch_id,
+            primary_version_id=primary_version.version_id,
+            fallback_version_id=fallback_version.version_id,
+            primary_content_sha256="a" * 64,
+            fallback_content_sha256="b" * 64,
+            primary_quality_run_id=primary_quality_run.run_id,
+            fallback_quality_run_id=fallback_quality_run.run_id,
+            sample_spec_sha256="c" * 64,
+            threshold_rule_version="comparison-thresholds.v1",
+            report_sha256="d" * 64,
         )
         with factory() as uow:
-            uow.data.save_batch(batch)
-            uow.data.save_version(version)
+            uow.data.save_batch(primary_batch)
+            uow.data.save_batch(fallback_batch)
+            uow.data.save_version(primary_version)
+            uow.data.save_version(fallback_version)
+            uow.data.save_quality_run(primary_quality_run)
+            uow.data.save_quality_run(fallback_quality_run)
             uow.data.save_difference_report(report)
             uow.commit()
         with factory() as uow:
             assert uow.data.get_difference_report(str(report.report_id)) == report
             assert uow.data.list_difference_reports(
-                version_id=str(version.version_id), primary_source=DataSource.XTQUANT
+                version_id=str(primary_version.version_id), primary_source=DataSource.XTQUANT
             ) == [report]
 
 

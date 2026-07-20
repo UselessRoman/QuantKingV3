@@ -5,7 +5,8 @@
 [S1-01 主验收证据](S1-01_ACCEPTANCE.md)。
 S1-02 已于 2026-07-18 在提交 `79f9fa3e682e212cf74e7886a04c6fb52158f302`
 完成主验收，证据见 [S1-02 主验收证据](S1-02_ACCEPTANCE.md)。S1-03-R1 修复中/待主验收。
-S1-04～S1-08 未开始、未获授权。
+S1-04 离线实现已提交、待主验收；用户已例外授权离线推进，但真实备用源验证仍须逐项授权。
+S1-05～S1-08 未开始、未获授权。
 
 阶段状态只能由实际验收证据驱动。文档存在、代码提交或单次演示均不能单独证明阶段完成。
 
@@ -76,8 +77,27 @@ S1-03-R1 修复中/待主验收。当前离线门禁不得写成已经通过主�
 真实 XTQuant 样本、QMT 或网络能力没有在本任务中验证。五类未充分证实的数据能力仍是独立显式缺口，
 不能由合成测试消除；是否阻断 S1-03 主验收由主验收 Agent 判定。
 
-## S1-04～S1-08 验收
+## S1-04 验收标准
 
-按主验收 Agent 下发的顺序依次为 XTQuant、质量/跨源/override、EOD/Worker/CLI/API、
+S1-04 离线实现已提交、待主验收。当前离线门禁不得写成已经通过主验收：
+
+| 验收项 | 状态 | 证据 |
+|---|---|---|
+| 单源质量规则执行器、`PASSED`/`FAILED`/`SKIPPED` 终态与质量门触发器 | 待主验收 | `data/quality/`；`20260716_0004`；`test_quality_engine.py` |
+| 跨源比较器、字段级阈值、确定性 `report_id` 与双方绑定 | 待主验收 | `data/comparison/`；`test_cross_source_comparison.py` |
+| 差异报告双方 batches/versions/quality_runs 绑定与触发器增强 | 待主验收 | `20260716_0005`；`test_difference_reports.py` |
+| 备用源候选评估：合成证据不得标 `PRODUCTION_READY`，阻塞原因必填 | 待主验收 | `data/assessment/`；`test_source_candidate_assessment.py` |
+| 默认生产矩阵：XTQuant PRIMARY，三个 FALLBACK `BLOCKED_EXTERNAL_VALIDATION`，无自动切换 | 待主验收 | `default_source_matrix()`；`SOURCE_MATRIX.md` |
+| SourceOverride 创建/审批/拒绝/应用失败路径与审计事务 | 待主验收 | `data/override/`；`test_source_override_*.py` |
+| `apply_override` 完整工作流（直接子版本+质量门重跑+原子发布+APPLIED） | 未实现 | 延后到 CanonicalWarehouse/QualityEngine/PublishCoordinator 联调阶段 |
+| 真实备用源（BAOSTOCK/AKSHARE/TUSHARE）外部验证 | 未授权 | 须在 S1-07 或专项验收逐项授权 |
+| 默认门禁无网络、QMT、正式根和真实供应商访问 | 待主验收 | 离线守卫；未运行 `real_*` |
+
+合成测试不构成真实备用源能力证明；真实 XTQuant 样本验证仍须逐项授权；合成数据不能标生产可用。
+S1-04 离线实现已提交、待主验收；离线测试通过不等于主验收通过。
+
+## S1-05～S1-08 验收
+
+按主验收 Agent 下发的顺序依次为 EOD/Worker/CLI/API、
 数据中心 Web、经授权真实样本与旧数据判定、真实或明确范围 Canonical 构建
 及 Stage 1 最终验收。待逐项授权和完成后填写，详见 [任务卡](TASKS.md)。

@@ -602,6 +602,8 @@ class QualityRun:
     version_id: EntityId
     status: QualityRunStatus
     rule_version: str
+    schema_version: str
+    content_sha256: str
     started_at: UtcTimestamp
     ended_at: UtcTimestamp | None
     results: tuple[QualityResult, ...]
@@ -616,6 +618,10 @@ class QualityRun:
         if not isinstance(self.status, QualityRunStatus):
             raise TypeError("status must be a QualityRunStatus")
         _text(self.rule_version, field="rule_version")
+        _text(self.schema_version, field="schema_version")
+        object.__setattr__(
+            self, "content_sha256", _sha256(self.content_sha256, field="content_sha256")
+        )
         if not isinstance(self.started_at, UtcTimestamp):
             raise TypeError("started_at must be a UtcTimestamp")
         if self.ended_at is not None and not isinstance(self.ended_at, UtcTimestamp):
@@ -654,7 +660,15 @@ class QualityRun:
 
 @dataclass(frozen=True, slots=True)
 class DifferenceReport:
-    """Cross-source difference summary; row-level detail lives in a managed report file."""
+    """Cross-source difference summary; row-level detail lives in a managed report file.
+
+    The report binds to both-side batches, sources, datasets, version IDs,
+    content SHAs, quality-run IDs, sample spec, threshold rule version and
+    a deterministic row-level report SHA-256 so the SQLite repository can
+    verify both-side lineage and quality evidence before persisting. The
+    ``report_relative_path`` points at the managed, immutable artifact
+    directory produced by the DifferenceReport writer.
+    """
 
     report_id: EntityId
     version_id: EntityId
@@ -665,6 +679,17 @@ class DifferenceReport:
     total_compared: int
     total_differences: int
     report_relative_path: str
+    primary_batch_id: EntityId
+    fallback_batch_id: EntityId
+    primary_version_id: EntityId
+    fallback_version_id: EntityId
+    primary_content_sha256: str
+    fallback_content_sha256: str
+    primary_quality_run_id: EntityId
+    fallback_quality_run_id: EntityId
+    sample_spec_sha256: str
+    threshold_rule_version: str
+    report_sha256: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.report_id, EntityId) or self.report_id.namespace != "data_diff":
@@ -677,6 +702,38 @@ class DifferenceReport:
             raise TypeError("fallback_source must be a DataSource")
         if self.primary_source == self.fallback_source:
             raise ValueError("primary and fallback sources must differ")
+        for field_name, namespace in (
+            ("primary_batch_id", "data_batch"),
+            ("fallback_batch_id", "data_batch"),
+            ("primary_version_id", "data_version"),
+            ("fallback_version_id", "data_version"),
+            ("primary_quality_run_id", "data_quality"),
+            ("fallback_quality_run_id", "data_quality"),
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, EntityId) or value.namespace != namespace:
+                raise ValueError(f"{field_name} must use the {namespace} namespace")
+        if self.primary_batch_id == self.fallback_batch_id:
+            raise ValueError("primary_batch_id and fallback_batch_id must differ")
+        if self.primary_version_id == self.fallback_version_id:
+            raise ValueError("primary_version_id and fallback_version_id must differ")
+        if self.primary_quality_run_id == self.fallback_quality_run_id:
+            raise ValueError("primary_quality_run_id and fallback_quality_run_id must differ")
+        sha256_fields = (
+            "primary_content_sha256",
+            "fallback_content_sha256",
+            "sample_spec_sha256",
+            "report_sha256",
+        )
+        for field_name in sha256_fields:
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or len(value) != 64:
+                raise ValueError(f"{field_name} must be a 64-character hex string")
+        if (
+            not isinstance(self.threshold_rule_version, str)
+            or not self.threshold_rule_version.strip()
+        ):
+            raise ValueError("threshold_rule_version must be non-empty text")
         object.__setattr__(
             self,
             "field_differences",

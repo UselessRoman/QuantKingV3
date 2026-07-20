@@ -21,6 +21,7 @@ All tests use only ``tmp_path`` and synthetic data.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -55,6 +56,9 @@ from quantking.data.models import (
     DatasetKind,
     DatasetVersion,
     DatasetVersionStatus,
+    QualityResult,
+    QualityRun,
+    QualityRunStatus,
     transition_dataset_version,
 )
 from quantking.jobs.adapters.persistence.sqlite import initialize_database
@@ -153,6 +157,111 @@ def _publish(
     )
 
 
+def _calendar_table() -> pa.Table:
+    """Build an exchange_calendar reference table covering the test rows."""
+    table = pa.Table.from_pylist(
+        [
+            {"exchange": "SZ", "trade_date": date(2026, 7, 14), "is_open": True},
+            {"exchange": "SZ", "trade_date": date(2026, 7, 15), "is_open": True},
+            {"exchange": "SZ", "trade_date": date(2026, 7, 16), "is_open": True},
+            {"exchange": "SH", "trade_date": date(2026, 7, 15), "is_open": True},
+            {"exchange": "SH", "trade_date": date(2026, 7, 16), "is_open": True},
+        ]
+    )
+    descriptor = canonical_schema("exchange_calendar")
+    columns: list[pa.Array] = []
+    fields: list[pa.Field] = []
+    for field in descriptor:
+        columns.append(table.column(field.name).cast(field.type, safe=False))
+        fields.append(pa.field(field.name, field.type, nullable=field.nullable))
+    return pa.Table.from_arrays(columns, schema=pa.schema(fields))
+
+
+def _compute_content_sha(table: pa.Table) -> str:
+    """Compute a deterministic SHA-256 of the publishable data."""
+    buffer = io.BytesIO()
+    pa.parquet.write_table(table, buffer, compression="snappy")  # type: ignore[no-untyped-call]
+    return hashlib.sha256(buffer.getvalue()).hexdigest()
+
+
+def _make_passed_quality_run(
+    version: DatasetVersion,
+    table: pa.Table,
+    *,
+    uow_factory: DataSqliteUnitOfWorkFactory,
+    artifacts_root: Path,
+) -> QualityRun:
+    """Build, persist and artifact-write a PASSED QualityRun for the version."""
+    from quantking.data.quality.artifacts import QualityArtifactWriter
+    from quantking.data.quality.engine import QualityEngine
+    from quantking.data.quality.models import (
+        QualityRequest,
+        ReferenceDataBinding,
+        RuleOutcomeStatus,
+    )
+    from quantking.data.quality.rules import default_rule_set
+
+    request = QualityRequest(
+        dataset=version.dataset,
+        version_id=version.version_id,
+        rule_version=version.rule_version,
+        schema_version=version.schema_version,
+        code_version=version.code_version,
+        content_sha256=_compute_content_sha(table),
+        input_batch_ids=version.input_batch_ids,
+        expected_securities=("000001.SZ", "600000.SH"),
+        expected_exchanges=("SZ", "SH"),
+        coverage_start=TradingDate(date(2026, 7, 14)),
+        coverage_end=TradingDate(date(2026, 7, 16)),
+        reference_data={
+            "exchange_calendar": ReferenceDataBinding(
+                dataset=DatasetKind.EXCHANGE_CALENDAR,
+                version_id=new_entity_id("data_version"),
+                content_sha256="b" * 64,
+            )
+        },
+        empty_result=None,
+    )
+    engine = QualityEngine(rule_set=default_rule_set())
+    outcome = engine.execute(
+        request=request,
+        table=table,
+        reference_tables={"exchange_calendar": _calendar_table()},
+    )
+    assert outcome.status is QualityRunStatus.PASSED
+    writer = QualityArtifactWriter(artifacts_root=artifacts_root)
+    writer.write(outcome=outcome, row_evidence_tables={})
+    results = tuple(
+        QualityResult(
+            rule_code=result.rule_code,
+            passed=result.status is RuleOutcomeStatus.PASSED,
+            affected_count=result.affected_count,
+            summary=result.summary,
+            report_relative_path=result.row_evidence_relative_path,
+        )
+        for result in outcome.results
+        if result.status is not RuleOutcomeStatus.SKIPPED
+    )
+    run = QualityRun(
+        run_id=outcome.run_id,
+        version_id=version.version_id,
+        status=QualityRunStatus.PASSED,
+        rule_version=version.rule_version,
+        schema_version=version.schema_version,
+        content_sha256=_compute_content_sha(table),
+        started_at=outcome.started_at,
+        ended_at=outcome.ended_at,  # type: ignore[arg-type]
+        results=results,
+        summary_report_relative_path=None,
+        failure=None,
+    )
+    with uow_factory() as uow:
+        uow.data.save_version(version)
+        uow.data.save_quality_run(run)
+        uow.commit()
+    return run
+
+
 def _publish_and_mark(
     warehouse: CanonicalWarehouse,
     uow_factory: DataSqliteUnitOfWorkFactory,
@@ -161,6 +270,14 @@ def _publish_and_mark(
 ) -> Path:
     landed = _publish(warehouse, version, table=table)
     publishable = table if table is not None else _table()
+    # Persist a PASSED quality run bound to the candidate content so
+    # the SQLite trigger allows the PUBLISHED transition.
+    _make_passed_quality_run(
+        version,
+        publishable,
+        uow_factory=uow_factory,
+        artifacts_root=warehouse.data_root / "artifacts",
+    )
     # Read the actual manifest SHA and coverage from the on-disk
     # manifest so the SQLite DatasetVersion credentials match the
     # disk exactly. The publish coordinator would do the same.
