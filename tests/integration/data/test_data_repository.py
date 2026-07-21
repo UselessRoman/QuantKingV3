@@ -258,6 +258,9 @@ def _persist_override_graph(
         fields=("close",),
         reason="confirmed primary-source gap",
         created_at=_NOW,
+        field_replacements=(
+            {"code": "000001.SZ", "trade_date": str(_TRADE_DATE), "field": "close"},
+        ),
     )
     with factory() as uow:
         uow.data.save_batch(primary)

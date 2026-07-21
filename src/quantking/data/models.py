@@ -23,6 +23,7 @@ from quantking.common.errors import (
 )
 from quantking.common.ids import EntityId
 from quantking.common.time import TradingDate, UtcTimestamp
+from quantking.data.override_scope import contribution_scope_sha256, normalize_override_scope
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -820,28 +821,25 @@ class SourceOverride:
             self, "scope_dates", _tuple_trading_dates(self.scope_dates, field="scope_dates")
         )
         object.__setattr__(self, "fields", _tuple_text(self.fields, field="fields"))
-        for field_name in ("field_replacements", "fallback_only_keys"):
-            raw_units = getattr(self, field_name)
-            if not isinstance(raw_units, tuple):
-                raise TypeError(f"{field_name} must be a tuple")
-            normalized_units: list[Mapping[str, str]] = []
-            seen_units: set[str] = set()
-            for unit in raw_units:
-                if not isinstance(unit, Mapping) or not unit:
-                    raise TypeError(f"{field_name} must contain non-empty mappings")
-                normalized = {
-                    str(key): str(value)
-                    for key, value in sorted(unit.items())
-                    if str(key).strip() and str(value).strip()
-                }
-                if len(normalized) != len(unit):
-                    raise ValueError(f"{field_name} contains an empty key or value")
-                serialized = json.dumps(normalized, separators=(",", ":"), sort_keys=True)
-                if serialized in seen_units:
-                    raise ValueError(f"{field_name} must not contain duplicates")
-                seen_units.add(serialized)
-                normalized_units.append(MappingProxyType(normalized))
-            object.__setattr__(self, field_name, tuple(normalized_units))
+        exact_scope = normalize_override_scope(
+            dataset=self.dataset.value,
+            field_replacements=self.field_replacements,
+            fallback_only_keys=self.fallback_only_keys,
+        )
+        summary = (
+            self.scope_codes,
+            tuple(str(item) for item in self.scope_dates),
+            self.fields,
+        )
+        expected_summary = (
+            exact_scope.scope_codes,
+            exact_scope.scope_dates,
+            exact_scope.fields,
+        )
+        if summary != expected_summary:
+            raise ValueError("SourceOverride summary must exactly equal the exact-scope projection")
+        object.__setattr__(self, "field_replacements", exact_scope.field_replacements)
+        object.__setattr__(self, "fallback_only_keys", exact_scope.fallback_only_keys)
         _text(self.reason, field="reason")
         if not isinstance(self.created_at, UtcTimestamp):
             raise TypeError("created_at must be a UtcTimestamp")
@@ -924,6 +922,25 @@ class SourceOverride:
             field_replacements=field_replacements,
             fallback_only_keys=fallback_only_keys,
         )
+
+    @property
+    def exact_scope_sha256(self) -> str:
+        """SHA-256 of the normalized authoritative exact scope."""
+        return normalize_override_scope(
+            dataset=self.dataset.value,
+            field_replacements=self.field_replacements,
+            fallback_only_keys=self.fallback_only_keys,
+        ).sha256
+
+    @property
+    def contribution_scope_sha256(self) -> str:
+        """Manifest contribution SHA derived from the authoritative exact scope."""
+        scope = normalize_override_scope(
+            dataset=self.dataset.value,
+            field_replacements=self.field_replacements,
+            fallback_only_keys=self.fallback_only_keys,
+        )
+        return contribution_scope_sha256(dataset=self.dataset.value, scope=scope)
 
 
 # ---------------------------------------------------------------------------

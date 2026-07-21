@@ -47,6 +47,7 @@ from quantking.data.models import (
     SourceOverride,
     SourceOverrideStatus,
 )
+from quantking.data.override_scope import infer_request_scope, normalize_override_scope
 from quantking.data.quality.artifacts import QualityArtifactWriter
 from quantking.data.quality.engine import QualityEngine
 from quantking.data.quality.models import QualityRequest, RuleOutcomeStatus
@@ -60,9 +61,6 @@ from quantking.data.schemas import DatasetSchemaDescriptor, descriptor_for
 
 _ALL_FIELD_NAMES: frozenset[str] = frozenset().union(
     *(set(descriptor.field_names) for descriptor in DatasetSchemaDescriptor.all())
-)
-_ALL_PRIMARY_KEY_FIELDS: frozenset[str] = frozenset().union(
-    *(set(descriptor.primary_key) for descriptor in DatasetSchemaDescriptor.all())
 )
 _APPLICATION_LOCKS: dict[str, threading.Lock] = {}
 _APPLICATION_LOCKS_GUARD = threading.Lock()
@@ -115,10 +113,6 @@ def _validate_fields(value: tuple[str, ...], *, allow_empty: bool = False) -> tu
     for field_name in normalized:
         if field_name not in _ALL_FIELD_NAMES:
             raise ValueError(f"override field {field_name!r} is not a known canonical field")
-        if field_name in _ALL_PRIMARY_KEY_FIELDS:
-            raise ValueError(
-                f"override field {field_name!r} is a primary key and cannot be replaced"
-            )
     return normalized
 
 
@@ -183,26 +177,24 @@ class CreateOverrideRequest:
             _tuple_trading_dates_unique(self.scope_dates, field_name="scope_dates"),
         )
         object.__setattr__(self, "fields", _validate_fields(self.fields, allow_empty=True))
-        for field_name in ("field_replacements", "fallback_only_keys"):
-            value = getattr(self, field_name)
-            if not isinstance(value, tuple):
-                raise TypeError(f"{field_name} must be a tuple")
-            normalized: list[dict[str, str]] = []
-            seen: set[str] = set()
-            for unit in value:
-                if not isinstance(unit, Mapping) or not unit:
-                    raise TypeError(f"{field_name} must contain non-empty mappings")
-                item = {str(key): str(raw) for key, raw in sorted(unit.items())}
-                if any(not key.strip() or not raw.strip() for key, raw in item.items()):
-                    raise ValueError(f"{field_name} contains an empty key or value")
-                identity = json.dumps(item, separators=(",", ":"), sort_keys=True)
-                if identity in seen:
-                    raise ValueError(f"{field_name} must not contain duplicates")
-                seen.add(identity)
-                normalized.append(item)
-            object.__setattr__(self, field_name, tuple(normalized))
-        if not self.field_replacements and not self.fallback_only_keys:
-            raise ValueError("override request must approve at least one exact difference unit")
+        exact_scope = infer_request_scope(
+            field_replacements=self.field_replacements,
+            fallback_only_keys=self.fallback_only_keys,
+        )
+        summary = (
+            self.scope_codes,
+            tuple(str(item) for item in self.scope_dates),
+            self.fields,
+        )
+        expected_summary = (
+            exact_scope.scope_codes,
+            exact_scope.scope_dates,
+            exact_scope.fields,
+        )
+        if summary != expected_summary:
+            raise ValueError("request summary must exactly equal the exact-scope projection")
+        object.__setattr__(self, "field_replacements", exact_scope.field_replacements)
+        object.__setattr__(self, "fallback_only_keys", exact_scope.fallback_only_keys)
         _text(self.reason, field_name="reason")
 
 
@@ -266,6 +258,19 @@ class SourceOverrideService:
             self._require_verified_report_matches_database(
                 verified=verified, report=report, dataset=version.dataset.value
             )
+            exact_scope = normalize_override_scope(
+                dataset=version.dataset.value,
+                field_replacements=request.field_replacements,
+                fallback_only_keys=request.fallback_only_keys,
+            )
+            if (
+                request.scope_codes,
+                tuple(str(item) for item in request.scope_dates),
+                request.fields,
+            ) != (exact_scope.scope_codes, exact_scope.scope_dates, exact_scope.fields):
+                raise OverrideNotApplicableError(
+                    "request summary does not match the dataset exact-scope projection"
+                )
             field_replacements = self._resolve_field_replacements(verified, request)
             fallback_only_keys = self._resolve_fallback_only_keys(verified, request)
             if not field_replacements and not fallback_only_keys:
@@ -722,6 +727,11 @@ class SourceOverrideService:
         payload = {
             "override_id": str(current.override_id),
             "report_sha256": report.report_sha256,
+            "exact_scope": {
+                "field_replacements": [dict(item) for item in current.field_replacements],
+                "fallback_only_keys": [dict(item) for item in current.fallback_only_keys],
+            },
+            "exact_scope_sha256": current.exact_scope_sha256,
             "quality": quality,
         }
         return compute_sha256(
@@ -775,14 +785,7 @@ class SourceOverrideService:
             ),
             "affected_primary_key_count": str(len(contributions)),
         }
-        contribution_sha = compute_sha256(
-            json.dumps(
-                {"contributions": contributions, "summary": summary},
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-        )
+        contribution_sha = override.contribution_scope_sha256
         return {
             "override_id": str(override.override_id),
             "difference_report_id": str(report.report_id),

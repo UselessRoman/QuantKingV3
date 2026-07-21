@@ -70,7 +70,7 @@ def test_r5_migration_keeps_0007_historical_and_adds_unique_0008_head(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "r5_migration.db"
-    _run_migration(database, "upgrade", "head")
+    _run_migration(database, "upgrade", R5_HEAD)
     assert _revision(database) == R5_HEAD
 
     # 0007 must remain the historical R3 table-only migration; the R5

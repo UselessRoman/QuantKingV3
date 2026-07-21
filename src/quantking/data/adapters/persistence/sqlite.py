@@ -537,6 +537,8 @@ def _override_row_values(override: SourceOverride) -> dict[str, object]:
             separators=(",", ":"),
             sort_keys=True,
         ),
+        "exact_scope_sha256": override.exact_scope_sha256,
+        "contribution_scope_sha256": override.contribution_scope_sha256,
         "reason": override.reason,
         "created_at": override.created_at.to_iso(),
         "approved_at": None if override.approved_at is None else override.approved_at.to_iso(),
@@ -554,7 +556,7 @@ def _override_domain(row: SourceOverrideRow) -> SourceOverride:
     applied_version = (
         None if row.applied_version_id is None else parse_entity_id(row.applied_version_id)
     )
-    return SourceOverride(
+    override = SourceOverride(
         override_id=parse_entity_id(row.override_id),
         dataset=DatasetKind(row.dataset),
         difference_report_id=parse_entity_id(row.difference_report_id),
@@ -581,6 +583,11 @@ def _override_domain(row: SourceOverrideRow) -> SourceOverride:
             for unit in json.loads(row.fallback_only_keys_json)
         ),
     )
+    if row.exact_scope_sha256 != override.exact_scope_sha256:
+        raise OverrideNotApplicableError("persisted exact scope SHA-256 is inconsistent")
+    if row.contribution_scope_sha256 != override.contribution_scope_sha256:
+        raise OverrideNotApplicableError("persisted contribution scope SHA-256 is inconsistent")
+    return override
 
 
 def _override_attempt_domain(

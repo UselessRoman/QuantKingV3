@@ -476,6 +476,66 @@ def _drop_triggers() -> None:
         op.execute(f"DROP TRIGGER IF EXISTS {name}")
 
 
+def _restore_0007_source_override_triggers() -> None:
+    """Restore the complete 0007 trigger set after SQLite batch recreation."""
+    op.execute(
+        "CREATE TRIGGER source_overrides_validate_insert BEFORE INSERT ON source_overrides "
+        "WHEN NEW.status <> 'PENDING' OR NEW.primary_batch_id=NEW.fallback_batch_id OR NOT EXISTS "
+        "(SELECT 1 FROM ingestion_batches p, ingestion_batches f, difference_reports d, "
+        "dataset_versions v WHERE p.batch_id=NEW.primary_batch_id "
+        "AND p.source=NEW.primary_source AND p.dataset=NEW.dataset "
+        "AND f.batch_id=NEW.fallback_batch_id AND f.source=NEW.fallback_source "
+        "AND f.dataset=NEW.dataset AND d.report_id=NEW.difference_report_id "
+        "AND d.primary_source=NEW.primary_source AND d.fallback_source=NEW.fallback_source "
+        "AND d.primary_batch_id=NEW.primary_batch_id "
+        "AND d.fallback_batch_id=NEW.fallback_batch_id "
+        "AND v.version_id=d.version_id AND v.dataset=NEW.dataset) "
+        "BEGIN SELECT RAISE(ABORT, 'source override lineage is inconsistent'); END"
+    )
+    immutable = (
+        "NEW.override_id IS NOT OLD.override_id OR NEW.dataset IS NOT OLD.dataset "
+        "OR NEW.difference_report_id IS NOT OLD.difference_report_id "
+        "OR NEW.primary_batch_id IS NOT OLD.primary_batch_id "
+        "OR NEW.fallback_batch_id IS NOT OLD.fallback_batch_id "
+        "OR NEW.primary_source IS NOT OLD.primary_source "
+        "OR NEW.fallback_source IS NOT OLD.fallback_source "
+        "OR NEW.scope_codes_json IS NOT OLD.scope_codes_json "
+        "OR NEW.scope_dates_json IS NOT OLD.scope_dates_json "
+        "OR NEW.fields_json IS NOT OLD.fields_json OR NEW.reason IS NOT OLD.reason "
+        "OR NEW.created_at IS NOT OLD.created_at "
+    )
+    op.execute(
+        "CREATE TRIGGER source_overrides_pending_transition BEFORE UPDATE ON source_overrides "
+        "WHEN OLD.status='PENDING' AND (NEW.status NOT IN ('APPROVED','REJECTED') OR "
+        f"{immutable}"
+        "OR NEW.approved_at IS NULL OR NEW.approved_by IS NULL "
+        "OR NEW.applied_at IS NOT NULL OR NEW.applied_version_id IS NOT NULL) "
+        "BEGIN SELECT RAISE(ABORT, 'invalid source override decision transition'); END"
+    )
+    op.execute(
+        "CREATE TRIGGER source_overrides_approved_transition BEFORE UPDATE ON source_overrides "
+        "WHEN OLD.status='APPROVED' AND (NEW.status <> 'APPLIED' OR "
+        f"{immutable}"
+        "OR NEW.approved_at IS NOT OLD.approved_at OR NEW.approved_by IS NOT OLD.approved_by "
+        "OR NEW.applied_at IS NULL OR NEW.applied_version_id IS NULL OR NOT EXISTS "
+        "(SELECT 1 FROM dataset_versions v JOIN difference_reports d "
+        "ON d.report_id=OLD.difference_report_id WHERE v.version_id=NEW.applied_version_id "
+        "AND v.dataset=OLD.dataset AND v.status='PUBLISHED' AND v.version_id<>d.version_id "
+        "AND v.parent_version_id=d.primary_version_id AND v.created_at>=OLD.approved_at)) "
+        "BEGIN SELECT RAISE(ABORT, 'approved override requires a published direct child'); END"
+    )
+    op.execute(
+        "CREATE TRIGGER source_overrides_no_update_terminal BEFORE UPDATE ON source_overrides "
+        "WHEN OLD.status IN ('REJECTED','APPLIED') "
+        "BEGIN SELECT RAISE(ABORT, 'terminal source overrides are immutable'); END"
+    )
+    op.execute(
+        "CREATE TRIGGER source_overrides_no_delete_decided BEFORE DELETE ON source_overrides "
+        "WHEN OLD.status IN ('APPROVED','REJECTED','APPLIED') "
+        "BEGIN SELECT RAISE(ABORT, 'decided source overrides are immutable'); END"
+    )
+
+
 def upgrade() -> None:
     _validate_existing_rows()
     op.add_column(
@@ -579,3 +639,4 @@ def downgrade() -> None:
     with op.batch_alter_table("source_overrides", recreate="always") as batch:
         batch.drop_column("fallback_only_keys_json")
         batch.drop_column("field_replacements_json")
+    _restore_0007_source_override_triggers()

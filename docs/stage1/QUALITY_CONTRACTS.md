@@ -1,6 +1,6 @@
 # Stage 1 质量与跨源合同
 
-状态：S1-04-R5 修复已提交、等待主验收。本文件固化 Stage 1 单源质量规则、跨源差异比较和
+状态：S1-04-R6 修复已提交、等待主验收。本文件固化 Stage 1 单源质量规则、跨源差异比较和
 显式 SourceOverride 的可执行合同。权威来源是：
 
 - `src/quantking/data/quality/`（质量规则与执行器）
@@ -8,7 +8,8 @@
 - `src/quantking/data/assessment/`（备用源候选评估与生产矩阵）
 - `src/quantking/data/override/`（SourceOverride 应用服务）
 - `src/quantking/data/models.py`（框架无关领域对象）
-- 迁移 `20260716_0004`（质量门触发器）与 `20260716_0005`（差异报告双方绑定）
+- 迁移 `20260716_0004`（质量门触发器）、`20260716_0005`（差异报告双方绑定）与
+  `20260722_0009`（精确审批范围冻结）
 
 文档不得替代源码与契约测试。合成数据不能标生产可用。
 
@@ -104,9 +105,28 @@ rule_version、evidence_relative_path、evidence_sha256、created_at。
 
 ### 创建验证
 
-`CreateOverrideRequest` 验证：非空 reason、非空且无重复的 scope_codes/scope_dates、已知
-非主键 fields、不同 primary/fallback sources。`SourceOverrideService.create_override` 绑定
-到已验证的 `DifferenceReport`，通过 repository 验证双方 batches/sources/datasets 一致。
+`field_replacements` 与 `fallback_only_keys` 是唯一权威审批范围，分别表示一个
+`FIELD_REPLACEMENT` 单元和一个 `ROW_INSERT` 单元。每个单元按对应 dataset 的
+`DatasetSchemaDescriptor` 验证：
+
+- `FIELD_REPLACEMENT` 完整且仅包含该 dataset 的全部主键和一个合法非主键 `field`；
+- `ROW_INSERT` 完整且仅包含该 dataset 的全部主键；
+- 日期值必须位于该 dataset 的实际日期主键（例如 `trade_date` 或 `effective_from`），采用
+  `YYYY-MM-DD`；
+- 不接受重复单元、空值、非文本值、未知字段、缺失主键或多余字段。
+
+`scope_codes`、`scope_dates`、`fields` 仅为兼容展示的确定性摘要，分别由全部精确单元的
+非日期主键、实际日期主键和 `FIELD_REPLACEMENT.field` 去重排序投影得到。API 请求、
+`SourceOverride.pending`、直接领域构造和 repository 保存都必须拒绝摘要与投影不完全相等的
+输入；摘要不能扩张、缩小或重新解释审批范围。
+
+`CreateOverrideRequest` 还验证非空 reason 和不同 primary/fallback sources。
+`SourceOverrideService.create_override` 将精确单元绑定到已验证的 `DifferenceReport`，并通过
+repository 验证双方 batches/sources/datasets 一致及单元确实存在于报告证据中。
+
+规范化精确范围生成 `exact_scope_sha256`；由同一精确范围生成 manifest contribution 和
+`contribution_scope_sha256`。application `input_fingerprint` 同时包含规范化精确范围、
+`exact_scope_sha256`、report SHA 和质量请求，不能只依赖 override ID。
 
 ### 应用规则
 
@@ -117,12 +137,27 @@ rule_version、evidence_relative_path、evidence_sha256、created_at。
 ### 数据库触发器
 
 - `source_overrides_validate_insert`：PENDING 状态、双方 batches 不同、双方 sources/datasets
-  与 difference_report 一致。
+  与 difference_report 一致；两个精确范围 JSON 必须是类型正确的非空数组，且每个单元、
+  摘要投影和两个范围 SHA 满足 dataset 合同。
 - `source_overrides_pending_transition`：PENDING → APPROVED/REJECTED，必须携带 actor 和
-  decision 时间。
-- `source_overrides_approved_transition`：APPROVED → APPLIED，必须绑定新同数据集 version。
+  decision 时间；精确范围、摘要、范围 SHA 和全部既有决策事实不得同时变化。
+- `source_overrides_approved_transition`：APPROVED → APPLIED，精确范围不得变化；必须绑定
+  PUBLISHED 的同数据集直接子 version、对应 application、DifferenceReport SHA 和同一
+  `contribution_scope_sha256`。manifest provenance 由应用服务重新读取并精确核对后才允许绑定。
 - `source_overrides_no_update_terminal`：REJECTED/APPLIED 不可修改。
 - `source_overrides_no_delete_decided`：APPROVED/REJECTED/APPLIED 不可删除。
+
+`20260721_0008` 的 downgrade 在 SQLite batch 重建 `source_overrides` 后恢复 0007 的完整五个
+触发器。`20260722_0009` 替换向前生效的触发器并支持
+`0009 → 0008 → 0007 → 0008 → 0009` 恢复。
+
+### 旧 0007 非终态升级策略
+
+旧 0007 不保存精确差异单元，禁止从 `scope_codes × scope_dates × fields` 笛卡尔积猜测审批
+内容。生产迁移必须经过 Stage 0 安全迁移入口：先对完整快照副本和隔离副本执行迁移；0009
+检测到缺少精确单元的旧 override 时明确阻断，原数据库保持在 0007，提示先取消旧非终态
+override，或另行依据受验证 DifferenceReport 证据执行确定性迁移。不得直接把旧 PENDING /
+APPROVED override 转成空精确范围。
 
 ## 5. 不变量
 

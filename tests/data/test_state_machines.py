@@ -76,6 +76,9 @@ def _pending_override() -> SourceOverride:
         fields=("close",),
         reason="missing bar on primary",
         created_at=_NOW,
+        field_replacements=(
+            {"code": "000001.SZ", "trade_date": str(_TRADE_DATE), "field": "close"},
+        ),
     )
 
 

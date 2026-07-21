@@ -247,6 +247,8 @@ class SourceOverrideRow(Base):
     fields_json: Mapped[str] = mapped_column(Text, nullable=False)
     field_replacements_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     fallback_only_keys_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    exact_scope_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    contribution_scope_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = mapped_column(String(40), nullable=False)
     approved_at: Mapped[str | None] = mapped_column(String(40))
