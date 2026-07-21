@@ -255,6 +255,8 @@ def _verify_manifest_shape(manifest: dict[str, object], *, expected_schema: str)
             "code_version",
             "version_id",
         }
+        if "source_override" in manifest:
+            required.add("source_override")
         text_fields = (
             "manifest_schema_version",
             "manifest_sha256",
@@ -356,6 +358,53 @@ def _verify_manifest_shape(manifest: dict[str, object], *, expected_schema: str)
         not isinstance(value, str) or not value for value in partition_keys
     ):
         raise ManifestIntegrityError("manifest partition_keys are invalid")
+    if "source_override" in manifest:
+        _verify_source_override_manifest(manifest["source_override"])
+
+
+def _verify_source_override_manifest(value: object) -> None:
+    if not isinstance(value, dict):
+        raise ManifestIntegrityError("source_override manifest entry is invalid")
+    required = {
+        "override_id",
+        "difference_report_id",
+        "report_sha256",
+        "primary",
+        "fallback",
+        "fallback_contributions",
+        "contribution_scope_sha256",
+    }
+    if set(value) != required:
+        raise ManifestIntegrityError("source_override fields do not match schema")
+    for field in ("override_id", "difference_report_id"):
+        if not isinstance(value[field], str) or not value[field].strip():
+            raise ManifestIntegrityError("source_override identifier is invalid")
+    for field in ("report_sha256", "contribution_scope_sha256"):
+        if not isinstance(value[field], str) or not _HEX64_RE.match(value[field]):
+            raise ManifestIntegrityError("source_override SHA is invalid")
+    for side in ("primary", "fallback"):
+        item = value[side]
+        if not isinstance(item, dict) or set(item) != {
+            "source",
+            "batch_id",
+            "version_id",
+            "content_sha256",
+        }:
+            raise ManifestIntegrityError("source_override side lineage is invalid")
+        if not isinstance(item["content_sha256"], str) or not _HEX64_RE.match(
+            item["content_sha256"]
+        ):
+            raise ManifestIntegrityError("source_override side SHA is invalid")
+    contributions = value["fallback_contributions"]
+    if not isinstance(contributions, list):
+        raise ManifestIntegrityError("source_override contributions are invalid")
+    expected = compute_sha256(
+        json.dumps(contributions, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        )
+    )
+    if expected != value["contribution_scope_sha256"]:
+        raise ManifestIntegrityError("source_override contribution scope SHA mismatch")
 
 
 def _verify_manifest_self_sha(manifest: dict[str, object]) -> str:

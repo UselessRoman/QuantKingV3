@@ -344,6 +344,76 @@ def _evaluate_coverage_window(
     )
 
 
+def _evaluate_coverage_by_security_exchange(
+    *,
+    request: QualityRequest,
+    table: pa.Table,
+    reference_tables: Mapping[str, pa.Table],
+) -> QualityOutcomeResult:
+    descriptor = descriptor_for(request.dataset.value)
+    if "trade_date" not in descriptor.field_names or "code" not in descriptor.field_names:
+        return _passed(
+            "coverage_by_security_exchange",
+            summary="dataset has no trade_date/code columns to verify",
+        )
+    calendar_table = reference_tables.get("exchange_calendar")
+    if calendar_table is None:
+        return _failed(
+            "coverage_by_security_exchange",
+            summary="exchange_calendar reference table is missing",
+            affected=1,
+        )
+    open_sessions: set[tuple[str, date]] = set()
+    for row in calendar_table.to_pylist():
+        trade_date = row["trade_date"]
+        if (
+            row["is_open"]
+            and request.coverage_start.value <= trade_date <= request.coverage_end.value
+        ):
+            open_sessions.add((str(row["exchange"]), trade_date))
+    present = {
+        (str(row["code"]), row["trade_date"])
+        for row in table.to_pylist()
+        if row.get("code") is not None and row.get("trade_date") is not None
+    }
+    if not present:
+        return _passed(
+            "coverage_by_security_exchange",
+            summary="empty table has no per-security sessions to verify",
+        )
+    max_present_date = max(trade_date for _, trade_date in present)
+    present_codes = {code for code, _ in present}
+    expected_exchanges = set(request.expected_exchanges)
+    missing: list[str] = []
+    for code in request.expected_securities:
+        if code not in present_codes:
+            continue
+        exchange = code.rsplit(".", 1)[-1]
+        if exchange not in expected_exchanges:
+            missing.append(f"{code}:unexpected-exchange:{exchange}")
+            continue
+        for session_exchange, trade_date in sorted(
+            open_sessions, key=lambda item: (item[0], item[1])
+        ):
+            if (
+                session_exchange == exchange
+                and trade_date <= max_present_date
+                and (code, trade_date) not in present
+            ):
+                missing.append(f"{code}:{exchange}:{trade_date.isoformat()}")
+    if missing:
+        sample = ",".join(missing[:10])
+        return _failed(
+            "coverage_by_security_exchange",
+            summary=f"{len(missing)} missing open-session row(s): {sample}",
+            affected=len(missing),
+        )
+    return _passed(
+        "coverage_by_security_exchange",
+        summary="every expected security has rows for every exchange open session",
+    )
+
+
 def _evaluate_listing_effective_range(
     *,
     request: QualityRequest,
@@ -507,6 +577,13 @@ def default_rule_set() -> QualityRuleSet:
             requires_reference=frozenset(),
             blocking=True,
             evaluate=_evaluate_coverage_window,
+        ),
+        QualityRule(
+            code="coverage_by_security_exchange",
+            applies_to=_CALENDAR_DATASETS,
+            requires_reference=frozenset({"exchange_calendar"}),
+            blocking=True,
+            evaluate=_evaluate_coverage_by_security_exchange,
         ),
         QualityRule(
             code="listing_effective_range",

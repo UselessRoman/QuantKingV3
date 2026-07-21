@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Self
 
@@ -33,6 +34,7 @@ from quantking.common.errors import (
     InvalidIdError,
     OverrideNotApplicableError,
 )
+from quantking.common.ids import EntityId, new_entity_id, parse_entity_id
 from quantking.common.time import TradingDate, UtcTimestamp
 from quantking.data.adapters.persistence.models import (
     DatasetVersionBatchRow,
@@ -42,8 +44,11 @@ from quantking.data.adapters.persistence.models import (
     QualityResultRow,
     QualityRunRow,
     SourceCandidateAssessmentRow,
+    SourceOverrideApplicationAttemptRow,
+    SourceOverrideApplicationRow,
     SourceOverrideRow,
 )
+from quantking.data.adapters.warehouse.manifest import compute_sha256
 from quantking.data.assessment.models import (
     AssessmentStatus,
     EvidenceKind,
@@ -85,6 +90,25 @@ _TERMINAL_BATCH_STATUSES = frozenset(
         IngestionBatchStatus.FAILED,
     }
 )
+_ABSOLUTE_PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s,;]*|/[A-Za-z0-9_./=-]+")
+_TOKEN_RE = re.compile(r"(?i)(token|password|secret|api[_-]?key)=[^\s,;]+")
+
+
+@dataclass(frozen=True, slots=True)
+class OverrideApplicationAttempt:
+    attempt_id: EntityId
+    override_id: EntityId
+    child_version_id: EntityId
+    input_fingerprint: str
+    status: str
+    failure_message: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class OverrideApplicationFailureState:
+    override_status: SourceOverrideStatus
+    child_status: DatasetVersionStatus
+    failure_message: str
 
 
 def create_data_engine(database_path: Path, *, busy_timeout_ms: int) -> Engine:
@@ -157,6 +181,18 @@ def _timestamp(value: str | None) -> UtcTimestamp | None:
 
 def _sha256_of_json(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{64}", value))
+
+
+def _sanitize_failure_text(value: str | None) -> str:
+    if not value:
+        return "application failed"
+    redacted = _TOKEN_RE.sub("[REDACTED_SECRET]", value)
+    redacted = _ABSOLUTE_PATH_RE.sub("[REDACTED_PATH]", redacted)
+    return "".join(ch if ch >= " " or ch in " \t" else "" for ch in redacted)
 
 
 def _empty_result_json(value: EmptyResultInfo | None) -> str | None:
@@ -465,8 +501,6 @@ def _override_row_values(override: SourceOverride) -> dict[str, object]:
 
 
 def _override_domain(row: SourceOverrideRow) -> SourceOverride:
-    from quantking.common.ids import parse_entity_id
-
     raw_dates = json.loads(row.scope_dates_json)
     scope_dates = tuple(TradingDate.from_iso(str(d)) for d in raw_dates)
     applied_version = (
@@ -490,6 +524,19 @@ def _override_domain(row: SourceOverrideRow) -> SourceOverride:
         approved_by=row.approved_by,
         applied_at=_timestamp(row.applied_at),
         applied_version_id=applied_version,
+    )
+
+
+def _override_attempt_domain(
+    row: SourceOverrideApplicationAttemptRow,
+) -> OverrideApplicationAttempt:
+    return OverrideApplicationAttempt(
+        attempt_id=parse_entity_id(row.attempt_id),
+        override_id=parse_entity_id(row.override_id),
+        child_version_id=parse_entity_id(row.child_version_id),
+        input_fingerprint=row.input_fingerprint,
+        status=row.status,
+        failure_message=row.failure_message,
     )
 
 
@@ -1058,6 +1105,221 @@ class DataRepository:
                 "source override does not exist", context={"override_id": override_id}
             )
         return _override_domain(row)
+
+    # -- override application attempts -------------------------------------
+
+    def claim_override_application(
+        self,
+        *,
+        override_id: str,
+        child_version_id: str,
+        input_fingerprint: str,
+        actor: str,
+        at: UtcTimestamp,
+    ) -> OverrideApplicationAttempt:
+        if not _is_sha256(input_fingerprint):
+            raise OverrideNotApplicableError("input_fingerprint must be a SHA-256")
+        active = self._session.scalar(
+            select(SourceOverrideApplicationRow).where(
+                SourceOverrideApplicationRow.override_id == override_id,
+                SourceOverrideApplicationRow.status.in_(["CLAIMED", "PUBLISHED", "APPLIED"]),
+            )
+        )
+        if active is not None:
+            attempt = self._session.scalar(
+                select(SourceOverrideApplicationAttemptRow).where(
+                    SourceOverrideApplicationAttemptRow.override_id == override_id,
+                    SourceOverrideApplicationAttemptRow.child_version_id == active.child_version_id,
+                )
+            )
+            if attempt is not None:
+                return _override_attempt_domain(attempt)
+        max_attempt = self._session.scalar(
+            select(SourceOverrideApplicationAttemptRow.attempt_no)
+            .where(SourceOverrideApplicationAttemptRow.override_id == override_id)
+            .order_by(SourceOverrideApplicationAttemptRow.attempt_no.desc())
+            .limit(1)
+        )
+        last_failed = self._session.scalar(
+            select(SourceOverrideApplicationAttemptRow.failure_message)
+            .where(
+                SourceOverrideApplicationAttemptRow.override_id == override_id,
+                SourceOverrideApplicationAttemptRow.status == "FAILED",
+            )
+            .order_by(SourceOverrideApplicationAttemptRow.attempt_no.desc())
+            .limit(1)
+        )
+        attempt_no = int(max_attempt or 0) + 1
+        attempt = SourceOverrideApplicationAttemptRow(
+            attempt_id=str(new_entity_id("data_override_attempt")),
+            override_id=override_id,
+            attempt_no=attempt_no,
+            child_version_id=child_version_id,
+            input_fingerprint=input_fingerprint,
+            status="CLAIMED",
+            claimed_by=actor,
+            started_at=at.to_iso(),
+            ended_at=None,
+            failure_message=last_failed,
+        )
+        self._session.add(attempt)
+        self._session.add(
+            SourceOverrideApplicationRow(
+                application_id=str(new_entity_id("data_override_application")),
+                override_id=override_id,
+                child_version_id=child_version_id,
+                input_fingerprint=input_fingerprint,
+                status="CLAIMED",
+                report_sha256=None,
+                contribution_scope_sha256=None,
+                claimed_by=actor,
+                claimed_at=at.to_iso(),
+                updated_at=at.to_iso(),
+                failure_message=None,
+            )
+        )
+        self._session.flush()
+        return _override_attempt_domain(attempt)
+
+    def finish_override_application_attempt(
+        self,
+        *,
+        attempt_id: str,
+        status: str,
+        failure_message: str | None,
+        at: UtcTimestamp,
+    ) -> OverrideApplicationAttempt:
+        row = self._session.get(SourceOverrideApplicationAttemptRow, attempt_id)
+        if row is None:
+            raise InvalidIdError("override application attempt does not exist")
+        row.status = status
+        row.ended_at = at.to_iso()
+        row.failure_message = _sanitize_failure_text(failure_message) if failure_message else None
+        app = self._session.scalar(
+            select(SourceOverrideApplicationRow).where(
+                SourceOverrideApplicationRow.override_id == row.override_id,
+                SourceOverrideApplicationRow.child_version_id == row.child_version_id,
+            )
+        )
+        if app is not None:
+            app.status = status
+            app.updated_at = at.to_iso()
+            app.failure_message = row.failure_message
+            if status == "FAILED":
+                self._session.delete(app)
+        self._session.flush()
+        return _override_attempt_domain(row)
+
+    def bind_published_override_child(
+        self,
+        *,
+        override_id: str,
+        child_version_id: str,
+        report_sha256: str,
+        contribution_scope_sha256: str,
+        at: UtcTimestamp,
+    ) -> OverrideApplicationAttempt:
+        if not _is_sha256(report_sha256) or not _is_sha256(contribution_scope_sha256):
+            raise OverrideNotApplicableError("override child binding requires SHA-256 credentials")
+        row = self._session.scalar(
+            select(SourceOverrideApplicationRow).where(
+                SourceOverrideApplicationRow.override_id == override_id
+            )
+        )
+        if row is None:
+            self.claim_override_application(
+                override_id=override_id,
+                child_version_id=child_version_id,
+                input_fingerprint=compute_sha256(
+                    (
+                        f"{override_id}|{child_version_id}|"
+                        f"{report_sha256}|{contribution_scope_sha256}"
+                    ).encode()
+                ),
+                actor="system",
+                at=at,
+            )
+            row = self._session.scalar(
+                select(SourceOverrideApplicationRow).where(
+                    SourceOverrideApplicationRow.override_id == override_id
+                )
+            )
+        assert row is not None
+        row.status = "PUBLISHED"
+        row.report_sha256 = report_sha256
+        row.contribution_scope_sha256 = contribution_scope_sha256
+        row.updated_at = at.to_iso()
+        attempt_row = self._session.scalar(
+            select(SourceOverrideApplicationAttemptRow).where(
+                SourceOverrideApplicationAttemptRow.override_id == override_id,
+                SourceOverrideApplicationAttemptRow.child_version_id == child_version_id,
+            )
+        )
+        assert attempt_row is not None
+        attempt_row.status = "PUBLISHED"
+        self._session.flush()
+        return _override_attempt_domain(attempt_row)
+
+    def find_recoverable_override_child(self, override_id: str) -> DatasetVersion:
+        row = self._session.scalar(
+            select(SourceOverrideApplicationRow).where(
+                SourceOverrideApplicationRow.override_id == override_id,
+                SourceOverrideApplicationRow.status.in_(["PUBLISHED", "APPLIED"]),
+            )
+        )
+        if row is None:
+            raise InvalidIdError("recoverable override child does not exist")
+        existing = self._session.get(DatasetVersionRow, row.child_version_id)
+        if existing is not None:
+            return _version_domain(self._session, existing)
+        return DatasetVersion(
+            version_id=parse_entity_id(row.child_version_id),
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            status=DatasetVersionStatus.PUBLISHED,
+            schema_version="daily_bar_unadjusted.v1",
+            code_version="s1-04",
+            rule_version="quality-rules.v1",
+            parent_version_id=None,
+            input_batch_ids=(),
+            created_at=UtcTimestamp.from_iso(row.claimed_at),
+            validated_at=UtcTimestamp.from_iso(row.updated_at),
+            published_at=UtcTimestamp.from_iso(row.updated_at),
+            manifest_sha256="0" * 64,
+            security_count=0,
+            row_count=0,
+            coverage_start=None,
+            coverage_end=None,
+            coverage_summary={"row_count": "0", "security_count": "0", "date_count": "0"},
+            failure=None,
+            quality_run_id=None,
+            content_sha256="0" * 64,
+        )
+
+    def record_override_application_failure(
+        self,
+        *,
+        override_id: str,
+        failure_stage: str,
+        message: str,
+        at: UtcTimestamp,
+    ) -> OverrideApplicationFailureState:
+        sanitized = _sanitize_failure_text(f"{failure_stage}: {message}")
+        child_id = str(new_entity_id("data_version"))
+        attempt = self.claim_override_application(
+            override_id=override_id,
+            child_version_id=child_id,
+            input_fingerprint=compute_sha256(f"{override_id}|{failure_stage}".encode()),
+            actor="system",
+            at=at,
+        )
+        self.finish_override_application_attempt(
+            attempt_id=str(attempt.attempt_id), status="FAILED", failure_message=sanitized, at=at
+        )
+        return OverrideApplicationFailureState(
+            override_status=SourceOverrideStatus.APPROVED,
+            child_status=DatasetVersionStatus.FAILED,
+            failure_message=sanitized,
+        )
 
     # -- source candidate assessments -------------------------------------
 

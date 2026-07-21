@@ -254,6 +254,57 @@ class SourceOverrideRow(Base):
     )
 
 
+class SourceOverrideApplicationRow(Base):
+    __tablename__ = "source_override_applications"
+    __table_args__ = (
+        UniqueConstraint("override_id", name="uq_source_override_applications_override"),
+        UniqueConstraint("child_version_id", name="uq_source_override_applications_child"),
+        CheckConstraint(
+            "status IN ('CLAIMED','FAILED','PUBLISHED','APPLIED')",
+            name="ck_source_override_applications_status",
+        ),
+    )
+
+    application_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    override_id: Mapped[str] = mapped_column(
+        ForeignKey("source_overrides.override_id", ondelete="RESTRICT"), nullable=False
+    )
+    child_version_id: Mapped[str] = mapped_column(
+        ForeignKey("dataset_versions.version_id", ondelete="RESTRICT"), nullable=False
+    )
+    input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    report_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    contribution_scope_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claimed_by: Mapped[str] = mapped_column(String(256), nullable=False)
+    claimed_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class SourceOverrideApplicationAttemptRow(Base):
+    __tablename__ = "source_override_application_attempts"
+    __table_args__ = (
+        UniqueConstraint("override_id", "attempt_no", name="uq_override_attempt_no"),
+        Index("ix_override_attempts_override_status", "override_id", "status"),
+    )
+
+    attempt_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    override_id: Mapped[str] = mapped_column(
+        ForeignKey("source_overrides.override_id", ondelete="RESTRICT"), nullable=False
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    child_version_id: Mapped[str] = mapped_column(
+        ForeignKey("dataset_versions.version_id", ondelete="RESTRICT"), nullable=False
+    )
+    input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    claimed_by: Mapped[str] = mapped_column(String(256), nullable=False)
+    started_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    ended_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class SourceCandidateAssessmentRow(Base):
     __tablename__ = "source_candidate_assessments"
     __table_args__ = (

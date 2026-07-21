@@ -191,16 +191,22 @@ class SourceOverrideService:
         query_adapter: CanonicalQueryAdapter | None = None,
         quality_engine: QualityEngine | None = None,
         publish_coordinator: CanonicalPublishCoordinator | None = None,
+        difference_report_verifier: object | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._query_adapter = query_adapter
         self._quality_engine = quality_engine
         self._publish_coordinator = publish_coordinator
+        self._difference_report_verifier = difference_report_verifier
 
     def create_override(
         self, request: CreateOverrideRequest, created_at: UtcTimestamp
     ) -> SourceOverride:
         """Create a PENDING override bound to a verified DifferenceReport."""
+        if self._difference_report_verifier is not None and not hasattr(
+            self._difference_report_verifier, "verify"
+        ):
+            raise OverrideNotApplicableError("verified report is required before override creation")
         override_id = new_entity_id("data_override")
         with self._uow_factory() as uow:
             report = uow.data.get_difference_report(str(request.difference_report_id))

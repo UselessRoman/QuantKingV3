@@ -27,7 +27,7 @@ STAGE1_TABLES = {
     "source_overrides",
 }
 STAGE0_TABLES = {"job_runs", "job_dependencies", "job_events", "audit_records"}
-HEAD = "20260720_0006"
+HEAD = "20260721_0007"
 
 
 def _alembic_config(database: Path) -> Config:

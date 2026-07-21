@@ -65,7 +65,12 @@ def _complete_marker_bytes(manifest_sha256: str) -> bytes:
 
 
 def _manifest_payload(outcome: CrossSourceComparisonOutcome) -> dict[str, object]:
+    rows_bytes = _row_differences_bytes(outcome)
+    sample_spec_bytes = json.dumps(
+        list(outcome.sample_spec), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
     return {
+        "manifest_schema_version": "difference-report-manifest.v1",
         "report_id": str(outcome.report_id),
         "dataset": outcome.dataset.value,
         "schema_version": outcome.schema_version,
@@ -80,6 +85,7 @@ def _manifest_payload(outcome: CrossSourceComparisonOutcome) -> dict[str, object
         "primary_quality_run_id": str(outcome.primary_quality_run_id),
         "fallback_quality_run_id": str(outcome.fallback_quality_run_id),
         "sample_spec": list(outcome.sample_spec),
+        "sample_spec_sha256": compute_sha256(sample_spec_bytes),
         "threshold_rule_version": outcome.threshold_rule_version,
         "created_at": outcome.created_at.to_iso(),
         "total_compared": outcome.total_compared,
@@ -87,6 +93,8 @@ def _manifest_payload(outcome: CrossSourceComparisonOutcome) -> dict[str, object
         "field_differences": dict(outcome.field_differences),
         "report_sha256": outcome.report_sha256,
         "row_differences_file": _ROW_DIFFERENCES_FILENAME,
+        "row_differences_file_sha256": compute_sha256(rows_bytes),
+        "row_differences_file_size": len(rows_bytes),
     }
 
 
