@@ -46,9 +46,9 @@ def test_override_changes_only_approved_cells_and_scope() -> None:
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         primary_table=primary,
         fallback_table=fallback,
-        scope_codes=frozenset({"000001.SZ"}),
-        scope_dates=frozenset({day}),
-        fields=frozenset({"close"}),
+        field_replacements=(
+            {"code": "000001.SZ", "trade_date": day.isoformat(), "field": "close"},
+        ),
     )
     rows = result.table.to_pylist()
     assert rows[0]["close"] == 10.5

@@ -44,8 +44,8 @@ def _row(code: str, day: date, close: float, open_price: float = 10.0) -> dict[s
 
 
 class TestOverrideTransformationR2Fixes:
-    def test_supports_fallback_only_rows_when_allowed(self) -> None:
-        """Fallback has a row primary doesn't; allow_fallback_only=True adds it."""
+    def test_supports_explicit_fallback_only_rows(self) -> None:
+        """Fallback has an explicitly approved row that primary does not."""
         day = date(2026, 7, 15)
         primary = _table([_row("000001.SZ", day, 10.0)])
         # Fallback has the same row plus an extra one.
@@ -55,10 +55,10 @@ class TestOverrideTransformationR2Fixes:
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             primary_table=primary,
             fallback_table=fallback,
-            scope_codes=frozenset({"000001.SZ", "000002.SZ"}),
-            scope_dates=frozenset({day}),
-            fields=frozenset({"close"}),
-            allow_fallback_only=True,
+            field_replacements=(
+                {"code": "000001.SZ", "trade_date": day.isoformat(), "field": "close"},
+            ),
+            fallback_only_keys=({"code": "000002.SZ", "trade_date": day.isoformat()},),
         )
         rows = result.table.to_pylist()
         assert len(rows) == 2
@@ -68,40 +68,33 @@ class TestOverrideTransformationR2Fixes:
         assert rows[1]["close"] == 20.0  # added from fallback
         assert result.matched_rows == 2
 
-    def test_rejects_fallback_only_rows_by_default(self) -> None:
-        """Fallback has a row primary doesn't; default behavior raises scope not consumed."""
+    def test_does_not_insert_unapproved_fallback_only_rows(self) -> None:
+        """Rows absent from the explicit approval remain outside the result."""
         day = date(2026, 7, 15)
         primary = _table([_row("000001.SZ", day, 10.0)])
         fallback = _table([_row("000001.SZ", day, 10.5), _row("000002.SZ", day, 20.0)])
 
-        # When allow_fallback_only=False, the scoped (000002.SZ, day) pair
-        # exists in fallback but not primary, so scope is not fully consumed.
-        with pytest.raises(ValueError, match="override scope is not fully consumed"):
-            apply_override_to_table(
-                dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-                primary_table=primary,
-                fallback_table=fallback,
-                scope_codes=frozenset({"000001.SZ", "000002.SZ"}),
-                scope_dates=frozenset({day}),
-                fields=frozenset({"close"}),
-                allow_fallback_only=False,
-            )
+        result = apply_override_to_table(
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            primary_table=primary,
+            fallback_table=fallback,
+            field_replacements=(
+                {"code": "000001.SZ", "trade_date": day.isoformat(), "field": "close"},
+            ),
+        )
+        assert [row["code"] for row in result.table.to_pylist()] == ["000001.SZ"]
 
     def test_rejects_zero_match_scope(self) -> None:
         """Approved scope matches no rows in either table."""
         day = date(2026, 7, 15)
-        other_day = date(2026, 7, 16)
         primary = _table([_row("000001.SZ", day, 10.0)])
         fallback = _table([_row("000001.SZ", day, 10.5)])
 
-        with pytest.raises(ValueError, match="override scope matched zero rows"):
+        with pytest.raises(ValueError, match="at least one exact difference unit"):
             apply_override_to_table(
                 dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
                 primary_table=primary,
                 fallback_table=fallback,
-                scope_codes=frozenset({"000999.SZ"}),  # nonexistent code
-                scope_dates=frozenset({other_day}),  # nonexistent date
-                fields=frozenset({"close"}),
             )
 
     def test_rejects_partial_match_scope(self) -> None:
@@ -112,14 +105,23 @@ class TestOverrideTransformationR2Fixes:
         fallback = _table([_row("000001.SZ", day1, 10.5)])
 
         # Approve two days but only one exists.
-        with pytest.raises(ValueError, match="override scope is not fully consumed"):
+        with pytest.raises(ValueError, match="only partially consumed"):
             apply_override_to_table(
                 dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
                 primary_table=primary,
                 fallback_table=fallback,
-                scope_codes=frozenset({"000001.SZ"}),
-                scope_dates=frozenset({day1, day2}),  # day2 doesn't exist
-                fields=frozenset({"close"}),
+                field_replacements=(
+                    {
+                        "code": "000001.SZ",
+                        "trade_date": day1.isoformat(),
+                        "field": "close",
+                    },
+                    {
+                        "code": "000001.SZ",
+                        "trade_date": day2.isoformat(),
+                        "field": "close",
+                    },
+                ),
             )
 
     def test_prohibits_primary_key_field_override(self) -> None:
@@ -128,14 +130,14 @@ class TestOverrideTransformationR2Fixes:
         primary = _table([_row("000001.SZ", day, 10.0)])
         fallback = _table([_row("000001.SZ", day, 10.5)])
 
-        with pytest.raises(ValueError, match=r"primary key field .* cannot be overridden"):
+        with pytest.raises(ValueError, match="invalid field"):
             apply_override_to_table(
                 dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
                 primary_table=primary,
                 fallback_table=fallback,
-                scope_codes=frozenset({"000001.SZ"}),
-                scope_dates=frozenset({day}),
-                fields=frozenset({"code"}),  # primary key
+                field_replacements=(
+                    {"code": "000001.SZ", "trade_date": day.isoformat(), "field": "code"},
+                ),
             )
 
     def test_full_scope_consumption_with_multiple_codes_and_dates(self) -> None:
@@ -163,9 +165,15 @@ class TestOverrideTransformationR2Fixes:
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             primary_table=primary,
             fallback_table=fallback,
-            scope_codes=frozenset({"000001.SZ", "000002.SZ"}),
-            scope_dates=frozenset({day1, day2}),
-            fields=frozenset({"close"}),
+            field_replacements=tuple(
+                {
+                    "code": code,
+                    "trade_date": trading_day.isoformat(),
+                    "field": "close",
+                }
+                for code in ("000001.SZ", "000002.SZ")
+                for trading_day in (day1, day2)
+            ),
         )
         rows = result.table.to_pylist()
         assert len(rows) == 4

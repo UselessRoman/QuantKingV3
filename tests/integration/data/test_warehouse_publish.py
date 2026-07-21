@@ -885,7 +885,10 @@ class TestPublishMetadataCoordination:
 
 
 class TestPublishConcurrentProducers:
-    def test_concurrent_publishes_do_not_corrupt_or_overwrite(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("_stress_iteration", range(50))
+    def test_concurrent_publishes_do_not_corrupt_or_overwrite(
+        self, tmp_path: Path, _stress_iteration: int
+    ) -> None:
         import threading
 
         version = _building_version(dataset=DatasetKind.DAILY_BAR_UNADJUSTED)

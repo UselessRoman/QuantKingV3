@@ -22,6 +22,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -244,6 +245,8 @@ class SourceOverrideRow(Base):
     scope_codes_json: Mapped[str] = mapped_column(Text, nullable=False)
     scope_dates_json: Mapped[str] = mapped_column(Text, nullable=False)
     fields_json: Mapped[str] = mapped_column(Text, nullable=False)
+    field_replacements_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    fallback_only_keys_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = mapped_column(String(40), nullable=False)
     approved_at: Mapped[str | None] = mapped_column(String(40))
@@ -257,8 +260,13 @@ class SourceOverrideRow(Base):
 class SourceOverrideApplicationRow(Base):
     __tablename__ = "source_override_applications"
     __table_args__ = (
-        UniqueConstraint("override_id", name="uq_source_override_applications_override"),
         UniqueConstraint("child_version_id", name="uq_source_override_applications_child"),
+        Index(
+            "uq_source_override_applications_active_override",
+            "override_id",
+            unique=True,
+            sqlite_where=text("status IN ('CLAIMED','PUBLISHED','APPLIED')"),
+        ),
         CheckConstraint(
             "status IN ('CLAIMED','FAILED','PUBLISHED','APPLIED')",
             name="ck_source_override_applications_status",

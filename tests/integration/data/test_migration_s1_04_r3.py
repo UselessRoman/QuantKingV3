@@ -12,8 +12,8 @@ from sqlalchemy import inspect
 
 from quantking.jobs.adapters.persistence.sqlite import _REPOSITORY_ROOT, create_sqlite_engine
 
-HEAD = "20260721_0007"
-PREVIOUS = "20260720_0006"
+HEAD = "20260721_0008"
+PREVIOUS = "20260721_0007"
 
 
 def _config(database: Path) -> Config:
@@ -52,6 +52,7 @@ def test_s1_04_r3_migration_upgrade_downgrade_upgrade_and_unique_override_bindin
     unique_names = {
         item["name"] for item in inspector.get_unique_constraints("source_override_applications")
     }
+    index_names = {item["name"] for item in inspector.get_indexes("source_override_applications")}
     application_fks = {
         (tuple(item["constrained_columns"]), item["referred_table"])
         for item in inspector.get_foreign_keys("source_override_applications")
@@ -70,8 +71,8 @@ def test_s1_04_r3_migration_upgrade_downgrade_upgrade_and_unique_override_bindin
     engine.dispose()
 
     assert {"source_override_applications", "source_override_application_attempts"} <= tables
-    assert "uq_source_override_applications_override" in unique_names
     assert "uq_source_override_applications_child" in unique_names
+    assert "uq_source_override_applications_active_override" in index_names
     assert application_fks == {
         (("override_id",), "source_overrides"),
         (("child_version_id",), "dataset_versions"),

@@ -786,6 +786,8 @@ class SourceOverride:
     approved_by: str | None
     applied_at: UtcTimestamp | None
     applied_version_id: EntityId | None
+    field_replacements: tuple[Mapping[str, str], ...] = ()
+    fallback_only_keys: tuple[Mapping[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -818,6 +820,28 @@ class SourceOverride:
             self, "scope_dates", _tuple_trading_dates(self.scope_dates, field="scope_dates")
         )
         object.__setattr__(self, "fields", _tuple_text(self.fields, field="fields"))
+        for field_name in ("field_replacements", "fallback_only_keys"):
+            raw_units = getattr(self, field_name)
+            if not isinstance(raw_units, tuple):
+                raise TypeError(f"{field_name} must be a tuple")
+            normalized_units: list[Mapping[str, str]] = []
+            seen_units: set[str] = set()
+            for unit in raw_units:
+                if not isinstance(unit, Mapping) or not unit:
+                    raise TypeError(f"{field_name} must contain non-empty mappings")
+                normalized = {
+                    str(key): str(value)
+                    for key, value in sorted(unit.items())
+                    if str(key).strip() and str(value).strip()
+                }
+                if len(normalized) != len(unit):
+                    raise ValueError(f"{field_name} contains an empty key or value")
+                serialized = json.dumps(normalized, separators=(",", ":"), sort_keys=True)
+                if serialized in seen_units:
+                    raise ValueError(f"{field_name} must not contain duplicates")
+                seen_units.add(serialized)
+                normalized_units.append(MappingProxyType(normalized))
+            object.__setattr__(self, field_name, tuple(normalized_units))
         _text(self.reason, field="reason")
         if not isinstance(self.created_at, UtcTimestamp):
             raise TypeError("created_at must be a UtcTimestamp")
@@ -875,6 +899,8 @@ class SourceOverride:
         fields: tuple[str, ...],
         reason: str,
         created_at: UtcTimestamp,
+        field_replacements: tuple[Mapping[str, str], ...] = (),
+        fallback_only_keys: tuple[Mapping[str, str], ...] = (),
     ) -> SourceOverride:
         """Create a PENDING override without persistence side effects."""
         return cls(
@@ -895,6 +921,8 @@ class SourceOverride:
             approved_by=None,
             applied_at=None,
             applied_version_id=None,
+            field_replacements=field_replacements,
+            fallback_only_keys=fallback_only_keys,
         )
 
 

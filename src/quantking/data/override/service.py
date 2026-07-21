@@ -15,6 +15,8 @@ overrides) are enforced here.
 from __future__ import annotations
 
 import json
+import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import cast
 
@@ -50,7 +52,7 @@ from quantking.data.quality.engine import QualityEngine
 from quantking.data.quality.models import QualityRequest, RuleOutcomeStatus
 from quantking.data.quality.references import PublishedReferenceLoader
 from quantking.data.quality.runner import QualityRunner
-from quantking.data.schemas import DatasetSchemaDescriptor
+from quantking.data.schemas import DatasetSchemaDescriptor, descriptor_for
 
 # ---------------------------------------------------------------------------
 # Canonical field registry (computed once at module load)
@@ -62,6 +64,8 @@ _ALL_FIELD_NAMES: frozenset[str] = frozenset().union(
 _ALL_PRIMARY_KEY_FIELDS: frozenset[str] = frozenset().union(
     *(set(descriptor.primary_key) for descriptor in DatasetSchemaDescriptor.all())
 )
+_APPLICATION_LOCKS: dict[str, threading.Lock] = {}
+_APPLICATION_LOCKS_GUARD = threading.Lock()
 
 
 def _text(value: str, *, field_name: str) -> str:
@@ -104,7 +108,9 @@ def _tuple_trading_dates_unique(
     return tuple(sorted(value, key=lambda d: d.value))
 
 
-def _validate_fields(value: tuple[str, ...]) -> tuple[str, ...]:
+def _validate_fields(value: tuple[str, ...], *, allow_empty: bool = False) -> tuple[str, ...]:
+    if allow_empty and value == ():
+        return ()
     normalized = _tuple_text_unique(value, field_name="fields")
     for field_name in normalized:
         if field_name not in _ALL_FIELD_NAMES:
@@ -141,6 +147,8 @@ class CreateOverrideRequest:
     scope_dates: tuple[TradingDate, ...]
     fields: tuple[str, ...]
     reason: str
+    field_replacements: tuple[Mapping[str, str], ...] = ()
+    fallback_only_keys: tuple[Mapping[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         _entity_id(
@@ -174,7 +182,27 @@ class CreateOverrideRequest:
             "scope_dates",
             _tuple_trading_dates_unique(self.scope_dates, field_name="scope_dates"),
         )
-        object.__setattr__(self, "fields", _validate_fields(self.fields))
+        object.__setattr__(self, "fields", _validate_fields(self.fields, allow_empty=True))
+        for field_name in ("field_replacements", "fallback_only_keys"):
+            value = getattr(self, field_name)
+            if not isinstance(value, tuple):
+                raise TypeError(f"{field_name} must be a tuple")
+            normalized: list[dict[str, str]] = []
+            seen: set[str] = set()
+            for unit in value:
+                if not isinstance(unit, Mapping) or not unit:
+                    raise TypeError(f"{field_name} must contain non-empty mappings")
+                item = {str(key): str(raw) for key, raw in sorted(unit.items())}
+                if any(not key.strip() or not raw.strip() for key, raw in item.items()):
+                    raise ValueError(f"{field_name} contains an empty key or value")
+                identity = json.dumps(item, separators=(",", ":"), sort_keys=True)
+                if identity in seen:
+                    raise ValueError(f"{field_name} must not contain duplicates")
+                seen.add(identity)
+                normalized.append(item)
+            object.__setattr__(self, field_name, tuple(normalized))
+        if not self.field_replacements and not self.fallback_only_keys:
+            raise ValueError("override request must approve at least one exact difference unit")
         _text(self.reason, field_name="reason")
 
 
@@ -238,14 +266,10 @@ class SourceOverrideService:
             self._require_verified_report_matches_database(
                 verified=verified, report=report, dataset=version.dataset.value
             )
-            if not verified.scope_matches(
-                codes=frozenset(request.scope_codes),
-                dates=frozenset(str(item) for item in request.scope_dates),
-                fields=frozenset(request.fields),
-            ):
-                raise OverrideNotApplicableError(
-                    "approved scope must be an exact subset of verified difference units"
-                )
+            field_replacements = self._resolve_field_replacements(verified, request)
+            fallback_only_keys = self._resolve_fallback_only_keys(verified, request)
+            if not field_replacements and not fallback_only_keys:
+                raise OverrideNotApplicableError("approved scope matched zero verified units")
             override = SourceOverride.pending(
                 override_id=override_id,
                 dataset=version.dataset,
@@ -259,6 +283,8 @@ class SourceOverrideService:
                 fields=request.fields,
                 reason=request.reason,
                 created_at=created_at,
+                field_replacements=field_replacements,
+                fallback_only_keys=fallback_only_keys,
             )
             uow.data.save_override(override)
             uow.commit()
@@ -288,6 +314,26 @@ class SourceOverrideService:
         applied_at: UtcTimestamp,
         *,
         actor: str = "system",
+        quality_request: QualityRequest,
+    ) -> SourceOverride:
+        """Apply one override under a per-override recovery lock."""
+        key = str(override_id)
+        with _APPLICATION_LOCKS_GUARD:
+            lock = _APPLICATION_LOCKS.setdefault(key, threading.Lock())
+        with lock:
+            return self._apply_override(
+                override_id,
+                applied_at,
+                actor=actor,
+                quality_request=quality_request,
+            )
+
+    def _apply_override(
+        self,
+        override_id: EntityId,
+        applied_at: UtcTimestamp,
+        *,
+        actor: str,
         quality_request: QualityRequest,
     ) -> SourceOverride:
         """Apply one APPROVED override using its persisted recoverable child."""
@@ -336,11 +382,7 @@ class SourceOverrideService:
         self._require_verified_report_matches_database(
             verified=verified_report, report=report, dataset=current.dataset.value
         )
-        if not verified_report.scope_matches(
-            codes=frozenset(current.scope_codes),
-            dates=frozenset(str(item) for item in current.scope_dates),
-            fields=frozenset(current.fields),
-        ):
+        if not self._exact_scope_matches(verified_report, current):
             raise OverrideNotApplicableError(
                 "persisted approval scope is not a verified difference-unit subset"
             )
@@ -379,14 +421,11 @@ class SourceOverrideService:
                 actor=actor,
                 at=applied_at,
             )
-        if child.version_id != proposed_child.version_id:
-            raise OverrideNotApplicableError(
-                "override application is already claimed by another worker"
-            )
-        if child.status is not DatasetVersionStatus.BUILDING:
-            raise OverrideNotApplicableError(
-                "active override application child is neither BUILDING nor PUBLISHED"
-            )
+        if child.status not in {
+            DatasetVersionStatus.BUILDING,
+            DatasetVersionStatus.VALIDATED,
+        }:
+            raise OverrideNotApplicableError("active override application child is not recoverable")
 
         try:
             primary_table = self._query_adapter.query_by_id(
@@ -403,16 +442,79 @@ class SourceOverrideService:
                 dataset=current.dataset,
                 primary_table=primary_table,
                 fallback_table=fallback_table,
-                scope_codes=frozenset(current.scope_codes),
-                scope_dates=frozenset(item.value for item in current.scope_dates),
-                fields=frozenset(current.fields),
-                allow_fallback_only=False,
+                field_replacements=current.field_replacements,
+                fallback_only_keys=current.fallback_only_keys,
             )
-            contributions = cast(list[dict[str, object]], provenance["fallback_contributions"])
-            expected_changed = sum(len(cast(list[str], item["fields"])) for item in contributions)
-            if transformed.changed_cells != expected_changed:
+        except Exception as error:
+            if child.status is DatasetVersionStatus.VALIDATED:
                 raise OverrideNotApplicableError(
-                    "actual transformed cells do not match verified fallback contributions"
+                    "VALIDATED override recovery was interrupted; retry required"
+                ) from error
+            self._fail_application(
+                override_id=override_id,
+                child=child,
+                attempt_id=attempt.attempt_id,
+                stage="TRANSFORMATION",
+                at=applied_at,
+                kind=BatchFailureKind.INTERNAL,
+            )
+            raise OverrideNotApplicableError(
+                "override transformation failed; child marked FAILED"
+            ) from error
+        try:
+            contributions = cast(list[dict[str, object]], provenance["fallback_contributions"])
+            expected_changed = sum(
+                len(cast(list[str], item["fields"]))
+                for item in contributions
+                if item["kind"] == "FIELD_REPLACEMENT"
+            )
+            expected_inserted = sum(1 for item in contributions if item["kind"] == "ROW_INSERT")
+            if (
+                transformed.changed_cells != expected_changed
+                or transformed.inserted_rows != expected_inserted
+            ):
+                raise OverrideNotApplicableError(
+                    "actual transformation does not match verified fallback contributions"
+                )
+            if child.status is DatasetVersionStatus.VALIDATED:
+                if child.quality_run_id is None:
+                    raise OverrideNotApplicableError(
+                        "VALIDATED override child is missing its quality binding"
+                    )
+                with self._uow_factory() as uow:
+                    recovered_run = uow.data.get_quality_run(str(child.quality_run_id))
+                    uow.rollback()
+                if recovered_run.status is not QualityRunStatus.PASSED:
+                    raise OverrideNotApplicableError(
+                        "VALIDATED override child does not reference a PASSED quality run"
+                    )
+                coordinator_child = DatasetVersion.building(
+                    version_id=child.version_id,
+                    dataset=child.dataset,
+                    schema_version=child.schema_version,
+                    code_version=child.code_version,
+                    rule_version=child.rule_version,
+                    parent_version_id=child.parent_version_id,
+                    input_batch_ids=child.input_batch_ids,
+                    created_at=child.created_at,
+                )
+                published = self._publish_coordinator.coordinate(
+                    CanonicalPublishCoordinatorRequest(
+                        version=coordinator_child,
+                        tables=(transformed.table,),
+                        code_version=child.code_version,
+                        rule_version=child.rule_version,
+                        quality_run_id=recovered_run.run_id,
+                        source_override=provenance,
+                    )
+                ).version
+                return self._bind_and_apply_published_child(
+                    override=current,
+                    child=published,
+                    attempt_id=attempt.attempt_id,
+                    provenance=provenance,
+                    actor=actor,
+                    at=applied_at,
                 )
             request = replace(
                 quality_request,
@@ -421,17 +523,20 @@ class SourceOverrideService:
             )
             outcome = self._quality_runner.run(request=request, table=transformed.table)
         except Exception as error:
+            if child.status is DatasetVersionStatus.VALIDATED:
+                raise OverrideNotApplicableError(
+                    "VALIDATED override recovery was interrupted; retry required"
+                ) from error
             self._fail_application(
                 override_id=override_id,
                 child=child,
                 attempt_id=attempt.attempt_id,
-                stage="transform_or_quality",
-                error=error,
+                stage="QUALITY_RUNNER",
                 at=applied_at,
                 kind=BatchFailureKind.INTERNAL,
             )
             raise OverrideNotApplicableError(
-                "override transformation or quality execution failed; child marked FAILED"
+                "override quality execution failed; child marked FAILED"
             ) from error
 
         results = tuple(
@@ -445,9 +550,22 @@ class SourceOverrideService:
             for item in outcome.results
             if item.status is not RuleOutcomeStatus.SKIPPED
         )
-        artifact_directory = self._quality_artifact_writer.write(
-            outcome=outcome, row_evidence_tables={}
-        )
+        try:
+            artifact_directory = self._quality_artifact_writer.write(
+                outcome=outcome, row_evidence_tables={}
+            )
+        except Exception as error:
+            self._fail_application(
+                override_id=override_id,
+                child=child,
+                attempt_id=attempt.attempt_id,
+                stage="QUALITY_ARTIFACT_WRITER",
+                at=applied_at,
+                kind=BatchFailureKind.INTERNAL,
+            )
+            raise OverrideNotApplicableError(
+                "override quality artifact write failed; child marked FAILED"
+            ) from error
         run = QualityRun(
             run_id=outcome.run_id,
             version_id=child.version_id,
@@ -463,17 +581,29 @@ class SourceOverrideService:
             ).as_posix(),
             failure=outcome.failure,
         )
-        with self._uow_factory() as uow:
-            uow.data.save_quality_run(run)
-            uow.commit()
+        try:
+            with self._uow_factory() as uow:
+                uow.data.save_quality_run(run)
+                uow.commit()
+        except Exception as error:
+            self._fail_application(
+                override_id=override_id,
+                child=child,
+                attempt_id=attempt.attempt_id,
+                stage="QUALITY_RUN_PERSISTENCE",
+                at=applied_at,
+                kind=BatchFailureKind.INTERNAL,
+            )
+            raise OverrideNotApplicableError(
+                "override quality run persistence failed; child marked FAILED"
+            ) from error
 
         if run.status is not QualityRunStatus.PASSED:
             self._fail_application(
                 override_id=override_id,
                 child=child,
                 attempt_id=attempt.attempt_id,
-                stage="quality",
-                error=OverrideNotApplicableError(f"quality run {run.run_id} failed"),
+                stage="QUALITY_GATE",
                 at=applied_at,
                 kind=BatchFailureKind.QUALITY,
             )
@@ -481,16 +611,48 @@ class SourceOverrideService:
                 f"override candidate failed quality run {run.run_id}; child marked FAILED"
             )
 
-        published = self._publish_coordinator.coordinate(
-            CanonicalPublishCoordinatorRequest(
-                version=child,
-                tables=(transformed.table,),
-                code_version=child.code_version,
-                rule_version=child.rule_version,
-                quality_run_id=run.run_id,
-                source_override=provenance,
-            )
-        ).version
+        try:
+            published = self._publish_coordinator.coordinate(
+                CanonicalPublishCoordinatorRequest(
+                    version=child,
+                    tables=(transformed.table,),
+                    code_version=child.code_version,
+                    rule_version=child.rule_version,
+                    quality_run_id=run.run_id,
+                    source_override=provenance,
+                )
+            ).version
+        except Exception as error:
+            with self._uow_factory() as uow:
+                persisted_child = uow.data.get_version(str(child.version_id))
+                uow.rollback()
+            if persisted_child.status in {
+                DatasetVersionStatus.VALIDATED,
+                DatasetVersionStatus.PUBLISHED,
+            } or self._publish_coordinator.has_published_directory(child):
+                raise OverrideNotApplicableError(
+                    "override publish was interrupted after durable promotion; retry required"
+                ) from error
+            if persisted_child.status is not DatasetVersionStatus.FAILED:
+                self._fail_application(
+                    override_id=override_id,
+                    child=persisted_child,
+                    attempt_id=attempt.attempt_id,
+                    stage="WAREHOUSE_PUBLISH",
+                    at=applied_at,
+                    kind=BatchFailureKind.INTERNAL,
+                )
+            else:
+                self._record_failed_attempt(
+                    override_id=override_id,
+                    child=persisted_child,
+                    attempt_id=attempt.attempt_id,
+                    stage="WAREHOUSE_PUBLISH",
+                    at=applied_at,
+                )
+            raise OverrideNotApplicableError(
+                "override warehouse publish failed; child marked FAILED"
+            ) from error
         return self._bind_and_apply_published_child(
             override=current,
             child=published,
@@ -573,32 +735,52 @@ class SourceOverrideService:
         *, override: SourceOverride, report: VerifiedDifferenceReport
     ) -> dict[str, object]:
         selected: dict[tuple[tuple[str, str], ...], set[str]] = {}
-        codes = set(override.scope_codes)
-        dates = {str(item) for item in override.scope_dates}
-        fields = set(override.fields)
-        for unit in report.units:
-            date_value = unit.primary_key.get(
-                "trade_date", unit.primary_key.get("effective_from", "")
-            )
-            if (
-                unit.classification == "BOTH"
-                and unit.primary_key.get("code") in codes
-                and date_value in dates
-                and unit.field in fields
-            ):
-                key = tuple(sorted(unit.primary_key.items()))
-                selected.setdefault(key, set()).add(unit.field)
+        for unit in override.field_replacements:
+            key = tuple(sorted((name, value) for name, value in unit.items() if name != "field"))
+            selected.setdefault(key, set()).add(unit["field"])
         contributions = [
             {
                 "primary_key": dict(key),
-                "kind": "FIELD_OVERRIDE",
+                "kind": "FIELD_REPLACEMENT",
                 "fields": sorted(unit_fields),
             }
             for key, unit_fields in sorted(selected.items())
         ]
+        descriptor = descriptor_for(override.dataset.value)
+        inserted_fields = sorted(set(descriptor.field_names) - set(descriptor.primary_key))
+        contributions.extend(
+            {
+                "primary_key": dict(sorted(unit.items())),
+                "kind": "ROW_INSERT",
+                "fields": inserted_fields,
+            }
+            for unit in override.fallback_only_keys
+        )
+        contributions.sort(
+            key=lambda item: (
+                tuple(sorted(cast(dict[str, str], item["primary_key"]).items())),
+                str(item["kind"]),
+            )
+        )
+        summary = {
+            "field_replacement_cells": str(
+                sum(
+                    len(cast(list[str], item["fields"]))
+                    for item in contributions
+                    if item["kind"] == "FIELD_REPLACEMENT"
+                )
+            ),
+            "row_insert_count": str(
+                sum(1 for item in contributions if item["kind"] == "ROW_INSERT")
+            ),
+            "affected_primary_key_count": str(len(contributions)),
+        }
         contribution_sha = compute_sha256(
             json.dumps(
-                contributions, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+                {"contributions": contributions, "summary": summary},
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
             ).encode("utf-8")
         )
         return {
@@ -618,8 +800,76 @@ class SourceOverrideService:
                 "content_sha256": report.fallback_content_sha256,
             },
             "fallback_contributions": contributions,
+            "contribution_summary": summary,
             "contribution_scope_sha256": contribution_sha,
         }
+
+    @staticmethod
+    def _resolve_field_replacements(
+        report: VerifiedDifferenceReport, request: CreateOverrideRequest
+    ) -> tuple[Mapping[str, str], ...]:
+        verified = {
+            (tuple(sorted(unit.primary_key.items())), unit.field)
+            for unit in report.units
+            if unit.classification == "BOTH"
+        }
+        requested = []
+        for item in request.field_replacements:
+            if "field" not in item:
+                raise OverrideNotApplicableError("field replacement must contain the field name")
+            key = tuple(sorted((name, value) for name, value in item.items() if name != "field"))
+            explicit_identity = (key, item["field"])
+            if explicit_identity not in verified:
+                raise OverrideNotApplicableError(
+                    "field replacement is not present in the verified report"
+                )
+            requested.append(dict(item))
+        return tuple(requested)
+
+    @staticmethod
+    def _resolve_fallback_only_keys(
+        report: VerifiedDifferenceReport, request: CreateOverrideRequest
+    ) -> tuple[Mapping[str, str], ...]:
+        verified = {
+            tuple(sorted(unit.primary_key.items()))
+            for unit in report.units
+            if unit.classification == "FALLBACK_ONLY"
+        }
+        selected: list[dict[str, str]] = []
+        for item in request.fallback_only_keys:
+            key = tuple(sorted(item.items()))
+            if key not in verified:
+                raise OverrideNotApplicableError(
+                    "fallback-only row is not present in the verified report"
+                )
+            selected.append(dict(item))
+        return tuple(selected)
+
+    @staticmethod
+    def _exact_scope_matches(report: VerifiedDifferenceReport, override: SourceOverride) -> bool:
+        verified_fields = {
+            (tuple(sorted(unit.primary_key.items())), unit.field)
+            for unit in report.units
+            if unit.classification == "BOTH"
+        }
+        requested_fields = {
+            (
+                tuple(sorted((name, value) for name, value in item.items() if name != "field")),
+                item["field"],
+            )
+            for item in override.field_replacements
+        }
+        verified_rows = {
+            tuple(sorted(unit.primary_key.items()))
+            for unit in report.units
+            if unit.classification == "FALLBACK_ONLY"
+        }
+        requested_rows = {tuple(sorted(item.items())) for item in override.fallback_only_keys}
+        return (
+            bool(requested_fields or requested_rows)
+            and requested_fields.issubset(verified_fields)
+            and requested_rows.issubset(verified_rows)
+        )
 
     def _bind_and_apply_published_child(
         self,
@@ -682,16 +932,16 @@ class SourceOverrideService:
         child: DatasetVersion,
         attempt_id: EntityId,
         stage: str,
-        error: Exception,
         at: UtcTimestamp,
         kind: BatchFailureKind,
     ) -> None:
+        failure_code = f"OVERRIDE_{stage}_{kind.value}".upper()
         failed = replace(
             child,
             status=DatasetVersionStatus.FAILED,
             failure=BatchFailureInfo(
                 error_type=kind,
-                message=f"override {stage} failed: {error}",
+                message=f"override application failed [{failure_code}]",
                 retryable=False,
             ),
         )
@@ -702,7 +952,27 @@ class SourceOverrideService:
                 attempt_id=str(attempt_id),
                 child_version_id=str(child.version_id),
                 failure_stage=stage,
-                message=str(error),
+                message=failure_code,
+                at=at,
+            )
+            uow.commit()
+
+    def _record_failed_attempt(
+        self,
+        *,
+        override_id: EntityId,
+        child: DatasetVersion,
+        attempt_id: EntityId,
+        stage: str,
+        at: UtcTimestamp,
+    ) -> None:
+        with self._uow_factory() as uow:
+            uow.data.record_override_application_failure(
+                override_id=str(override_id),
+                attempt_id=str(attempt_id),
+                child_version_id=str(child.version_id),
+                failure_stage=stage,
+                message=f"OVERRIDE_{stage}_INTERNAL",
                 at=at,
             )
             uow.commit()

@@ -28,6 +28,22 @@ from quantking.common.time import TradingDate
 
 
 class TestSourceOverrideCreationContract:
+    def test_pending_override_rejects_cartesian_only_scope(self) -> None:
+        from quantking.data.override.service import CreateOverrideRequest
+
+        with pytest.raises(ValueError, match="exact difference unit"):
+            CreateOverrideRequest(
+                difference_report_id=new_entity_id("data_diff"),
+                primary_batch_id=new_entity_id("data_batch"),
+                fallback_batch_id=new_entity_id("data_batch"),
+                primary_source="XTQUANT",
+                fallback_source="BAOSTOCK",
+                scope_codes=("000001.SZ",),
+                scope_dates=(TradingDate(date(2026, 7, 15)),),
+                fields=("close",),
+                reason="legacy cartesian scope",
+            )
+
     def test_pending_override_requires_non_empty_reason(self) -> None:
         from quantking.data.override.service import (
             CreateOverrideRequest,

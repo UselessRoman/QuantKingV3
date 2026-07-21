@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-import conftest as guard_policy
+from . import conftest as guard_policy
 
 _FORMAL_PATHS = (
     Path(r"E:\QuantKingV3Data") / "__guard_probe__",

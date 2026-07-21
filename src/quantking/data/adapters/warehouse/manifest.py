@@ -278,7 +278,9 @@ class CanonicalManifest:
             raise ValueError("created_at must be non-empty text")
         if self.parent_version_id is not None and not isinstance(self.parent_version_id, str):
             raise TypeError("parent_version_id must be a str or None")
-        normalised_batch_ids = tuple(sorted(self.input_batch_ids))
+        normalised_batch_ids = tuple(self.input_batch_ids)
+        if len(normalised_batch_ids) != len(set(normalised_batch_ids)):
+            raise ValueError("input_batch_ids must not contain duplicates")
         object.__setattr__(self, "input_batch_ids", normalised_batch_ids)
         normalised_summary: dict[str, str] = {}
         for key, value in self.coverage_summary.items():

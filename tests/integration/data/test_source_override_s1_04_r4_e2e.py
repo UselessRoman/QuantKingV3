@@ -304,6 +304,13 @@ def test_source_override_full_real_production_path(
             scope_codes=("000001.SZ",),
             scope_dates=(TradingDate(date(2026, 7, 15)),),
             fields=("close",),
+            field_replacements=(
+                {
+                    "code": "000001.SZ",
+                    "trade_date": "2026-07-15",
+                    "field": "close",
+                },
+            ),
             reason="verified close difference",
         ),
         created_at=utc_now(),

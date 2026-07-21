@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -17,6 +18,7 @@ class OverrideApplicationResult:
     table: pa.Table
     matched_rows: int
     changed_cells: int
+    inserted_rows: int = 0
 
 
 def apply_override_to_table(
@@ -24,24 +26,17 @@ def apply_override_to_table(
     dataset: DatasetKind,
     primary_table: pa.Table,
     fallback_table: pa.Table,
-    scope_codes: frozenset[str],
-    scope_dates: frozenset[date],
-    fields: frozenset[str],
-    allow_fallback_only: bool = False,
+    field_replacements: tuple[Mapping[str, str], ...] = (),
+    fallback_only_keys: tuple[Mapping[str, str], ...] = (),
 ) -> OverrideApplicationResult:
-    """Replace only approved cells from fallback into the primary table.
+    """Apply only explicitly approved cells and fallback-only rows.
 
     Args:
         dataset: The dataset kind being transformed.
         primary_table: The primary source table (immutable).
         fallback_table: The fallback source table.
-        scope_codes: Security codes approved for override.
-        scope_dates: Trade dates approved for override.
-        fields: Field names approved for override.
-        allow_fallback_only: If True, allows adding FALLBACK_ONLY rows
-            (rows that exist in fallback but not in primary) to the result.
-            If False (default), raises ValueError if any scoped row is missing
-            from primary.
+        field_replacements: Complete primary key plus field for each cell.
+        fallback_only_keys: Complete primary key for each approved row insert.
 
     Returns:
         OverrideApplicationResult with transformed table, matched_rows, and
@@ -49,9 +44,8 @@ def apply_override_to_table(
 
     Raises:
         ValueError: If schemas differ, primary keys are not unique, primary
-            key fields are in the override field list, a scoped row is missing
-            from fallback, a scoped row is missing from primary when
-            allow_fallback_only=False, or approved scope is not fully consumed.
+            key fields are selected for replacement, or the exact approved
+            scope is not fully consumed.
     """
     if primary_table.schema != fallback_table.schema:
         raise ValueError("primary and fallback tables must have identical schemas")
@@ -64,81 +58,69 @@ def apply_override_to_table(
     if len(fallback_map) != len(fallback) or len(set(primary_keys)) != len(primary):
         raise ValueError("override inputs must have unique primary keys")
 
-    # Validate that no primary key fields are in the override field list.
-    for field in fields:
-        if field in key_fields:
-            raise ValueError(f"primary key field {field!r} cannot be overridden")
+    if not field_replacements and not fallback_only_keys:
+        raise ValueError("override requires at least one exact difference unit")
 
     changed = 0
-    matched = 0
+    matched_keys: set[tuple[object, ...]] = set()
+    inserted = 0
     output: list[dict[str, object]] = []
-    date_field = "trade_date" if "trade_date" in descriptor.field_names else "effective_from"
-
-    # Track which scoped (code, date) pairs were actually consumed.
-    scoped_pairs = {(code, date) for code in scope_codes for date in scope_dates}
-    consumed_pairs: set[tuple[str, date]] = set()
-
-    # Build primary key set for faster lookup.
-    primary_key_set = set(_key(row, key_fields) for row in primary)
+    primary_key_set = set(primary_keys)
+    requested_fields: dict[tuple[str, ...], set[str]] = {}
+    for unit in field_replacements:
+        if set(unit) != {*key_fields, "field"}:
+            raise ValueError("field replacement must contain the complete primary key and field")
+        key = tuple(str(unit[name]) for name in key_fields)
+        field = str(unit["field"])
+        if field in key_fields or field not in descriptor.field_names:
+            raise ValueError("field replacement contains an invalid field")
+        requested_fields.setdefault(key, set()).add(field)
+    requested_rows: set[tuple[str, ...]] = set()
+    for unit in fallback_only_keys:
+        if set(unit) != set(key_fields):
+            raise ValueError("row insert must contain the complete primary key")
+        requested_rows.add(tuple(str(unit[name]) for name in key_fields))
+    consumed_fields: set[tuple[tuple[str, ...], str]] = set()
+    consumed_rows: set[tuple[str, ...]] = set()
 
     # Process all primary rows.
     for row in primary:
-        key = _key(row, key_fields)
-        code = str(row["code"])
-        trade_date = row[date_field]
-        pair = (code, trade_date)
-
-        if code not in scope_codes or trade_date not in scope_dates:
-            # Out of scope: keep primary row unchanged.
+        row_key = _key(row, key_fields)
+        string_key = tuple(_string_key_value(row[name]) for name in key_fields)
+        replacement_fields = requested_fields.get(string_key)
+        if not replacement_fields:
             output.append(dict(row))
             continue
-
-        # In scope: must find fallback row.
-        source = fallback_map.get(key)
+        source = fallback_map.get(row_key)
         if source is None:
-            raise ValueError(
-                f"fallback is missing scoped primary row {key!r}; "
-                f"cannot apply override without fallback data"
-            )
-
-        matched += 1
-        consumed_pairs.add(pair)
+            raise ValueError(f"fallback is missing approved field-replacement row {row_key!r}")
+        matched_keys.add(row_key)
         merged = dict(row)
-        for field in fields:
+        for field in replacement_fields:
             if merged[field] != source[field]:
                 changed += 1
             merged[field] = source[field]
+            consumed_fields.add((string_key, field))
         output.append(merged)
 
-    # If allow_fallback_only, add FALLBACK_ONLY rows that are in scope.
-    if allow_fallback_only:
-        for fallback_row in fallback:
-            key = _key(fallback_row, key_fields)
-            code = str(fallback_row["code"])
-            trade_date = fallback_row[date_field]
-            pair = (code, trade_date)
+    for fallback_row in fallback:
+        row_key = _key(fallback_row, key_fields)
+        string_key = tuple(_string_key_value(fallback_row[name]) for name in key_fields)
+        if string_key in requested_rows:
+            if row_key in primary_key_set:
+                raise ValueError("approved fallback-only row already exists in primary")
+            matched_keys.add(row_key)
+            consumed_rows.add(string_key)
+            inserted += 1
+            output.append(dict(fallback_row))
 
-            if code in scope_codes and trade_date in scope_dates and key not in primary_key_set:
-                # FALLBACK_ONLY: add it.
-                matched += 1
-                consumed_pairs.add(pair)
-                output.append(dict(fallback_row))
-
-    # Verify all approved scope was consumed (zero-match is an error).
-    if matched == 0:
-        raise ValueError("override scope matched zero rows; scope may be invalid")
-
-    unconsumed = scoped_pairs - consumed_pairs
-    if unconsumed:
-        # Some (code, date) pairs in the approved scope were not found in
-        # either primary or fallback (or allow_fallback_only=False blocked them).
-        # This is a partial match, which is not allowed.
-        sample = sorted(unconsumed)[:5]
-        raise ValueError(
-            f"override scope is not fully consumed; {len(unconsumed)} "
-            f"(code, date) pairs were not found in available data. "
-            f"Sample: {sample}"
-        )
+    expected_fields = {
+        (key, field) for key, unit_fields in requested_fields.items() for field in unit_fields
+    }
+    if not expected_fields and not requested_rows:
+        raise ValueError("override scope matched zero exact difference units")
+    if consumed_fields != expected_fields or consumed_rows != requested_rows:
+        raise ValueError("override exact difference scope was only partially consumed")
 
     candidate = ensure_sorted(
         dataset.value, pa.Table.from_pylist(output, schema=canonical_schema(dataset.value))
@@ -148,7 +130,12 @@ def apply_override_to_table(
         raise ValueError(
             f"override result failed canonical validation: {validation.issues[0].message}"
         )
-    return OverrideApplicationResult(table=candidate, matched_rows=matched, changed_cells=changed)
+    return OverrideApplicationResult(
+        table=candidate,
+        matched_rows=len(matched_keys),
+        changed_cells=changed,
+        inserted_rows=inserted,
+    )
 
 
 def _key(row: dict[str, object], fields: tuple[str, ...]) -> tuple[object, ...]:
@@ -156,6 +143,10 @@ def _key(row: dict[str, object], fields: tuple[str, ...]) -> tuple[object, ...]:
     if any(value is None for value in values):
         raise ValueError("primary key values cannot be null")
     return values
+
+
+def _string_key_value(value: object) -> str:
+    return value.isoformat() if isinstance(value, date) else str(value)
 
 
 __all__ = ("OverrideApplicationResult", "apply_override_to_table")

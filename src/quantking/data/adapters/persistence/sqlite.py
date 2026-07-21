@@ -525,6 +525,18 @@ def _override_row_values(override: SourceOverride) -> dict[str, object]:
         "scope_codes_json": _json_sequence(override.scope_codes),
         "scope_dates_json": _json_sequence(tuple(str(d) for d in override.scope_dates)),
         "fields_json": _json_sequence(override.fields),
+        "field_replacements_json": json.dumps(
+            [dict(unit) for unit in override.field_replacements],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        "fallback_only_keys_json": json.dumps(
+            [dict(unit) for unit in override.fallback_only_keys],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
         "reason": override.reason,
         "created_at": override.created_at.to_iso(),
         "approved_at": None if override.approved_at is None else override.approved_at.to_iso(),
@@ -560,6 +572,14 @@ def _override_domain(row: SourceOverrideRow) -> SourceOverride:
         approved_by=row.approved_by,
         applied_at=_timestamp(row.applied_at),
         applied_version_id=applied_version,
+        field_replacements=tuple(
+            {str(key): str(value) for key, value in unit.items()}
+            for unit in json.loads(row.field_replacements_json)
+        ),
+        fallback_only_keys=tuple(
+            {str(key): str(value) for key, value in unit.items()}
+            for unit in json.loads(row.fallback_only_keys_json)
+        ),
     )
 
 
@@ -1159,7 +1179,6 @@ class DataRepository:
                     "APPLIED requires the persisted PUBLISHED application attempt"
                 )
             attempt.status = "APPLIED"
-            attempt.ended_at = at.to_iso()
         action = {
             SourceOverrideStatus.APPROVED: "override_approved",
             SourceOverrideStatus.REJECTED: "override_rejected",
@@ -1300,15 +1319,6 @@ class DataRepository:
             .order_by(SourceOverrideApplicationAttemptRow.attempt_no.desc())
             .limit(1)
         )
-        last_failed = self._session.scalar(
-            select(SourceOverrideApplicationAttemptRow.failure_message)
-            .where(
-                SourceOverrideApplicationAttemptRow.override_id == override_id,
-                SourceOverrideApplicationAttemptRow.status == "FAILED",
-            )
-            .order_by(SourceOverrideApplicationAttemptRow.attempt_no.desc())
-            .limit(1)
-        )
         attempt_no = int(max_attempt or 0) + 1
         attempt = SourceOverrideApplicationAttemptRow(
             attempt_id=str(new_entity_id("data_override_attempt")),
@@ -1320,7 +1330,7 @@ class DataRepository:
             claimed_by=actor,
             started_at=at.to_iso(),
             ended_at=None,
-            failure_message=last_failed,
+            failure_message=None,
         )
         self._session.add(attempt)
         self._session.add(
@@ -1379,8 +1389,6 @@ class DataRepository:
             app.status = status
             app.updated_at = at.to_iso()
             app.failure_message = row.failure_message
-            if status == "FAILED":
-                self._session.delete(app)
         self._session.flush()
         return _override_attempt_domain(row)
 
@@ -1410,7 +1418,8 @@ class DataRepository:
         )
         row = self._session.scalar(
             select(SourceOverrideApplicationRow).where(
-                SourceOverrideApplicationRow.override_id == override_id
+                SourceOverrideApplicationRow.override_id == override_id,
+                SourceOverrideApplicationRow.status.in_(["CLAIMED", "PUBLISHED"]),
             )
         )
         if row is None:
@@ -1432,6 +1441,8 @@ class DataRepository:
                 "published child is missing its active application attempt"
             )
         attempt_row.status = "PUBLISHED"
+        attempt_row.ended_at = at.to_iso()
+        attempt_row.failure_message = None
         self._session.flush()
         return _override_attempt_domain(attempt_row)
 
@@ -1447,10 +1458,12 @@ class DataRepository:
         primary = provenance.get("primary")
         fallback = provenance.get("fallback")
         contributions = provenance.get("fallback_contributions")
+        summary = provenance.get("contribution_summary")
         if (
             not isinstance(primary, Mapping)
             or not isinstance(fallback, Mapping)
             or not isinstance(contributions, list)
+            or (summary is not None and not isinstance(summary, Mapping))
         ):
             raise OverrideNotApplicableError("manifest source_override provenance is invalid")
         expected_primary = {
@@ -1465,22 +1478,30 @@ class DataRepository:
             "version_id": str(report.fallback_version_id),
             "content_sha256": report.fallback_content_sha256,
         }
+        digest_payload: object = contributions
+        if isinstance(summary, Mapping):
+            digest_payload = {"contributions": contributions, "summary": dict(summary)}
         computed_scope_sha = compute_sha256(
             json.dumps(
-                contributions, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+                digest_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
             ).encode("utf-8")
         )
+        expected_fields = {
+            "override_id",
+            "difference_report_id",
+            "report_sha256",
+            "primary",
+            "fallback",
+            "fallback_contributions",
+            "contribution_scope_sha256",
+        }
+        if summary is not None:
+            expected_fields.add("contribution_summary")
         if (
-            set(provenance)
-            != {
-                "override_id",
-                "difference_report_id",
-                "report_sha256",
-                "primary",
-                "fallback",
-                "fallback_contributions",
-                "contribution_scope_sha256",
-            }
+            set(provenance) != expected_fields
             or provenance.get("override_id") != str(override.override_id)
             or provenance.get("difference_report_id") != str(report.report_id)
             or provenance.get("report_sha256") != report.report_sha256
@@ -1518,7 +1539,8 @@ class DataRepository:
     def get_override_application_binding(self, override_id: str) -> OverrideApplicationBinding:
         row = self._session.scalar(
             select(SourceOverrideApplicationRow).where(
-                SourceOverrideApplicationRow.override_id == override_id
+                SourceOverrideApplicationRow.override_id == override_id,
+                SourceOverrideApplicationRow.status.in_(["CLAIMED", "PUBLISHED", "APPLIED"]),
             )
         )
         if row is None:
@@ -1536,6 +1558,19 @@ class DataRepository:
             report_sha256=row.report_sha256,
             contribution_scope_sha256=row.contribution_scope_sha256,
         )
+
+    def find_last_override_application_attempt(
+        self, override_id: str
+    ) -> OverrideApplicationAttempt:
+        row = self._session.scalar(
+            select(SourceOverrideApplicationAttemptRow)
+            .where(SourceOverrideApplicationAttemptRow.override_id == override_id)
+            .order_by(SourceOverrideApplicationAttemptRow.attempt_no.desc())
+            .limit(1)
+        )
+        if row is None:
+            raise InvalidIdError("override application attempt does not exist")
+        return _override_attempt_domain(row)
 
     def record_override_application_failure(
         self,

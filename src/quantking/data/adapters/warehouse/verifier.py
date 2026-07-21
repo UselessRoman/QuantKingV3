@@ -365,7 +365,7 @@ def _verify_manifest_shape(manifest: dict[str, object], *, expected_schema: str)
 def _verify_source_override_manifest(value: object) -> None:
     if not isinstance(value, dict):
         raise ManifestIntegrityError("source_override manifest entry is invalid")
-    required = {
+    legacy_required = {
         "override_id",
         "difference_report_id",
         "report_sha256",
@@ -374,7 +374,8 @@ def _verify_source_override_manifest(value: object) -> None:
         "fallback_contributions",
         "contribution_scope_sha256",
     }
-    if set(value) != required:
+    r5_required = legacy_required | {"contribution_summary"}
+    if frozenset(value) not in {frozenset(legacy_required), frozenset(r5_required)}:
         raise ManifestIntegrityError("source_override fields do not match schema")
     for field in ("override_id", "difference_report_id"):
         if not isinstance(value[field], str) or not value[field].strip():
@@ -396,12 +397,37 @@ def _verify_source_override_manifest(value: object) -> None:
         ):
             raise ManifestIntegrityError("source_override side SHA is invalid")
     contributions = value["fallback_contributions"]
+    summary = value.get("contribution_summary")
     if not isinstance(contributions, list):
         raise ManifestIntegrityError("source_override contributions are invalid")
+    if summary is not None and (
+        not isinstance(summary, dict)
+        or set(summary)
+        != {
+            "field_replacement_cells",
+            "row_insert_count",
+            "affected_primary_key_count",
+        }
+        or any(not isinstance(item, str) or not item.isdigit() for item in summary.values())
+    ):
+        raise ManifestIntegrityError("source_override contribution summary is invalid")
+    for contribution in contributions:
+        if (
+            not isinstance(contribution, dict)
+            or set(contribution) != {"primary_key", "kind", "fields"}
+            or contribution["kind"] not in {"FIELD_OVERRIDE", "FIELD_REPLACEMENT", "ROW_INSERT"}
+            or not isinstance(contribution["primary_key"], dict)
+            or not isinstance(contribution["fields"], list)
+            or any(not isinstance(field, str) or not field for field in contribution["fields"])
+        ):
+            raise ManifestIntegrityError("source_override contribution entry is invalid")
+    digest_payload: object = contributions
+    if summary is not None:
+        digest_payload = {"contributions": contributions, "summary": summary}
     expected = compute_sha256(
-        json.dumps(contributions, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
-            "utf-8"
-        )
+        json.dumps(
+            digest_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
     )
     if expected != value["contribution_scope_sha256"]:
         raise ManifestIntegrityError("source_override contribution scope SHA mismatch")

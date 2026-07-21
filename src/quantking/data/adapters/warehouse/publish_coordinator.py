@@ -193,6 +193,10 @@ class CanonicalPublishCoordinator:
         self._warehouse = warehouse
         self._uow_factory = uow_factory
 
+    def has_published_directory(self, version: DatasetVersion) -> bool:
+        """Return whether the final atomically-promoted directory exists."""
+        return self._warehouse.published_directory_for(version).is_dir()
+
     # -- public API ---------------------------------------------------------
 
     def coordinate(self, request: CanonicalPublishCoordinatorRequest) -> CanonicalPublishResult:

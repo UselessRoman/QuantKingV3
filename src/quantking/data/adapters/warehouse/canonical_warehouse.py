@@ -42,6 +42,7 @@ import datetime as _dt
 import json
 import os
 import re
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,6 +86,9 @@ from quantking.data.models import (
     EmptyResultInfo,
 )
 from quantking.data.schemas import descriptor_for
+
+_PUBLISH_LOCKS: dict[str, threading.RLock] = {}
+_PUBLISH_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +190,13 @@ class CanonicalWarehouse:
         """The resolved managed data root (read-only)."""
         return self._data_root
 
+    def published_directory_for(self, version: DatasetVersion) -> Path:
+        """Return the managed final directory for a dataset version."""
+        directory_name = path_safe_id(str(version.version_id))
+        target = self._data_root / "warehouse" / version.dataset.value / directory_name
+        self._assert_managed_target(self._data_root, target)
+        return target
+
     # -- public API ---------------------------------------------------------
 
     def publish(self, request: CanonicalPublishRequest) -> Path:
@@ -193,34 +204,30 @@ class CanonicalWarehouse:
         self._validate_version_identity(request)
         final = self._final_path(request)
         incomplete = self._incomplete_path(request)
-        self._assert_managed_target(self._data_root, final)
-        self._assert_managed_target(self._data_root, incomplete)
-        if final.exists():
-            self._validate_inputs(request)
-            return self._reconcile_existing(final, request)
-        self._validate_request_credentials(request)
-        # Create the ``.incomplete`` directory first so any failure
-        # (including pre-write validation rejection) leaves the
-        # forensic evidence in place. We do this before validation so
-        # the caller can inspect ``incomplete/failure.json`` to see
-        # why a request was rejected.
-        try:
-            incomplete.mkdir(parents=True, exist_ok=False)
-        except OSError as error:
-            raise CanonicalWarehouseError(
-                "failed to create incomplete directory",
-                context={"version_id": str(request.version.version_id), "detail": str(error)},
-            ) from error
-        try:
-            self._write_input_listing(incomplete, request)
-            self._validate_inputs(request)
-        except CanonicalWarehouseError as error:
-            # Pre-write validation failures must still preserve a
-            # ``failure.json`` so operators can see exactly which
-            # inputs were rejected.
-            self._preserve_failure(incomplete, request, error)
-            raise
-        return self._publish_fresh(request, final)
+        lock_key = str(final).casefold()
+        with _PUBLISH_LOCKS_GUARD:
+            publish_lock = _PUBLISH_LOCKS.setdefault(lock_key, threading.RLock())
+        with publish_lock:
+            self._assert_managed_target(self._data_root, final)
+            self._assert_managed_target(self._data_root, incomplete)
+            if final.exists():
+                self._validate_inputs(request)
+                return self._reconcile_existing(final, request)
+            self._validate_request_credentials(request)
+            try:
+                incomplete.mkdir(parents=True, exist_ok=False)
+            except OSError as error:
+                raise CanonicalWarehouseError(
+                    "failed to create incomplete directory",
+                    context={"version_id": str(request.version.version_id)},
+                ) from error
+            try:
+                self._write_input_listing(incomplete, request)
+                self._validate_inputs(request)
+            except CanonicalWarehouseError as error:
+                self._preserve_failure(incomplete, request, error)
+                raise
+            return self._publish_fresh(request, final)
 
     # -- internals ----------------------------------------------------------
 
@@ -323,7 +330,7 @@ class CanonicalWarehouse:
             self._assert_managed_target(self._data_root, incomplete)
             self._assert_managed_target(self._data_root, final)
             final.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(incomplete, final)
+            self._atomic_promote(incomplete, final)
         except CanonicalWarehouseError as error:
             self._preserve_failure(incomplete, request, error)
             raise
@@ -335,6 +342,9 @@ class CanonicalWarehouse:
             ) from error
         self._validate_final(final)
         return final
+
+    def _atomic_promote(self, incomplete: Path, final: Path) -> None:
+        os.replace(incomplete, final)
 
     def _reconcile_existing(self, final: Path, request: CanonicalPublishRequest) -> Path:
         # Run the unified strict verifier first. Any on-disk integrity
