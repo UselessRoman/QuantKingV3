@@ -150,3 +150,134 @@ def test_quality_engine_fails_missing_open_session_by_security_exchange() -> Non
     assert "coverage_by_security_exchange" in failed
     assert "2026-07-16" in failed["coverage_by_security_exchange"]
     assert "2026-07-17" not in failed["coverage_by_security_exchange"]
+
+
+def test_quality_engine_fails_completely_missing_expected_security() -> None:
+    candidate = _daily(
+        [
+            ("000001.SZ", date(2026, 7, 15)),
+            ("000001.SZ", date(2026, 7, 16)),
+        ]
+    )
+    request = QualityRequest(
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        version_id=new_entity_id("data_version"),
+        rule_version="quality-rules.v1",
+        schema_version="daily_bar_unadjusted.v1",
+        code_version="s1-04-r4",
+        content_sha256="0" * 64,
+        input_batch_ids=(),
+        expected_securities=("000001.SZ", "600000.SH"),
+        expected_exchanges=("SZ", "SH"),
+        coverage_start=TradingDate(date(2026, 7, 15)),
+        coverage_end=TradingDate(date(2026, 7, 16)),
+        reference_data={
+            "exchange_calendar": ReferenceDataBinding(
+                dataset=DatasetKind.EXCHANGE_CALENDAR,
+                version_id=new_entity_id("data_version"),
+                content_sha256="a" * 64,
+            )
+        },
+        empty_result=None,
+    )
+
+    outcome = QualityEngine(rule_set=default_rule_set()).execute(
+        request=request,
+        table=candidate,
+        reference_tables={"exchange_calendar": _calendar()},
+    )
+
+    rule = next(
+        item for item in outcome.results if item.rule_code == "coverage_by_security_exchange"
+    )
+    assert rule.status.value == "FAILED"
+    assert "600000.SH" in rule.summary
+
+
+def test_quality_engine_fails_trailing_open_session_gap() -> None:
+    candidate = _daily([("000001.SZ", date(2026, 7, 15))])
+    request = QualityRequest(
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        version_id=new_entity_id("data_version"),
+        rule_version="quality-rules.v1",
+        schema_version="daily_bar_unadjusted.v1",
+        code_version="s1-04-r4",
+        content_sha256="0" * 64,
+        input_batch_ids=(),
+        expected_securities=("000001.SZ",),
+        expected_exchanges=("SZ",),
+        coverage_start=TradingDate(date(2026, 7, 15)),
+        coverage_end=TradingDate(date(2026, 7, 16)),
+        reference_data={
+            "exchange_calendar": ReferenceDataBinding(
+                dataset=DatasetKind.EXCHANGE_CALENDAR,
+                version_id=new_entity_id("data_version"),
+                content_sha256="a" * 64,
+            )
+        },
+        empty_result=None,
+    )
+
+    outcome = QualityEngine(rule_set=default_rule_set()).execute(
+        request=request,
+        table=candidate,
+        reference_tables={"exchange_calendar": _calendar()},
+    )
+
+    rule = next(
+        item for item in outcome.results if item.rule_code == "coverage_by_security_exchange"
+    )
+    assert rule.status.value == "FAILED"
+    assert "2026-07-16" in rule.summary
+
+
+def test_quality_runner_loads_bound_references_and_rejects_wrong_sha(
+    tmp_path: Path, uow_factory: DataSqliteUnitOfWorkFactory
+) -> None:
+    from quantking.data.quality.references import (
+        PublishedReferenceLoader,
+        ReferenceDataBindingError,
+    )
+    from quantking.data.quality.runner import QualityRunner
+
+    version = DatasetVersion.building(
+        version_id=new_entity_id("data_version"),
+        dataset=DatasetKind.EXCHANGE_CALENDAR,
+        schema_version="exchange_calendar.v1",
+        code_version="s1-04-r4",
+        parent_version_id=None,
+        input_batch_ids=(),
+        created_at=utc_now(),
+    )
+    with uow_factory() as uow:
+        uow.data.save_version(version)
+        uow.commit()
+
+    request = QualityRequest(
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        version_id=new_entity_id("data_version"),
+        rule_version="quality-rules.v1",
+        schema_version="daily_bar_unadjusted.v1",
+        code_version="s1-04-r4",
+        content_sha256="0" * 64,
+        input_batch_ids=(),
+        expected_securities=("000001.SZ",),
+        expected_exchanges=("SZ",),
+        coverage_start=TradingDate(date(2026, 7, 15)),
+        coverage_end=TradingDate(date(2026, 7, 16)),
+        reference_data={
+            "exchange_calendar": ReferenceDataBinding(
+                dataset=DatasetKind.EXCHANGE_CALENDAR,
+                version_id=version.version_id,
+                content_sha256="f" * 64,
+            )
+        },
+        empty_result=None,
+    )
+    runner = QualityRunner(
+        engine=QualityEngine(rule_set=default_rule_set()),
+        reference_loader=PublishedReferenceLoader(data_root=tmp_path, uow_factory=uow_factory),
+    )
+
+    with pytest.raises(ReferenceDataBindingError):
+        runner.run(request=request, table=_daily([("000001.SZ", date(2026, 7, 15))]))

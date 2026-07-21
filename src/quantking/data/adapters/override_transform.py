@@ -7,7 +7,7 @@ from datetime import date
 
 import pyarrow as pa
 
-from quantking.data.adapters.canonical_schema import ensure_sorted, validate_table
+from quantking.data.adapters.canonical_schema import canonical_schema, ensure_sorted, validate_table
 from quantking.data.models import DatasetKind
 from quantking.data.schemas import descriptor_for
 
@@ -141,7 +141,7 @@ def apply_override_to_table(
         )
 
     candidate = ensure_sorted(
-        dataset.value, pa.Table.from_pylist(output, schema=primary_table.schema)
+        dataset.value, pa.Table.from_pylist(output, schema=canonical_schema(dataset.value))
     )
     validation = validate_table(dataset.value, candidate)
     if not validation.ok:

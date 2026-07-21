@@ -179,6 +179,17 @@ class CanonicalQueryAdapter:
         )
         return self._query(request)
 
+    def verify_manifest_by_id(self, *, version_id: str, dataset: str) -> VerifiedDirectory:
+        """Re-read and credential-check one PUBLISHED version manifest."""
+        request = CanonicalQueryRequest(version_id=version_id, dataset=dataset)
+        self._validate_request(request)
+        version = self._load_version(request)
+        verified = verify_canonical_directory(
+            self._directory_for(version), data_root=self._data_root
+        )
+        self._verify_credentials(verified, version)
+        return verified
+
     def _query(self, request: CanonicalQueryRequest) -> pa.Table:
         # Request-contract violations (bad version_id form, unknown field,
         # ad-hoc SQL, unknown dataset) surface as :class:`QueryContractError`

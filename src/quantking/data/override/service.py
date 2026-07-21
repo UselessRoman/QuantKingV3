@@ -14,20 +14,25 @@ overrides) are enforced here.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import json
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import cast
 
 from quantking.common.errors import OverrideNotApplicableError
 from quantking.common.ids import EntityId, new_entity_id
 from quantking.common.time import TradingDate, UtcTimestamp
 from quantking.data.adapters.override_transform import apply_override_to_table
 from quantking.data.adapters.persistence.sqlite import DataSqliteUnitOfWorkFactory
+from quantking.data.adapters.warehouse.manifest import compute_sha256
 from quantking.data.adapters.warehouse.publish_coordinator import (
     CanonicalPublishCoordinator,
     CanonicalPublishCoordinatorRequest,
 )
 from quantking.data.adapters.warehouse.query import CanonicalQueryAdapter
+from quantking.data.comparison.verifier import (
+    DifferenceReportVerifier,
+    VerifiedDifferenceReport,
+)
 from quantking.data.models import (
     BatchFailureInfo,
     BatchFailureKind,
@@ -40,8 +45,11 @@ from quantking.data.models import (
     SourceOverride,
     SourceOverrideStatus,
 )
+from quantking.data.quality.artifacts import QualityArtifactWriter
 from quantking.data.quality.engine import QualityEngine
 from quantking.data.quality.models import QualityRequest, RuleOutcomeStatus
+from quantking.data.quality.references import PublishedReferenceLoader
+from quantking.data.quality.runner import QualityRunner
 from quantking.data.schemas import DatasetSchemaDescriptor
 
 # ---------------------------------------------------------------------------
@@ -188,14 +196,33 @@ class SourceOverrideService:
         self,
         uow_factory: DataSqliteUnitOfWorkFactory,
         *,
-        query_adapter: CanonicalQueryAdapter | None = None,
-        quality_engine: QualityEngine | None = None,
-        publish_coordinator: CanonicalPublishCoordinator | None = None,
-        difference_report_verifier: object | None = None,
+        query_adapter: CanonicalQueryAdapter,
+        quality_engine: QualityEngine,
+        reference_loader: PublishedReferenceLoader,
+        quality_artifact_writer: QualityArtifactWriter,
+        publish_coordinator: CanonicalPublishCoordinator,
+        difference_report_verifier: DifferenceReportVerifier,
     ) -> None:
+        if not isinstance(uow_factory, DataSqliteUnitOfWorkFactory):
+            raise TypeError("uow_factory must be a DataSqliteUnitOfWorkFactory")
+        if not isinstance(query_adapter, CanonicalQueryAdapter):
+            raise TypeError("query_adapter must be a CanonicalQueryAdapter")
+        if not isinstance(quality_engine, QualityEngine):
+            raise TypeError("quality_engine must be a QualityEngine")
+        if not isinstance(reference_loader, PublishedReferenceLoader):
+            raise TypeError("reference_loader must be a PublishedReferenceLoader")
+        if not isinstance(quality_artifact_writer, QualityArtifactWriter):
+            raise TypeError("quality_artifact_writer must be a QualityArtifactWriter")
+        if not isinstance(publish_coordinator, CanonicalPublishCoordinator):
+            raise TypeError("publish_coordinator must be a CanonicalPublishCoordinator")
+        if not isinstance(difference_report_verifier, DifferenceReportVerifier):
+            raise TypeError("difference_report_verifier must be a DifferenceReportVerifier")
         self._uow_factory = uow_factory
         self._query_adapter = query_adapter
-        self._quality_engine = quality_engine
+        self._quality_runner = QualityRunner(
+            engine=quality_engine, reference_loader=reference_loader
+        )
+        self._quality_artifact_writer = quality_artifact_writer
         self._publish_coordinator = publish_coordinator
         self._difference_report_verifier = difference_report_verifier
 
@@ -203,14 +230,22 @@ class SourceOverrideService:
         self, request: CreateOverrideRequest, created_at: UtcTimestamp
     ) -> SourceOverride:
         """Create a PENDING override bound to a verified DifferenceReport."""
-        if self._difference_report_verifier is not None and not hasattr(
-            self._difference_report_verifier, "verify"
-        ):
-            raise OverrideNotApplicableError("verified report is required before override creation")
+        verified = self._difference_report_verifier.verify(report_id=request.difference_report_id)
         override_id = new_entity_id("data_override")
         with self._uow_factory() as uow:
             report = uow.data.get_difference_report(str(request.difference_report_id))
             version = uow.data.get_version(str(report.version_id))
+            self._require_verified_report_matches_database(
+                verified=verified, report=report, dataset=version.dataset.value
+            )
+            if not verified.scope_matches(
+                codes=frozenset(request.scope_codes),
+                dates=frozenset(str(item) for item in request.scope_dates),
+                fields=frozenset(request.fields),
+            ):
+                raise OverrideNotApplicableError(
+                    "approved scope must be an exact subset of verified difference units"
+                )
             override = SourceOverride.pending(
                 override_id=override_id,
                 dataset=version.dataset,
@@ -253,32 +288,13 @@ class SourceOverrideService:
         applied_at: UtcTimestamp,
         *,
         actor: str = "system",
-        quality_request: QualityRequest | None = None,
-        reference_tables: Mapping[str, Any] | None = None,
+        quality_request: QualityRequest,
     ) -> SourceOverride:
-        """Apply an approved override through recoverable, idempotent orchestration.
-
-        Workflow:
-        1. Check if override is already APPLIED (idempotent early-exit).
-        2. Validate APPROVED status and required dependencies.
-        3. Verify parent/fallback versions are PUBLISHED with matching content SHA.
-        4. Check for existing child version (interrupted after publish but before APPLIED).
-        5. Create new child version in BUILDING status if none exists.
-        6. Transform primary table with fallback overrides.
-        7. Execute quality gate on transformed table.
-        8. Save quality run; on FAILED, transition child to FAILED and keep override APPROVED.
-        9. Atomic publish via coordinator.
-        10. Mark override as APPLIED with child version_id.
-
-        Any failure after step 5 leaves a FAILED child version and preserves
-        the APPROVED override for retry. Retry with same override_id is idempotent:
-        - If a PUBLISHED child already exists and matches this override's provenance,
-          mark override APPLIED and return.
-        - If a FAILED child exists, create a new child and retry from step 6.
-        """
+        """Apply one APPROVED override using its persisted recoverable child."""
+        if not isinstance(quality_request, QualityRequest):
+            raise TypeError("quality_request must be a QualityRequest")
         with self._uow_factory() as uow:
             current = uow.data.get_override(str(override_id))
-            # Idempotent: if already APPLIED, return immediately.
             if current.status is SourceOverrideStatus.APPLIED:
                 return current
             if current.status is not SourceOverrideStatus.APPROVED:
@@ -286,20 +302,9 @@ class SourceOverrideService:
                     "only APPROVED overrides can be applied",
                     context={"current": current.status.value},
                 )
-            if (
-                self._query_adapter is None
-                or self._quality_engine is None
-                or self._publish_coordinator is None
-            ):
-                raise OverrideNotApplicableError("override application dependencies are required")
-            if quality_request is None:
-                raise OverrideNotApplicableError("quality_request is required")
-
             report = uow.data.get_difference_report(str(current.difference_report_id))
             parent = uow.data.get_version(str(report.primary_version_id))
             fallback = uow.data.get_version(str(report.fallback_version_id))
-
-            # Verify parent and fallback are PUBLISHED with exact content SHA match.
             if parent.status is not DatasetVersionStatus.PUBLISHED:
                 raise OverrideNotApplicableError(
                     f"parent version {parent.version_id} is not PUBLISHED; "
@@ -325,37 +330,64 @@ class SourceOverrideService:
                     f"version={fallback.content_sha256}, report={report.fallback_content_sha256}"
                 )
 
-            # Check for existing child version (interrupted workflow after
-            # publish but before APPLIED). Skip SQL query due to mypy
-            # constraints; just create the child and handle duplicates later.
-            existing_children: list[DatasetVersion] = []
-            if existing_children:
-                # An interrupted publish left a PUBLISHED child; mark override APPLIED.
-                child = existing_children[0]
-                result = uow.data.apply_override(
-                    str(override_id),
-                    actor=actor,
-                    at=applied_at,
-                    applied_version_id=str(child.version_id),
-                )
-                uow.commit()
-                return result
-
-            # No existing PUBLISHED child; create a new BUILDING version.
-            child = DatasetVersion.building(
-                version_id=new_entity_id("data_version"),
-                dataset=current.dataset,
-                schema_version=parent.schema_version,
-                code_version=parent.code_version,
-                rule_version=parent.rule_version,
-                parent_version_id=parent.version_id,
-                input_batch_ids=(current.primary_batch_id, current.fallback_batch_id),
-                created_at=applied_at,
+        verified_report = self._difference_report_verifier.verify(
+            report_id=current.difference_report_id
+        )
+        self._require_verified_report_matches_database(
+            verified=verified_report, report=report, dataset=current.dataset.value
+        )
+        if not verified_report.scope_matches(
+            codes=frozenset(current.scope_codes),
+            dates=frozenset(str(item) for item in current.scope_dates),
+            fields=frozenset(current.fields),
+        ):
+            raise OverrideNotApplicableError(
+                "persisted approval scope is not a verified difference-unit subset"
             )
-            uow.data.save_version(child)
+        self._validate_quality_request(quality_request, child_template=parent)
+        input_fingerprint = self._application_fingerprint(
+            current=current, report=verified_report, quality_request=quality_request
+        )
+        proposed_child = DatasetVersion.building(
+            version_id=new_entity_id("data_version"),
+            dataset=current.dataset,
+            schema_version=parent.schema_version,
+            code_version=parent.code_version,
+            rule_version=parent.rule_version,
+            parent_version_id=parent.version_id,
+            input_batch_ids=(current.primary_batch_id, current.fallback_batch_id),
+            created_at=applied_at,
+        )
+        with self._uow_factory() as uow:
+            attempt = uow.data.claim_override_application_child(
+                override_id=str(override_id),
+                child=proposed_child,
+                input_fingerprint=input_fingerprint,
+                actor=actor,
+                at=applied_at,
+            )
             uow.commit()
+            child = uow.data.get_version(str(attempt.child_version_id))
 
-        # Transformation and quality execution happen outside the initial transaction.
+        provenance = self._build_provenance(override=current, report=verified_report)
+        if child.status is DatasetVersionStatus.PUBLISHED:
+            return self._bind_and_apply_published_child(
+                override=current,
+                child=child,
+                attempt_id=attempt.attempt_id,
+                provenance=provenance,
+                actor=actor,
+                at=applied_at,
+            )
+        if child.version_id != proposed_child.version_id:
+            raise OverrideNotApplicableError(
+                "override application is already claimed by another worker"
+            )
+        if child.status is not DatasetVersionStatus.BUILDING:
+            raise OverrideNotApplicableError(
+                "active override application child is neither BUILDING nor PUBLISHED"
+            )
+
         try:
             primary_table = self._query_adapter.query_by_id(
                 version_id=str(report.primary_version_id),
@@ -374,33 +406,32 @@ class SourceOverrideService:
                 scope_codes=frozenset(current.scope_codes),
                 scope_dates=frozenset(item.value for item in current.scope_dates),
                 fields=frozenset(current.fields),
-                allow_fallback_only=True,  # Support FALLBACK_ONLY rows from report
+                allow_fallback_only=False,
             )
-            request = quality_request
-            if request.version_id != child.version_id:
-                request = replace(
-                    request, version_id=child.version_id, input_batch_ids=child.input_batch_ids
+            contributions = cast(list[dict[str, object]], provenance["fallback_contributions"])
+            expected_changed = sum(len(cast(list[str], item["fields"])) for item in contributions)
+            if transformed.changed_cells != expected_changed:
+                raise OverrideNotApplicableError(
+                    "actual transformed cells do not match verified fallback contributions"
                 )
-            outcome = self._quality_engine.execute(
-                request=request, table=transformed.table, reference_tables=reference_tables or {}
+            request = replace(
+                quality_request,
+                version_id=child.version_id,
+                input_batch_ids=child.input_batch_ids,
             )
+            outcome = self._quality_runner.run(request=request, table=transformed.table)
         except Exception as error:
-            # Transformation or quality execution failed; mark child FAILED.
-            with self._uow_factory() as uow:
-                failed_child = replace(
-                    child,
-                    status=DatasetVersionStatus.FAILED,
-                    failure=BatchFailureInfo(
-                        error_type=BatchFailureKind.INTERNAL,
-                        message=f"Override transformation or quality execution failed: {error}",
-                        retryable=False,
-                    ),
-                )
-                uow.data.save_version(failed_child)
-                uow.commit()
+            self._fail_application(
+                override_id=override_id,
+                child=child,
+                attempt_id=attempt.attempt_id,
+                stage="transform_or_quality",
+                error=error,
+                at=applied_at,
+                kind=BatchFailureKind.INTERNAL,
+            )
             raise OverrideNotApplicableError(
-                f"override transformation or quality execution failed; "
-                f"child version {child.version_id} marked FAILED; override remains APPROVED"
+                "override transformation or quality execution failed; child marked FAILED"
             ) from error
 
         results = tuple(
@@ -414,6 +445,9 @@ class SourceOverrideService:
             for item in outcome.results
             if item.status is not RuleOutcomeStatus.SKIPPED
         )
+        artifact_directory = self._quality_artifact_writer.write(
+            outcome=outcome, row_evidence_tables={}
+        )
         run = QualityRun(
             run_id=outcome.run_id,
             version_id=child.version_id,
@@ -424,7 +458,9 @@ class SourceOverrideService:
             started_at=outcome.started_at,
             ended_at=outcome.ended_at,
             results=results,
-            summary_report_relative_path=None,
+            summary_report_relative_path=artifact_directory.relative_to(
+                self._quality_artifact_writer.artifacts_root
+            ).as_posix(),
             failure=outcome.failure,
         )
         with self._uow_factory() as uow:
@@ -432,45 +468,244 @@ class SourceOverrideService:
             uow.commit()
 
         if run.status is not QualityRunStatus.PASSED:
-            # Quality failed; mark child FAILED and keep override APPROVED.
-            with self._uow_factory() as uow:
-                failed_child = replace(
-                    child,
-                    status=DatasetVersionStatus.FAILED,
-                    failure=BatchFailureInfo(
-                        error_type=BatchFailureKind.QUALITY,
-                        message=f"Quality run {run.run_id} failed; override remains APPROVED",
-                        retryable=False,
-                    ),
-                )
-                uow.data.save_version(failed_child)
-                uow.commit()
+            self._fail_application(
+                override_id=override_id,
+                child=child,
+                attempt_id=attempt.attempt_id,
+                stage="quality",
+                error=OverrideNotApplicableError(f"quality run {run.run_id} failed"),
+                at=applied_at,
+                kind=BatchFailureKind.QUALITY,
+            )
             raise OverrideNotApplicableError(
-                f"override candidate failed quality run {run.run_id}; "
-                f"child version {child.version_id} marked FAILED; override remains APPROVED"
+                f"override candidate failed quality run {run.run_id}; child marked FAILED"
             )
 
-        # Quality passed; atomic publish.
-        self._publish_coordinator.coordinate(
+        published = self._publish_coordinator.coordinate(
             CanonicalPublishCoordinatorRequest(
                 version=child,
                 tables=(transformed.table,),
                 code_version=child.code_version,
                 rule_version=child.rule_version,
                 quality_run_id=run.run_id,
+                source_override=provenance,
+            )
+        ).version
+        return self._bind_and_apply_published_child(
+            override=current,
+            child=published,
+            attempt_id=attempt.attempt_id,
+            provenance=provenance,
+            actor=actor,
+            at=applied_at,
+        )
+
+    @staticmethod
+    def _require_verified_report_matches_database(
+        *, verified: VerifiedDifferenceReport, report: object, dataset: str
+    ) -> None:
+        fields = (
+            "report_id",
+            "primary_source",
+            "fallback_source",
+            "primary_batch_id",
+            "fallback_batch_id",
+            "primary_version_id",
+            "fallback_version_id",
+            "primary_content_sha256",
+            "fallback_content_sha256",
+            "primary_quality_run_id",
+            "fallback_quality_run_id",
+            "report_sha256",
+        )
+        mismatches = [
+            name for name in fields if str(getattr(verified, name)) != str(getattr(report, name))
+        ]
+        if verified.dataset != dataset:
+            mismatches.append("dataset")
+        if mismatches:
+            raise OverrideNotApplicableError(
+                "verified artifact does not match persisted DifferenceReport",
+                context={"mismatches": ",".join(mismatches)},
+            )
+
+    @staticmethod
+    def _validate_quality_request(
+        quality_request: QualityRequest, *, child_template: DatasetVersion
+    ) -> None:
+        if (
+            quality_request.dataset is not child_template.dataset
+            or quality_request.schema_version != child_template.schema_version
+            or quality_request.code_version != child_template.code_version
+            or quality_request.rule_version != child_template.rule_version
+        ):
+            raise OverrideNotApplicableError(
+                "quality request does not match the child version contract"
+            )
+
+    @staticmethod
+    def _application_fingerprint(
+        *,
+        current: SourceOverride,
+        report: VerifiedDifferenceReport,
+        quality_request: QualityRequest,
+    ) -> str:
+        quality = quality_request.to_deterministic_dict()
+        quality["version_id"] = "DERIVED_CHILD"
+        quality["content_sha256"] = "DERIVED_CONTENT"
+        quality["input_batch_ids"] = [
+            str(current.primary_batch_id),
+            str(current.fallback_batch_id),
+        ]
+        payload = {
+            "override_id": str(current.override_id),
+            "report_sha256": report.report_sha256,
+            "quality": quality,
+        }
+        return compute_sha256(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
+                "utf-8"
             )
         )
 
-        # Mark override APPLIED.
+    @staticmethod
+    def _build_provenance(
+        *, override: SourceOverride, report: VerifiedDifferenceReport
+    ) -> dict[str, object]:
+        selected: dict[tuple[tuple[str, str], ...], set[str]] = {}
+        codes = set(override.scope_codes)
+        dates = {str(item) for item in override.scope_dates}
+        fields = set(override.fields)
+        for unit in report.units:
+            date_value = unit.primary_key.get(
+                "trade_date", unit.primary_key.get("effective_from", "")
+            )
+            if (
+                unit.classification == "BOTH"
+                and unit.primary_key.get("code") in codes
+                and date_value in dates
+                and unit.field in fields
+            ):
+                key = tuple(sorted(unit.primary_key.items()))
+                selected.setdefault(key, set()).add(unit.field)
+        contributions = [
+            {
+                "primary_key": dict(key),
+                "kind": "FIELD_OVERRIDE",
+                "fields": sorted(unit_fields),
+            }
+            for key, unit_fields in sorted(selected.items())
+        ]
+        contribution_sha = compute_sha256(
+            json.dumps(
+                contributions, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+        )
+        return {
+            "override_id": str(override.override_id),
+            "difference_report_id": str(report.report_id),
+            "report_sha256": report.report_sha256,
+            "primary": {
+                "source": report.primary_source,
+                "batch_id": str(report.primary_batch_id),
+                "version_id": str(report.primary_version_id),
+                "content_sha256": report.primary_content_sha256,
+            },
+            "fallback": {
+                "source": report.fallback_source,
+                "batch_id": str(report.fallback_batch_id),
+                "version_id": str(report.fallback_version_id),
+                "content_sha256": report.fallback_content_sha256,
+            },
+            "fallback_contributions": contributions,
+            "contribution_scope_sha256": contribution_sha,
+        }
+
+    def _bind_and_apply_published_child(
+        self,
+        *,
+        override: SourceOverride,
+        child: DatasetVersion,
+        attempt_id: EntityId,
+        provenance: dict[str, object],
+        actor: str,
+        at: UtcTimestamp,
+    ) -> SourceOverride:
+        verified = self._query_adapter.verify_manifest_by_id(
+            version_id=str(child.version_id), dataset=child.dataset.value
+        )
+        manifest_provenance = verified.manifest.get("source_override")
+        if manifest_provenance != provenance or not isinstance(manifest_provenance, dict):
+            raise OverrideNotApplicableError(
+                "published manifest provenance does not match the verified application"
+            )
+        report_sha = str(provenance["report_sha256"])
+        contribution_sha = str(provenance["contribution_scope_sha256"])
         with self._uow_factory() as uow:
+            binding = uow.data.get_override_application_binding(str(override.override_id))
+            if binding.status == "CLAIMED":
+                uow.data.bind_published_override_child(
+                    override_id=str(override.override_id),
+                    child_version_id=str(child.version_id),
+                    report_sha256=report_sha,
+                    contribution_scope_sha256=contribution_sha,
+                    manifest_source_override=manifest_provenance,
+                    at=at,
+                )
+                uow.commit()
+            else:
+                uow.rollback()
+        with self._uow_factory() as uow:
+            binding = uow.data.get_override_application_binding(str(override.override_id))
+            if (
+                binding.child_version_id != child.version_id
+                or binding.status != "PUBLISHED"
+                or binding.report_sha256 != report_sha
+                or binding.contribution_scope_sha256 != contribution_sha
+            ):
+                raise OverrideNotApplicableError(
+                    "application binding does not match the re-read published manifest"
+                )
             result = uow.data.apply_override(
-                str(override_id),
+                str(override.override_id),
                 actor=actor,
-                at=applied_at,
+                at=at,
                 applied_version_id=str(child.version_id),
             )
             uow.commit()
         return result
+
+    def _fail_application(
+        self,
+        *,
+        override_id: EntityId,
+        child: DatasetVersion,
+        attempt_id: EntityId,
+        stage: str,
+        error: Exception,
+        at: UtcTimestamp,
+        kind: BatchFailureKind,
+    ) -> None:
+        failed = replace(
+            child,
+            status=DatasetVersionStatus.FAILED,
+            failure=BatchFailureInfo(
+                error_type=kind,
+                message=f"override {stage} failed: {error}",
+                retryable=False,
+            ),
+        )
+        with self._uow_factory() as uow:
+            uow.data.save_version(failed)
+            uow.data.record_override_application_failure(
+                override_id=str(override_id),
+                attempt_id=str(attempt_id),
+                child_version_id=str(child.version_id),
+                failure_stage=stage,
+                message=str(error),
+                at=at,
+            )
+            uow.commit()
 
 
 __all__ = [

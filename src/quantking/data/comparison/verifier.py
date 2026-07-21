@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from quantking.common.ids import EntityId, parse_entity_id
+from quantking.common.time import UtcTimestamp
 from quantking.data.adapters.warehouse.manifest import (
     WAREHOUSE_COMPLETE_FILENAME,
     WAREHOUSE_MANIFEST_FILENAME,
@@ -47,6 +48,7 @@ class VerifiedDifferenceReport:
     """A verified DifferenceReport with validated structure and content."""
 
     report_id: EntityId
+    created_at: UtcTimestamp
     dataset: str
     primary_source: str
     fallback_source: str
@@ -223,6 +225,7 @@ class DifferenceReportVerifier:
 
         return VerifiedDifferenceReport(
             report_id=report_id,
+            created_at=UtcTimestamp.from_iso(str(manifest["created_at"])),
             dataset=str(manifest["dataset"]),
             primary_source=str(manifest["primary_source"]),
             fallback_source=str(manifest["fallback_source"]),

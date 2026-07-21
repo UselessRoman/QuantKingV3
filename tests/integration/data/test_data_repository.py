@@ -17,6 +17,7 @@ from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
 )
+from quantking.data.comparison.verifier import VerifiedDifferenceReport
 from quantking.data.models import (
     BatchFailureInfo,
     BatchFailureKind,
@@ -121,6 +122,58 @@ def _validated(version: DatasetVersion) -> DatasetVersion:
     )
 
 
+def _validated_for_run(version: DatasetVersion, run: QualityRun) -> DatasetVersion:
+    return transition_dataset_version(
+        version,
+        DatasetVersionStatus.VALIDATED,
+        at=_DECIDED,
+        manifest_sha256=_SHA,
+        security_count=1,
+        row_count=100,
+        coverage_start=_TRADE_DATE,
+        coverage_end=_TRADE_DATE,
+        coverage_summary={"date_count": "1", "security_count": "1"},
+        quality_run_id=run.run_id,
+        content_sha256=run.content_sha256,
+    )
+
+
+def _published(version: DatasetVersion, run: QualityRun) -> DatasetVersion:
+    return transition_dataset_version(
+        _validated_for_run(version, run), DatasetVersionStatus.PUBLISHED, at=_LATER
+    )
+
+
+def _verified(report: DifferenceReport) -> VerifiedDifferenceReport:
+    return VerifiedDifferenceReport(
+        report_id=report.report_id,
+        created_at=report.created_at,
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED.value,
+        primary_source=report.primary_source.value,
+        fallback_source=report.fallback_source.value,
+        report_relative_path=report.report_relative_path,
+        manifest_sha256="e" * 64,
+        schema_version="daily_bar_unadjusted.v1",
+        primary_version_id=report.primary_version_id,
+        fallback_version_id=report.fallback_version_id,
+        primary_batch_id=report.primary_batch_id,
+        fallback_batch_id=report.fallback_batch_id,
+        primary_content_sha256=report.primary_content_sha256,
+        fallback_content_sha256=report.fallback_content_sha256,
+        primary_quality_run_id=report.primary_quality_run_id,
+        fallback_quality_run_id=report.fallback_quality_run_id,
+        sample_spec_sha256=report.sample_spec_sha256,
+        threshold_rule_version=report.threshold_rule_version,
+        report_sha256=report.report_sha256,
+        total_compared=report.total_compared,
+        total_differences=report.total_differences,
+        field_differences=dict(report.field_differences),
+        row_differences=[],
+        units=(),
+        fallback_only_rows=frozenset(),
+    )
+
+
 def _persist_override_graph(
     factory: DataSqliteUnitOfWorkFactory,
 ) -> tuple[SourceOverride, DatasetVersion, IngestionBatch]:
@@ -213,7 +266,11 @@ def _persist_override_graph(
         uow.data.save_version(fallback_version)
         uow.data.save_quality_run(primary_quality_run)
         uow.data.save_quality_run(fallback_quality_run)
-        uow.data.save_difference_report(report)
+        uow.data.save_version(_validated_for_run(compared_version, primary_quality_run))
+        uow.data.save_version(_published(compared_version, primary_quality_run))
+        uow.data.save_version(_validated_for_run(fallback_version, fallback_quality_run))
+        uow.data.save_version(_published(fallback_version, fallback_quality_run))
+        uow.data.save_difference_report(_verified(report))
         uow.data.save_override(override)
         uow.commit()
     return override, compared_version, fallback
@@ -441,7 +498,11 @@ class TestQualityAndDifferencePersistence:
             uow.data.save_version(fallback_version)
             uow.data.save_quality_run(primary_quality_run)
             uow.data.save_quality_run(fallback_quality_run)
-            uow.data.save_difference_report(report)
+            uow.data.save_version(_validated_for_run(primary_version, primary_quality_run))
+            uow.data.save_version(_published(primary_version, primary_quality_run))
+            uow.data.save_version(_validated_for_run(fallback_version, fallback_quality_run))
+            uow.data.save_version(_published(fallback_version, fallback_quality_run))
+            uow.data.save_difference_report(_verified(report))
             uow.commit()
         with factory() as uow:
             assert uow.data.get_difference_report(str(report.report_id)) == report

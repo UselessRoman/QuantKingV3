@@ -376,18 +376,9 @@ def _evaluate_coverage_by_security_exchange(
         for row in table.to_pylist()
         if row.get("code") is not None and row.get("trade_date") is not None
     }
-    if not present:
-        return _passed(
-            "coverage_by_security_exchange",
-            summary="empty table has no per-security sessions to verify",
-        )
-    max_present_date = max(trade_date for _, trade_date in present)
-    present_codes = {code for code, _ in present}
     expected_exchanges = set(request.expected_exchanges)
     missing: list[str] = []
     for code in request.expected_securities:
-        if code not in present_codes:
-            continue
         exchange = code.rsplit(".", 1)[-1]
         if exchange not in expected_exchanges:
             missing.append(f"{code}:unexpected-exchange:{exchange}")
@@ -395,11 +386,7 @@ def _evaluate_coverage_by_security_exchange(
         for session_exchange, trade_date in sorted(
             open_sessions, key=lambda item: (item[0], item[1])
         ):
-            if (
-                session_exchange == exchange
-                and trade_date <= max_present_date
-                and (code, trade_date) not in present
-            ):
+            if session_exchange == exchange and (code, trade_date) not in present:
                 missing.append(f"{code}:{exchange}:{trade_date.isoformat()}")
     if missing:
         sample = ",".join(missing[:10])

@@ -274,7 +274,6 @@ class TestDifferenceReportRepositoryBinding:
         tmp_path: Path,
         uow_factory: DataSqliteUnitOfWorkFactory,
     ) -> None:
-        from quantking.common.errors import InvalidDataTransitionError
         from quantking.data.content import canonical_content_sha256
         from quantking.data.models import DifferenceReport
 
@@ -368,7 +367,7 @@ class TestDifferenceReportRepositoryBinding:
             report_sha256="d" * 64,
         )
         with uow_factory() as uow:
-            with pytest.raises(InvalidDataTransitionError):
+            with pytest.raises(TypeError, match="VerifiedDifferenceReport"):
                 uow.data.save_difference_report(report)
             uow.rollback()
 

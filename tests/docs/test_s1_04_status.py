@@ -33,9 +33,9 @@ def test_s1_04_remains_pending_main_acceptance() -> None:
         "docs/stage1/DATA_CONTRACTS.md",
     ):
         text = _read(relative)
-        # S1-04-R3 修复已提交, 等待主验收 (不得写成已主验收)
+        # S1-04-R4 修复已提交, 等待主验收 (不得写成已主验收)
         assert (
-            "S1-04-R3 修复已提交，等待主验收" in text or "S1-04-R3 修复已提交、等待主验收" in text
+            "S1-04-R4 修复已提交，等待主验收" in text or "S1-04-R4 修复已提交、等待主验收" in text
         )
         assert "S1-04 已主验收" not in text
         assert "S1-04 已完成" not in text

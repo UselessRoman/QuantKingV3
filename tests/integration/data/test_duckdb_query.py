@@ -209,7 +209,7 @@ def _make_passed_quality_run(
         code_version=version.code_version,
         content_sha256=_compute_content_sha(table),
         input_batch_ids=version.input_batch_ids,
-        expected_securities=("000001.SZ", "600000.SH"),
+        expected_securities=tuple(sorted(set(table.column("code").to_pylist()))),
         expected_exchanges=("SZ", "SH"),
         coverage_start=TradingDate(date(2026, 7, 14)),
         coverage_end=TradingDate(date(2026, 7, 16)),
@@ -529,6 +529,17 @@ class TestQueryAdapterFreeze:
                 9.9,
                 1_000_000,
                 99_000_000.0,
+            ),
+            _Row(
+                "000001.SZ",
+                date(2026, 7, 16),
+                99.2,
+                99.8,
+                99.0,
+                99.6,
+                99.2,
+                1_100_000,
+                109_000_000.0,
             ),
         ]
         new_table = _canonical_table(new_rows)

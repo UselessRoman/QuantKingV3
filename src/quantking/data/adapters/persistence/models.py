@@ -287,6 +287,10 @@ class SourceOverrideApplicationAttemptRow(Base):
     __table_args__ = (
         UniqueConstraint("override_id", "attempt_no", name="uq_override_attempt_no"),
         Index("ix_override_attempts_override_status", "override_id", "status"),
+        CheckConstraint(
+            "status IN ('CLAIMED','FAILED','PUBLISHED','APPLIED')",
+            name="ck_source_override_application_attempts_status",
+        ),
     )
 
     attempt_id: Mapped[str] = mapped_column(String(96), primary_key=True)
