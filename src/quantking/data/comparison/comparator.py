@@ -310,7 +310,12 @@ class CrossSourceComparator:
     """Align two Canonical tables by primary key and produce a DifferenceReport."""
 
     def compare(self, *, request: CrossSourceComparisonRequest) -> CrossSourceComparisonOutcome:
-        """Execute the comparison and return a deterministic outcome."""
+        """Execute the comparison and return a deterministic outcome.
+
+        Recomputes content SHA-256 for both tables and verifies they match
+        the claimed request.primary_content_sha256 and request.fallback_content_sha256.
+        Raises ValueError if declared content SHAs do not match actual content.
+        """
         if not isinstance(request, CrossSourceComparisonRequest):
             raise TypeError("request must be a CrossSourceComparisonRequest")
         descriptor = descriptor_for(request.dataset.value)
@@ -327,6 +332,23 @@ class CrossSourceComparator:
             if not validation.ok:
                 issue = validation.issues[0]
                 raise ValueError(f"{table_name} is not canonical: {issue.rule}: {issue.message}")
+
+        # Recompute content SHA-256 and verify against request claims.
+        from quantking.data.content import canonical_content_sha256
+
+        actual_primary_sha = canonical_content_sha256(request.dataset, [request.primary_table])
+        if actual_primary_sha != request.primary_content_sha256:
+            raise ValueError(
+                f"primary_content_sha256 mismatch: "
+                f"claimed {request.primary_content_sha256}, actual {actual_primary_sha}"
+            )
+
+        actual_fallback_sha = canonical_content_sha256(request.dataset, [request.fallback_table])
+        if actual_fallback_sha != request.fallback_content_sha256:
+            raise ValueError(
+                f"fallback_content_sha256 mismatch: "
+                f"claimed {request.fallback_content_sha256}, actual {actual_fallback_sha}"
+            )
 
         primary_rows = request.primary_table.to_pylist()
         fallback_rows = request.fallback_table.to_pylist()

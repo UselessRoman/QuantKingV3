@@ -104,6 +104,7 @@ class TestCrossSourceComparator:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         primary = _make_table(_primary_rows())
         fallback = _make_table(_primary_rows())
@@ -116,8 +117,12 @@ class TestCrossSourceComparator:
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [primary]
+            ),
+            fallback_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [fallback]
+            ),
             primary_quality_run_id=new_entity_id("data_quality"),
             fallback_quality_run_id=new_entity_id("data_quality"),
             primary_table=primary,
@@ -140,6 +145,7 @@ class TestCrossSourceComparator:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         # Fallback is missing the second row.
         fallback_rows = [_primary_rows()[0]]
@@ -154,8 +160,12 @@ class TestCrossSourceComparator:
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [primary]
+            ),
+            fallback_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [fallback]
+            ),
             primary_quality_run_id=new_entity_id("data_quality"),
             fallback_quality_run_id=new_entity_id("data_quality"),
             primary_table=primary,
@@ -177,6 +187,7 @@ class TestCrossSourceComparator:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         primary_rows = [_primary_rows()[0]]
         primary = _make_table(primary_rows)
@@ -190,8 +201,12 @@ class TestCrossSourceComparator:
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [primary]
+            ),
+            fallback_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [fallback]
+            ),
             primary_quality_run_id=new_entity_id("data_quality"),
             fallback_quality_run_id=new_entity_id("data_quality"),
             primary_table=primary,
@@ -211,6 +226,7 @@ class TestCrossSourceComparator:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         # Primary has amount=None for one row; fallback has it filled.
         primary_rows = _primary_rows()
@@ -226,8 +242,12 @@ class TestCrossSourceComparator:
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [primary]
+            ),
+            fallback_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [fallback]
+            ),
             primary_quality_run_id=new_entity_id("data_quality"),
             fallback_quality_run_id=new_entity_id("data_quality"),
             primary_table=primary,
@@ -248,6 +268,7 @@ class TestCrossSourceComparator:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         # Set amount=None on both sides; should NOT be a difference.
         primary_rows = _primary_rows()
@@ -265,8 +286,12 @@ class TestCrossSourceComparator:
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [primary]
+            ),
+            fallback_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [fallback]
+            ),
             primary_quality_run_id=new_entity_id("data_quality"),
             fallback_quality_run_id=new_entity_id("data_quality"),
             primary_table=primary,
@@ -285,6 +310,7 @@ class TestCrossSourceComparator:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         primary_rows = _primary_rows()
         # Difference of 0.001 on close (10.5 vs 10.501) - small.
@@ -301,8 +327,12 @@ class TestCrossSourceComparator:
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [primary]
+            ),
+            fallback_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [fallback]
+            ),
             primary_quality_run_id=new_entity_id("data_quality"),
             fallback_quality_run_id=new_entity_id("data_quality"),
             primary_table=primary,
@@ -323,6 +353,7 @@ class TestCrossSourceComparator:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         primary_rows = _primary_rows()
         fallback_rows = _primary_rows()
@@ -340,8 +371,12 @@ class TestCrossSourceComparator:
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [primary]
+            ),
+            fallback_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [fallback]
+            ),
             primary_quality_run_id=new_entity_id("data_quality"),
             fallback_quality_run_id=new_entity_id("data_quality"),
             primary_table=primary,
@@ -364,6 +399,7 @@ class TestCrossSourceComparator:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         primary_rows = _primary_rows()
         fallback_rows = _primary_rows()
@@ -380,8 +416,12 @@ class TestCrossSourceComparator:
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [primary]
+            ),
+            fallback_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [fallback]
+            ),
             primary_quality_run_id=new_entity_id("data_quality"),
             fallback_quality_run_id=new_entity_id("data_quality"),
             primary_table=primary,
@@ -402,6 +442,7 @@ class TestCrossSourceComparator:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         primary_rows = _primary_rows()
         fallback_rows = _primary_rows()
@@ -420,8 +461,12 @@ class TestCrossSourceComparator:
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [primary]
+            ),
+            fallback_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [fallback]
+            ),
             primary_quality_run_id=new_entity_id("data_quality"),
             fallback_quality_run_id=new_entity_id("data_quality"),
             primary_table=primary,
@@ -443,6 +488,7 @@ class TestCrossSourceComparator:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         primary_rows = _primary_rows()
         fallback_rows = _primary_rows()
@@ -461,8 +507,12 @@ class TestCrossSourceComparator:
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [primary]
+            ),
+            fallback_content_sha256=canonical_content_sha256(
+                DatasetKind.DAILY_BAR_UNADJUSTED, [fallback]
+            ),
             primary_quality_run_id=new_entity_id("data_quality"),
             fallback_quality_run_id=new_entity_id("data_quality"),
             primary_table=primary,
@@ -482,8 +532,13 @@ class TestCrossSourceComparator:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         def _build() -> CrossSourceComparisonRequest:
+            primary = _make_table(_primary_rows())
+            fallback = _make_table(_primary_rows())
+            primary_sha = canonical_content_sha256(DatasetKind.DAILY_BAR_UNADJUSTED, [primary])
+            fallback_sha = canonical_content_sha256(DatasetKind.DAILY_BAR_UNADJUSTED, [fallback])
             return CrossSourceComparisonRequest(
                 dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
                 schema_version="daily_bar_unadjusted.v1",
@@ -493,12 +548,12 @@ class TestCrossSourceComparator:
                 fallback_version_id=new_entity_id("data_version"),
                 primary_batch_id=new_entity_id("data_batch"),
                 fallback_batch_id=new_entity_id("data_batch"),
-                primary_content_sha256="a" * 64,
-                fallback_content_sha256="b" * 64,
+                primary_content_sha256=primary_sha,
+                fallback_content_sha256=fallback_sha,
                 primary_quality_run_id=new_entity_id("data_quality"),
                 fallback_quality_run_id=new_entity_id("data_quality"),
-                primary_table=_make_table(_primary_rows()),
-                fallback_table=_make_table(_primary_rows()),
+                primary_table=primary,
+                fallback_table=fallback,
                 thresholds=default_thresholds(),
                 sample_spec=(),
                 created_at=utc_now(),

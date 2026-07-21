@@ -134,9 +134,12 @@ class TestDifferenceReportArtifactDirectory:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         primary = _daily_bar_table()
         fallback = _daily_bar_table()
+        primary_sha = canonical_content_sha256(DatasetKind.DAILY_BAR_UNADJUSTED, [primary])
+        fallback_sha = canonical_content_sha256(DatasetKind.DAILY_BAR_UNADJUSTED, [fallback])
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
@@ -146,8 +149,8 @@ class TestDifferenceReportArtifactDirectory:
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=primary_sha,
+            fallback_content_sha256=fallback_sha,
             primary_quality_run_id=new_entity_id("data_quality"),
             fallback_quality_run_id=new_entity_id("data_quality"),
             primary_table=primary,
@@ -174,9 +177,12 @@ class TestDifferenceReportArtifactDirectory:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         primary = _daily_bar_table()
         fallback = _daily_bar_table()
+        primary_sha = canonical_content_sha256(DatasetKind.DAILY_BAR_UNADJUSTED, [primary])
+        fallback_sha = canonical_content_sha256(DatasetKind.DAILY_BAR_UNADJUSTED, [fallback])
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
@@ -186,8 +192,8 @@ class TestDifferenceReportArtifactDirectory:
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=primary_sha,
+            fallback_content_sha256=fallback_sha,
             primary_quality_run_id=new_entity_id("data_quality"),
             fallback_quality_run_id=new_entity_id("data_quality"),
             primary_table=primary,
@@ -217,9 +223,12 @@ class TestDifferenceReportArtifactDirectory:
             CrossSourceComparisonRequest,
         )
         from quantking.data.comparison.thresholds import default_thresholds
+        from quantking.data.content import canonical_content_sha256
 
         primary = _daily_bar_table()
         fallback = _daily_bar_table()
+        primary_sha = canonical_content_sha256(DatasetKind.DAILY_BAR_UNADJUSTED, [primary])
+        fallback_sha = canonical_content_sha256(DatasetKind.DAILY_BAR_UNADJUSTED, [fallback])
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
@@ -229,8 +238,8 @@ class TestDifferenceReportArtifactDirectory:
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=primary_sha,
+            fallback_content_sha256=fallback_sha,
             primary_quality_run_id=new_entity_id("data_quality"),
             fallback_quality_run_id=new_entity_id("data_quality"),
             primary_table=primary,
@@ -266,6 +275,7 @@ class TestDifferenceReportRepositoryBinding:
         uow_factory: DataSqliteUnitOfWorkFactory,
     ) -> None:
         from quantking.common.errors import InvalidDataTransitionError
+        from quantking.data.content import canonical_content_sha256
         from quantking.data.models import DifferenceReport
 
         # Build primary and fallback batches, versions and quality runs so
@@ -276,13 +286,20 @@ class TestDifferenceReportRepositoryBinding:
         fallback_batch = _succeeded_batch(source=DataSource.BAOSTOCK)
         primary_version = _building_version()
         fallback_version = _building_version()
+
+        # Create dummy tables for content SHA calculation
+        primary_table = _daily_bar_table()
+        fallback_table = _daily_bar_table()
+        primary_sha = canonical_content_sha256(DatasetKind.DAILY_BAR_UNADJUSTED, [primary_table])
+        fallback_sha = canonical_content_sha256(DatasetKind.DAILY_BAR_UNADJUSTED, [fallback_table])
+
         primary_quality_run = QualityRun(
             run_id=new_entity_id("data_quality"),
             version_id=primary_version.version_id,
             status=QualityRunStatus.PASSED,
             rule_version="quality-rules.v1",
             schema_version="daily_bar_unadjusted.v1",
-            content_sha256="a" * 64,
+            content_sha256=primary_sha,
             started_at=utc_now(),
             ended_at=utc_now(),
             results=(
@@ -303,7 +320,7 @@ class TestDifferenceReportRepositoryBinding:
             status=QualityRunStatus.PASSED,
             rule_version="quality-rules.v1",
             schema_version="daily_bar_unadjusted.v1",
-            content_sha256="b" * 64,
+            content_sha256=fallback_sha,
             started_at=utc_now(),
             ended_at=utc_now(),
             results=(
@@ -342,8 +359,8 @@ class TestDifferenceReportRepositoryBinding:
             fallback_batch_id=fallback_batch.batch_id,
             primary_version_id=primary_version.version_id,
             fallback_version_id=fallback_version.version_id,
-            primary_content_sha256="a" * 64,
-            fallback_content_sha256="b" * 64,
+            primary_content_sha256=primary_sha,
+            fallback_content_sha256=fallback_sha,
             primary_quality_run_id=primary_quality_run.run_id,
             fallback_quality_run_id=fallback_quality_run.run_id,
             sample_spec_sha256="c" * 64,
