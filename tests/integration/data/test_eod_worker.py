@@ -259,9 +259,10 @@ class SixDatasetGateway:
     def fetch(self, chunk: object) -> SupplierResponse:
         dataset = chunk.dataset  # type: ignore[attr-defined]
         self.calls.append(dataset)
+        chunk_date = chunk.start.value.isoformat()  # type: ignore[attr-defined]
         common_bar = {
             "stock_code": "000001.SZ",
-            "date": "2026-07-15",
+            "date": chunk_date,
             "open": 10.0,
             "high": 10.5,
             "low": 9.8,
@@ -274,7 +275,7 @@ class SixDatasetGateway:
             DatasetKind.EXCHANGE_CALENDAR: (
                 {
                     "market": "SZ",
-                    "calendar_date": "2026-07-15",
+                    "calendar_date": chunk_date,
                     "open_flag": True,
                 },
             ),
@@ -286,7 +287,7 @@ class SixDatasetGateway:
                     "board": "MAIN",
                     "open_date": "1991-04-03",
                     "expire_date": None,
-                    "effective_from": "2026-07-15",
+                    "effective_from": chunk_date,
                     "effective_to": None,
                     "listing_status": "LISTED",
                 },
@@ -295,17 +296,17 @@ class SixDatasetGateway:
             DatasetKind.ADJUSTMENT_FACTOR: (
                 {
                     "stock_code": "000001.SZ",
-                    "date": "2026-07-15",
+                    "date": chunk_date,
                     "price_multiplier": 1.0,
                     "volume_multiplier": 1.0,
-                    "normalization_date": "2026-07-15",
+                    "normalization_date": chunk_date,
                     "algorithm_version": "synthetic.v1",
                 },
             ),
             DatasetKind.TRADING_STATUS: (
                 {
                     "stock_code": "000001.SZ",
-                    "date": "2026-07-15",
+                    "date": chunk_date,
                     "is_trading": True,
                     "is_suspended": False,
                     "is_st": False,
@@ -411,6 +412,10 @@ def _base_from_job(
     tmp_path: Path,
     jobs: JobService,
     job_id: str,
+    *,
+    scopes: tuple[str, ...] = ("BJ", "SH", "SZ"),
+    coverage_start: str = "2026-07-15",
+    coverage_end: str = "2026-07-15",
 ) -> EodBaseVersion:
     evidence = verify_eod_success_evidence(
         tmp_path / jobs.get_job(job_id).artifacts[0],
@@ -423,7 +428,7 @@ def _base_from_job(
         schema_version="exchange_calendar.v1",
         content_sha256=result["content_sha256"],
         manifest_sha256=result["manifest_sha256"],
-        coverage=tuple((exchange, "2026-07-15", "2026-07-15") for exchange in ("BJ", "SH", "SZ")),
+        coverage=tuple((scope, coverage_start, coverage_end) for scope in scopes),
     )
 
 
@@ -1492,6 +1497,366 @@ def test_final_succeeded_commit_failure_is_recovered_without_republish(
         assert connection.execute("SELECT COUNT(*) FROM dataset_versions").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM quality_runs").fetchone() == (1,)
     assert gateway.calls == 1
+
+
+@pytest.mark.parametrize("base_kind", ["root", "child"])
+def test_no_change_final_commit_failure_recovers_without_rewriting_base_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    base_kind: str,
+) -> None:
+    gateway = CalendarGateway()
+    runtime = build_eod_runtime(_settings(tmp_path), gateway=gateway)
+    root_id = runtime.eod_commands.enqueue(
+        EodRunRequest(
+            start_date=date(2026, 7, 15),
+            end_date=date(2026, 7, 15),
+            datasets=("exchange_calendar",),
+            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={},
+        ),
+        idempotency_key=f"no-change-{base_kind}-root",
+        requester="pytest",
+    ).job_id
+    runtime.worker.run(root_id)
+    root_result = verify_eod_success_evidence(
+        runtime.settings.paths.data_root / runtime.jobs.get_job(root_id).artifacts[0],
+        artifacts_root=runtime.settings.paths.data_root / "artifacts" / "eod",
+    ).parsed_result.datasets[0]
+    base_result = root_result
+    request_date = date(2026, 7, 15)
+    if base_kind == "child":
+        child_id = runtime.eod_commands.enqueue(
+            EodRunRequest(
+                start_date=date(2026, 7, 15),
+                end_date=date(2026, 7, 16),
+                datasets=("exchange_calendar",),
+                publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+                base_versions={"exchange_calendar": root_result.version_id},
+            ),
+            idempotency_key="no-change-child-base",
+            requester="pytest",
+        ).job_id
+        runtime.worker.run(child_id)
+        base_result = verify_eod_success_evidence(
+            runtime.settings.paths.data_root / runtime.jobs.get_job(child_id).artifacts[0],
+            artifacts_root=runtime.settings.paths.data_root / "artifacts" / "eod",
+        ).parsed_result.datasets[0]
+        request_date = date(2026, 7, 16)
+
+    no_change_request = EodRunRequest(
+        start_date=request_date,
+        end_date=request_date,
+        datasets=("exchange_calendar",),
+        publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+        base_versions={"exchange_calendar": base_result.version_id},
+    )
+    failed_id = runtime.eod_commands.enqueue(
+        no_change_request,
+        idempotency_key=f"no-change-{base_kind}-failed",
+        requester="pytest",
+    ).job_id
+    original_transition = runtime.jobs.transition
+
+    def fail_final_transition(job_id_value, target, **kwargs):
+        if target is JobStatus.SUCCEEDED:
+            raise RuntimeError("synthetic no-change final commit failure")
+        return original_transition(job_id_value, target, **kwargs)
+
+    monkeypatch.setattr(runtime.jobs, "transition", fail_final_transition)
+    with pytest.raises(RuntimeError, match="no-change final commit"):
+        runtime.worker.run(failed_id)
+    monkeypatch.setattr(runtime.jobs, "transition", original_transition)
+    failed = runtime.jobs.get_job(failed_id)
+    assert failed.status is JobStatus.RUNNING
+    assert failed.heartbeat_at is not None
+    evidence_root = runtime.settings.paths.data_root / "artifacts" / "eod"
+    provisional = evidence_root / failed_id.replace(":", "_")
+    failure_directory = evidence_root / f"{failed_id.replace(':', '_')}.incomplete"
+    assert provisional.is_dir()
+    assert failure_directory.is_dir()
+    failure_before = {item.name: item.read_bytes() for item in failure_directory.iterdir()}
+    artifacts_before = failed.artifacts
+    failure = verify_eod_failure_evidence(
+        failure_directory,
+        artifacts_root=evidence_root,
+    )
+    completed = failure.completed_datasets[0]
+    assert completed.status == "REUSED_UNCHANGED"
+    assert completed.version_id == base_result.version_id
+    assert completed.batch_id is None
+    assert completed.parent_version_id == base_result.parent_version_id
+
+    target_id = runtime.eod_commands.enqueue(
+        no_change_request,
+        idempotency_key=f"no-change-{base_kind}-retry",
+        requester="pytest",
+    ).job_id
+    monkeypatch.setattr(runtime_module, "load_runtime_settings", lambda: runtime.settings)
+    monkeypatch.setattr(runtime_module, "build_eod_runtime", lambda settings: runtime)
+    monkeypatch.setattr(
+        time_module,
+        "utc_now",
+        lambda: UtcTimestamp(failed.heartbeat_at.value + timedelta(minutes=3)),
+    )
+    assert eod_cli_main(["worker-run", "--job-id", target_id]) == 0
+    capsys.readouterr()
+
+    recovered = runtime.jobs.get_job(failed_id)
+    assert recovered.status is JobStatus.INTERRUPTED
+    runtime.eod_handler.recover_interrupted(runtime.jobs, failed_id)
+    runtime.eod_handler.recover_interrupted(runtime.jobs, failed_id)
+    assert {item.name: item.read_bytes() for item in failure_directory.iterdir()} == failure_before
+    assert runtime.jobs.get_job(failed_id).artifacts == artifacts_before
+    assert runtime.jobs.get_job(target_id).status is JobStatus.SUCCEEDED
+    expected_count = 1 if base_kind == "root" else 2
+    database = runtime.settings.paths.data_root / "metadata" / "quantking.db"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ingestion_batches").fetchone() == (
+            expected_count,
+        )
+        assert connection.execute("SELECT COUNT(*) FROM dataset_versions").fetchone() == (
+            expected_count,
+        )
+        assert connection.execute("SELECT COUNT(*) FROM quality_runs").fetchone() == (
+            expected_count,
+        )
+    assert gateway.calls == expected_count
+
+
+@pytest.mark.parametrize("attack", ["self_parent", "forged_history"])
+def test_no_change_failure_rejects_parent_attack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attack: str,
+) -> None:
+    gateway = CalendarGateway()
+    runtime = build_eod_runtime(_settings(tmp_path), gateway=gateway)
+    root_id = runtime.eod_commands.enqueue(
+        EodRunRequest(
+            start_date=date(2026, 7, 15),
+            end_date=date(2026, 7, 15),
+            datasets=("exchange_calendar",),
+            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={},
+        ),
+        idempotency_key=f"parent-attack-root-{attack}",
+        requester="pytest",
+    ).job_id
+    runtime.worker.run(root_id)
+    root = verify_eod_success_evidence(
+        runtime.settings.paths.data_root / runtime.jobs.get_job(root_id).artifacts[0],
+        artifacts_root=runtime.settings.paths.data_root / "artifacts" / "eod",
+    ).parsed_result.datasets[0]
+    child_id = runtime.eod_commands.enqueue(
+        EodRunRequest(
+            start_date=date(2026, 7, 15),
+            end_date=date(2026, 7, 16),
+            datasets=("exchange_calendar",),
+            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={"exchange_calendar": root.version_id},
+        ),
+        idempotency_key=f"parent-attack-child-{attack}",
+        requester="pytest",
+    ).job_id
+    runtime.worker.run(child_id)
+    child = verify_eod_success_evidence(
+        runtime.settings.paths.data_root / runtime.jobs.get_job(child_id).artifacts[0],
+        artifacts_root=runtime.settings.paths.data_root / "artifacts" / "eod",
+    ).parsed_result.datasets[0]
+    failed_id = runtime.eod_commands.enqueue(
+        EodRunRequest(
+            start_date=date(2026, 7, 16),
+            end_date=date(2026, 7, 16),
+            datasets=("exchange_calendar",),
+            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={"exchange_calendar": child.version_id},
+        ),
+        idempotency_key=f"parent-attack-failed-{attack}",
+        requester="pytest",
+    ).job_id
+    original_transition = runtime.jobs.transition
+
+    def fail_final_transition(job_id_value, target, **kwargs):
+        if target is JobStatus.SUCCEEDED:
+            raise RuntimeError("synthetic no-change final commit failure")
+        return original_transition(job_id_value, target, **kwargs)
+
+    monkeypatch.setattr(runtime.jobs, "transition", fail_final_transition)
+    with pytest.raises(RuntimeError, match="no-change final commit"):
+        runtime.worker.run(failed_id)
+    monkeypatch.setattr(runtime.jobs, "transition", original_transition)
+    failed = runtime.jobs.get_job(failed_id)
+    assert failed.heartbeat_at is not None
+    runtime.jobs.recover_stale_running_jobs(
+        reason="expired no-change final commit",
+        stale_before=UtcTimestamp(failed.heartbeat_at.value + timedelta(minutes=2)),
+        at=UtcTimestamp(failed.heartbeat_at.value + timedelta(minutes=3)),
+    )
+    job = runtime.jobs.get_job(failed_id)
+    evidence_root = runtime.settings.paths.data_root / "artifacts" / "eod"
+    directory = evidence_root / f"{failed_id.replace(':', '_')}.incomplete"
+    failure = json.loads((directory / "failure.json").read_bytes())
+    failure["completed_datasets"][0]["parent_version_id"] = (
+        child.version_id
+        if attack == "self_parent"
+        else "data_version:99999999-9999-4999-8999-999999999999"
+    )
+    (directory / "failure.json").write_bytes(_canonical_bytes(failure))
+
+    with pytest.raises(EodEvidenceConflictError):
+        verify_eod_terminal_failure(
+            directory,
+            artifacts_root=evidence_root,
+            data_root=runtime.settings.paths.data_root,
+            uow_factory=runtime.data_uow_factory,
+            job=job,
+        )
+
+
+def test_mixed_reused_and_published_completed_set_recovers_without_duplicates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = SixDatasetGateway()
+    config = EodExecutionConfig(
+        code_version="test-code",
+        adapter_version="xtquant-synthetic.v1",
+        rule_version="quality-rules.v1",
+        lookback_days=0,
+        max_days_per_chunk=1,
+        max_items_per_chunk=10,
+        datasets={
+            "exchange_calendar": EodDatasetConfig(scope=("SZ",)),
+            "security_master": EodDatasetConfig(scope=("000001.SZ",)),
+        },
+    )
+    jobs, root_command, worker = _runtime(
+        tmp_path,
+        gateway,
+        capability_check=lambda dataset: True,
+        execution_config=config,
+    )
+    calendar_root_id = root_command.enqueue(
+        EodRunRequest(
+            start_date=date(2026, 7, 14),
+            end_date=date(2026, 7, 14),
+            datasets=("exchange_calendar",),
+            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={},
+        ),
+        idempotency_key="mixed-calendar-root",
+        requester="pytest",
+    ).job_id
+    worker.run(calendar_root_id)
+    calendar_base = _base_from_job(
+        tmp_path,
+        jobs,
+        calendar_root_id,
+        scopes=("SZ",),
+        coverage_start="2026-07-14",
+        coverage_end="2026-07-14",
+    )
+    security_root_id = root_command.enqueue(
+        EodRunRequest(
+            start_date=date(2026, 7, 15),
+            end_date=date(2026, 7, 15),
+            datasets=("security_master",),
+            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={},
+        ),
+        idempotency_key="mixed-security-root",
+        requester="pytest",
+    ).job_id
+    worker.run(security_root_id)
+    security_evidence = verify_eod_success_evidence(
+        tmp_path / jobs.get_job(security_root_id).artifacts[0],
+        artifacts_root=tmp_path / "artifacts" / "eod",
+    )
+    security_result = security_evidence.parsed_result.datasets[0]
+    security_base = EodBaseVersion(
+        version_id=security_result.version_id,
+        dataset=DatasetKind.SECURITY_MASTER.value,
+        schema_version="security_master.v1",
+        content_sha256=security_result.content_sha256,
+        manifest_sha256=security_result.manifest_sha256,
+        coverage=(("000001.SZ", "2026-07-15", "2026-07-15"),),
+    )
+    mixed_command = EodCommandService(
+        jobs,
+        config=config,
+        base_resolver=ExactBaseResolver(
+            {
+                calendar_base.version_id: calendar_base,
+                security_base.version_id: security_base,
+            }
+        ),
+    )
+    mixed_request = EodRunRequest(
+        start_date=date(2026, 7, 15),
+        end_date=date(2026, 7, 15),
+        datasets=("exchange_calendar", "security_master"),
+        publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+        base_versions={
+            "exchange_calendar": calendar_base.version_id,
+            "security_master": security_base.version_id,
+        },
+    )
+    failed_id = mixed_command.enqueue(
+        mixed_request,
+        idempotency_key="mixed-failed",
+        requester="pytest",
+    ).job_id
+    original_transition = jobs.transition
+
+    def fail_final_transition(job_id_value, target, **kwargs):
+        if target is JobStatus.SUCCEEDED:
+            raise RuntimeError("synthetic mixed final commit failure")
+        return original_transition(job_id_value, target, **kwargs)
+
+    monkeypatch.setattr(jobs, "transition", fail_final_transition)
+    with pytest.raises(RuntimeError, match="mixed final commit"):
+        worker.run(failed_id)
+    monkeypatch.setattr(jobs, "transition", original_transition)
+    recovered_ids = jobs.recover_stale_running_job_ids(
+        reason="expired mixed final commit",
+        stale_before=UtcTimestamp(_NOW.value + timedelta(minutes=2)),
+        at=UtcTimestamp(_NOW.value + timedelta(minutes=3)),
+    )
+    assert recovered_ids == (failed_id,)
+    handler = worker._registry.resolve("data.eod.v1")  # type: ignore[attr-defined]
+    assert isinstance(handler, EodWorkerHandler)
+    handler.recover_interrupted(jobs, failed_id)
+    handler.recover_interrupted(jobs, failed_id)
+    evidence_root = tmp_path / "artifacts" / "eod"
+    failure = verify_eod_terminal_failure(
+        evidence_root / f"{failed_id.replace(':', '_')}.incomplete",
+        artifacts_root=evidence_root,
+        data_root=tmp_path,
+        uow_factory=_data_uow(tmp_path),
+        job=jobs.get_job(failed_id),
+    )
+    assert tuple(item.status for item in failure.completed_datasets) == (
+        "PUBLISHED_NEW",
+        "REUSED_UNCHANGED",
+    )
+
+    retry_id = mixed_command.enqueue(
+        mixed_request,
+        idempotency_key="mixed-retry",
+        requester="pytest",
+    ).job_id
+    worker.run(retry_id)
+    with sqlite3.connect(tmp_path / "metadata.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ingestion_batches").fetchone() == (3,)
+        assert connection.execute("SELECT COUNT(*) FROM dataset_versions").fetchone() == (3,)
+        assert connection.execute("SELECT COUNT(*) FROM quality_runs").fetchone() == (3,)
+    assert gateway.calls == [
+        DatasetKind.EXCHANGE_CALENDAR,
+        DatasetKind.SECURITY_MASTER,
+        DatasetKind.EXCHANGE_CALENDAR,
+    ]
 
 
 def test_formal_worker_run_recovers_existing_failure_then_runs_target(

@@ -222,7 +222,7 @@ def verify_eod_success_evidence(directory: Path, *, artifacts_root: Path) -> Ver
     )
 
 
-def _verify_completed_results_deep(
+def verify_eod_completed_results(
     command: FrozenEodCommand,
     results: Sequence[EodDatasetResult],
     *,
@@ -233,7 +233,9 @@ def _verify_completed_results_deep(
     plans = {item.dataset.value: item for item in command.datasets}
     query = CanonicalQueryAdapter(data_root=data_root, uow_factory=uow_factory)
     for result in results:
-        plan = plans[result.dataset]
+        plan = plans.get(result.dataset)
+        if plan is None:
+            raise EodEvidenceConflictError("EOD result is not part of the frozen command")
         try:
             with uow_factory() as uow:
                 version = uow.data.get_version(result.version_id)
@@ -259,6 +261,10 @@ def _verify_completed_results_deep(
                 and tuple(str(item) for item in version.input_batch_ids) != (result.batch_id,)
             )
             or (result.status == "PUBLISHED_NEW" and result.parent_version_id != frozen_parent)
+            or (
+                result.status == "REUSED_UNCHANGED"
+                and result.parent_version_id == result.version_id
+            )
         ):
             raise EodEvidenceConflictError("EOD result version credentials do not match")
         if result.status == "PUBLISHED_NEW":
@@ -292,6 +298,7 @@ def _verify_completed_results_deep(
         elif (
             plan.base_version is None
             or result.version_id != plan.base_version.version_id
+            or result.batch_id is not None
             or result.content_sha256 != plan.base_version.content_sha256
             or result.manifest_sha256 != plan.base_version.manifest_sha256
         ):
@@ -366,7 +373,7 @@ def verify_eod_success_evidence_deep(
         directory,
         artifacts_root=artifacts_root,
     )
-    _verify_completed_results_deep(
+    verify_eod_completed_results(
         verified_evidence.frozen_command,
         verified_evidence.parsed_result.datasets,
         data_root=data_root,
@@ -567,7 +574,7 @@ def _verify_eod_terminal_failure(
     else:
         command = _command_from_evidence(verified.request)
         _bind_evidence_command_to_job(command, job=job)
-        _verify_completed_results_deep(
+        verify_eod_completed_results(
             command,
             verified.completed_datasets,
             data_root=data_root,
@@ -953,6 +960,7 @@ __all__ = [
     "EodEvidenceWriter",
     "VerifiedEodEvidence",
     "VerifiedEodFailureEvidence",
+    "verify_eod_completed_results",
     "verify_eod_failure_evidence",
     "verify_eod_success_evidence",
     "verify_eod_success_evidence_deep",

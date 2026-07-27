@@ -29,7 +29,9 @@ from quantking.data.adapters.warehouse.publish_coordinator import (
 from quantking.data.adapters.warehouse.query import CanonicalQueryAdapter
 from quantking.data.adapters.warehouse.verifier import verify_canonical_directory
 from quantking.data.eod.artifacts import (
+    EodEvidenceConflictError,
     EodEvidenceWriter,
+    verify_eod_completed_results,
     verify_eod_success_evidence_deep,
     verify_eod_terminal_failure,
 )
@@ -923,6 +925,20 @@ class EodWorkerHandler:
         *,
         command: _FrozenCommand | None = None,
     ) -> None:
+        if command is not None:
+            try:
+                verify_eod_completed_results(
+                    command,
+                    (result,),
+                    data_root=self._data_root,
+                    uow_factory=self._data_uow,
+                )
+            except EodEvidenceConflictError as error:
+                raise EodExecutionError(
+                    "PUBLISH_CREDENTIAL_MISMATCH",
+                    "completed result does not match the frozen command",
+                ) from error
+            return
         with self._data_uow() as uow:
             version = uow.data.get_version(result.version_id)
             quality = uow.data.get_quality_run(result.quality_run_id)
@@ -948,42 +964,6 @@ class EodWorkerHandler:
             raise EodExecutionError(
                 "PUBLISH_CREDENTIAL_MISMATCH",
                 "completed result credentials do not match",
-            )
-        if command is None:
-            return
-        plans = {item.dataset.value: item for item in command.datasets}
-        plan = plans.get(result.dataset)
-        expected_parent = (
-            None if plan is None or plan.base_version is None else plan.base_version.version_id
-        )
-        if (
-            plan is None
-            or version.schema_version != plan.schema_version
-            or version.code_version != command.code_version
-            or version.rule_version != command.rule_version
-            or result.parent_version_id != expected_parent
-            or verified.manifest.get("schema_version") != plan.schema_version
-            or verified.manifest.get("code_version") != command.code_version
-            or verified.manifest.get("rule_version") != command.rule_version
-            or verified.manifest.get("parent_version_id") != expected_parent
-            or verified.manifest.get("input_batch_ids")
-            != [str(item) for item in version.input_batch_ids]
-            or (
-                result.status == "PUBLISHED_NEW"
-                and tuple(str(item) for item in version.input_batch_ids) != (result.batch_id,)
-            )
-            or (
-                result.status == "REUSED_UNCHANGED"
-                and (
-                    plan.base_version is None
-                    or result.version_id != plan.base_version.version_id
-                    or result.batch_id is not None
-                )
-            )
-        ):
-            raise EodExecutionError(
-                "PUBLISH_CREDENTIAL_MISMATCH",
-                "completed result does not match the frozen command",
             )
 
     def _references(

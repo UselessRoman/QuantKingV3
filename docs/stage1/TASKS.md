@@ -7,7 +7,7 @@ S1-02 已于 2026-07-18 在提交 `79f9fa3e682e212cf74e7886a04c6fb52158f302`
 完成主验收，证据见 [S1-02 主验收证据](S1-02_ACCEPTANCE.md)。S1-03-R1 修复中/待主验收。
 S1-04 已于 2026-07-22 在提交 `2f99491e9dc410acf85ca81c131a77cae08d0cc3`
 完成主验收，证据见 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。
-S1-05-R4 修复已提交、等待主验收；S1-06～S1-08 未开始、未获授权。
+S1-05-R5 修复已提交、等待主验收；S1-06～S1-08 未开始、未获授权。
 
 真实 XTQuant 和备用源验证仍延期并阻断 Stage 1 最终验收。
 
@@ -61,7 +61,7 @@ S1-05-R4 修复已提交、等待主验收；S1-06～S1-08 未开始、未获授
 
 ## S1-05：EOD、Worker、CLI 与 API
 
-- **状态**：S1-05-R4 修复已提交、等待主验收；真实网络、QMT 和正式数据根仍未授权。
+- **状态**：S1-05-R5 修复已提交、等待主验收；真实网络、QMT 和正式数据根仍未授权。
 - **授权**：本实现仅使用已获离线实施授权的范围；该授权不包含任何真实外部访问。
 - **范围**：Web/CLI 手动触发的同一 EOD 应用服务、持久 Worker handler、幂等命令和 API；
   串联已完成的 Warehouse、XTQuant 与质量能力。
@@ -83,6 +83,9 @@ S1-05-R4 修复已提交、等待主验收；S1-06～S1-08 未开始、未获授
   绑定，不重写不可变字节。failure 权威 verifier 逐项反查 DatasetVersion、batch、
   QualityRun、Warehouse 和 checkpoint；Worker 停止并 join 续租线程后才提交终态，
   已丢失租约时保持可恢复状态而不宣称成功。
+- **R5 闭环**：handler 与终态 evidence 复用同一状态感知 completed-result verifier；
+  `PUBLISHED_NEW` 绑定冻结 base 与本次 batch，`REUSED_UNCHANGED` 保留 base 的真实历史
+  parent 和 input batches，使最终提交故障、重复 stale recovery 与新幂等键重试不重复发布。
 - **R1 完整性**：增量配置冻结并严格复验显式 base version；新候选按 Canonical 主键合并
   完整基表后执行全表质量和发布，直接父版本固定为 base。全覆盖请求返回
   `REUSED_UNCHANGED`，不会创建空 batch/version；新快照返回 `PUBLISHED_NEW`。
