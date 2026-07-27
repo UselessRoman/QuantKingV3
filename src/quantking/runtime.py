@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 from quantking.common.config import AppSettings, load_settings
+from quantking.common.errors import ConfigurationError
 from quantking.common.time import utc_now
 from quantking.data.adapters.eod import EodWorkerHandler, register_eod_handler
+from quantking.data.adapters.eod_base import PublishedEodBaseResolver
 from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
@@ -45,7 +49,9 @@ from quantking.web.app import create_app
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = _REPOSITORY_ROOT / "configs" / "default.toml"
-EOD_CODE_VERSION = "s1-05-r1"
+EOD_CODE_VERSION = "s1-05-r2"
+EXPECTED_DATABASE_REVISION = "20260722_0009"
+WORKER_LEASE_TIMEOUT = timedelta(minutes=2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +81,6 @@ def build_eod_runtime(
     settings: AppSettings,
     *,
     gateway: MarketDataGateway | None = None,
-    recover_running: bool = True,
 ) -> EodRuntime:
     """Build the production object graph without importing the XTQuant SDK.
 
@@ -92,6 +97,13 @@ def build_eod_runtime(
             database,
             busy_timeout_ms=settings.sqlite_busy_timeout_ms,
         )
+    try:
+        with sqlite3.connect(database) as connection:
+            rows = connection.execute("SELECT version_num FROM alembic_version").fetchall()
+    except sqlite3.DatabaseError as error:
+        raise ConfigurationError("runtime database revision is unreadable") from error
+    if rows != [(EXPECTED_DATABASE_REVISION,)]:
+        raise ConfigurationError("runtime database revision does not match the required head")
     jobs_engine = create_sqlite_engine(
         database,
         busy_timeout_ms=settings.sqlite_busy_timeout_ms,
@@ -109,8 +121,6 @@ def build_eod_runtime(
         progress_min_interval_ms=settings.job_progress_min_interval_ms,
     )
     jobs = JobService(SqliteUnitOfWorkFactory(jobs_engine), retry_policy=retry)
-    if recover_running:
-        jobs.recover_running_jobs(reason="local process startup recovered an orphaned RUNNING job")
     data_uow = DataSqliteUnitOfWorkFactory(data_engine)
     ingestion = XtQuantIngestionService(
         gateway=gateway or _gateway(settings),
@@ -146,6 +156,10 @@ def build_eod_runtime(
     commands = EodCommandService(
         jobs,
         config=EodExecutionConfig.production(code_version=EOD_CODE_VERSION),
+        base_resolver=PublishedEodBaseResolver(
+            data_root=data_root,
+            uow_factory=data_uow,
+        ),
     )
     web_app = create_app(
         jobs,
@@ -166,6 +180,8 @@ def build_eod_runtime(
 __all__ = [
     "DEFAULT_CONFIG_PATH",
     "EOD_CODE_VERSION",
+    "EXPECTED_DATABASE_REVISION",
+    "WORKER_LEASE_TIMEOUT",
     "EodRuntime",
     "build_eod_runtime",
     "load_runtime_settings",

@@ -23,6 +23,7 @@ def _request(*, datasets: tuple[str, ...]) -> EodRunRequest:
         end_date=date(2026, 7, 15),
         datasets=datasets,
         publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+        base_versions={},
     )
 
 
@@ -35,6 +36,19 @@ def test_request_is_sorted_and_sha_is_deterministic() -> None:
     assert canonical_request_json(first) == canonical_request_json(second)
     assert request_sha256(first) == request_sha256(second)
     assert EOD_JOB_TYPE == "data.eod.v1"
+
+
+def test_request_freezes_exact_base_version_mapping() -> None:
+    version_id = "data_version:11111111-1111-4111-8111-111111111111"
+    request = EodRunRequest(
+        start_date=date(2026, 7, 15),
+        end_date=date(2026, 7, 15),
+        datasets=("exchange_calendar",),
+        publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+        base_versions={"exchange_calendar": version_id},
+    )
+
+    assert request.to_dict()["base_versions"] == {"exchange_calendar": version_id}
 
 
 @pytest.mark.parametrize(
@@ -62,6 +76,7 @@ def test_request_rejects_inverted_or_non_date_range() -> None:
             end_date=date(2026, 7, 15),
             datasets=("exchange_calendar",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={},
         )
     with pytest.raises(TypeError, match="date"):
         EodRunRequest(  # type: ignore[arg-type]
@@ -69,6 +84,7 @@ def test_request_rejects_inverted_or_non_date_range() -> None:
             end_date=date(2026, 7, 15),
             datasets=("exchange_calendar",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={},
         )
 
 

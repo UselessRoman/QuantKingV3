@@ -6,7 +6,7 @@
 进行中，但尚未完成；S1-03-R1 修复中/待主验收。S1-04 已于 2026-07-22 在提交
 `2f99491e9dc410acf85ca81c131a77cae08d0cc3` 完成主验收，证据见
 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。真实 XTQuant 样本验证仍须逐项授权，合成数据不能
-标生产可用。S1-05-R1 修复已提交，等待主验收；S1-06～S1-08 未开始、未获授权。
+标生产可用。S1-05-R2 修复已提交，等待主验收；S1-06～S1-08 未开始、未获授权。
 
 本文件固化 Stage 1 六类 Canonical 数据集的可执行合同。权威来源是 `src/quantking/data/schemas.py`（框架无关描述符）和 `src/quantking/data/adapters/canonical_schema.py`（PyArrow 映射与验证）。文档不得替代 schema 与契约测试。
 
@@ -257,6 +257,9 @@ Raw/请求构造失败和标准化异常在 `RUNNING` 已持久化后都必须�
 
 - 固定任务类型是 `data.eod.v1`；请求只接受明确起止交易日期、六类 allowlist 中非空且
   无重复的数据集，以及不可省略的 `PUBLISH_AFTER_QUALITY`。来源固定为 `XTQUANT`。
+- `base_versions` 必须显式为空对象（根版本），或按请求数据集完整提供
+  `dataset=data_version:...` 精确映射；禁止 `latest` 和任何隐式当前版本选择。入队 resolver
+  复验 PUBLISHED/Warehouse/PASSED quality 后才冻结完整 base 凭证与真实 coverage。
 - 应用服务将规范 request JSON、request SHA、冻结的 adapter/code/rule/schema 版本、
   scope、lookback、chunk 参数、显式 reference version 及可选 base version 凭证分别写入
   `JobRun` manifests。Worker 只能从持久 manifests 重建并复验，不使用进程内请求对象。
@@ -267,8 +270,9 @@ Raw/请求构造失败和标准化异常在 `RUNNING` 已持久化后都必须�
   配置或版本凭证变化均返回稳定幂等冲突。失败或中断重试必须使用新 job/key，并产生新
   batch/version ID。
 - 每个数据集依次执行能力预检、现有 XTQuant ingestion、按 Canonical 主键将本次完整响应
-  合并到基表、真实 BUILDING version、全快照 QualityRunner 和 CanonicalPublishCoordinator。
-  新记录插入、同主键由本次响应替换、请求范围外历史保持不变，新版本直接父版本为 base。
+  按实际 `FetchChunk` 的 scope/date 权威切片从基表移除旧行、加入本次完整响应，再执行真实
+  BUILDING version、全快照 QualityRunner 和 CanonicalPublishCoordinator。未抓取 scope
+  与范围外历史保持不变，新版本直接父版本为 base。
   只有 ingestion `SUCCEEDED`、quality
   `PASSED` 且发布目录的 manifest/COMPLETE/content SHA/元数据全部复验一致才记为完成。
 - 全部请求范围已由 base 覆盖时返回 `REUSED_UNCHANGED`，不创建空 batch/version；实际发布
@@ -282,3 +286,9 @@ Raw/请求构造失败和标准化异常在 `RUNNING` 已持久化后都必须�
   token、账号、密码或绝对路径，且终态不可覆盖。success verifier 还复验 request/result
   精确字段、数据集集合/顺序、ID namespace、状态字段组合及版本、质量、Warehouse 凭证；
   failure verifier 复验真实规范 UTC、终态、错误码、请求 SHA 和 completed results。
+- Worker 和 verifier 共用同一个严格 frozen-command parser；深层验证还交叉绑定 batch 的
+  dataset/source/adapter/request params 与 request/config/version manifests。成功证据在 Job
+  提交 `SUCCEEDED` 前属于不可变 forensic 证据；若随后故障，原目录保留并另写权威 failure，
+  终态 success verifier 同时要求 Job 状态与 artifact binding。
+- Web、enqueue 和 status runtime 不做恢复。只有显式 Worker 启动可按持久 heartbeat 的明确
+  租约阈值、row_version 和数据库条件更新，将过期 RUNNING 转为 INTERRUPTED；新鲜租约不变。

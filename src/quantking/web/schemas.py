@@ -73,6 +73,7 @@ class EodRunBody(PublicSchema):
     end_date: date
     datasets: tuple[str, ...]
     publish_intent: EodPublishIntent
+    base_versions: dict[str, str]
 
 
 class EodEnqueueResponse(PublicSchema):

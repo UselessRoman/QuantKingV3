@@ -26,6 +26,7 @@ def _body(*, day: str = "2026-07-15") -> dict[str, object]:
         "start_date": day,
         "end_date": day,
         "datasets": ["exchange_calendar"],
+        "base_versions": {},
         "publish_intent": "PUBLISH_AFTER_QUALITY",
     }
 
@@ -138,6 +139,7 @@ def test_cancel_requires_and_checks_row_version(job_service: JobService) -> None
                 "start_date": "2026-07-15",
                 "end_date": "2026-07-15",
                 "datasets": ["exchange_calendar"],
+                "base_versions": {},
                 "publish_intent": "PUBLISH_AFTER_QUALITY",
                 "source": "XTQUANT",
             }
@@ -193,6 +195,7 @@ def test_cancel_returns_conflict_inside_non_cancellable_phase(
                 "start_date": "2026-07-15",
                 "end_date": "2026-07-15",
                 "datasets": ["exchange_calendar"],
+                "base_versions": {},
                 "publish_intent": "PUBLISH_AFTER_QUALITY",
                 "source": "XTQUANT",
             }

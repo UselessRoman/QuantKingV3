@@ -485,12 +485,22 @@ class SQLiteJobRepository:
             for row in self._session.scalars(statement)
         ]
 
-    def recover_running(self, *, at: UtcTimestamp, reason: str) -> int:
+    def recover_stale_running(
+        self,
+        *,
+        stale_before: UtcTimestamp,
+        at: UtcTimestamp,
+        reason: str,
+    ) -> int:
         rows = list(
             self._session.scalars(
-                select(JobRunRow).where(JobRunRow.status == JobStatus.RUNNING.value)
+                select(JobRunRow).where(
+                    JobRunRow.status == JobStatus.RUNNING.value,
+                    JobRunRow.heartbeat_at < stale_before.to_iso(),
+                )
             )
         )
+        recovered = 0
         for row in rows:
             failure = FailureInfo(
                 error_type="WorkerInterrupted",
@@ -500,7 +510,20 @@ class SQLiteJobRepository:
             changed = transition_job(
                 self._domain(row), JobStatus.INTERRUPTED, at=at, failure=failure
             )
-            self._apply(row, changed)
+            outcome = self._session.execute(
+                update(JobRunRow)
+                .where(
+                    JobRunRow.job_id == row.job_id,
+                    JobRunRow.status == JobStatus.RUNNING.value,
+                    JobRunRow.row_version == row.row_version,
+                    JobRunRow.heartbeat_at == row.heartbeat_at,
+                    JobRunRow.heartbeat_at < stale_before.to_iso(),
+                )
+                .values(**_row_values(changed))
+            )
+            if getattr(outcome, "rowcount", 0) != 1:
+                continue
+            recovered += 1
             self._event(
                 job_id=row.job_id,
                 event_type="job_interrupted",
@@ -509,7 +532,7 @@ class SQLiteJobRepository:
                 summary=reason,
                 at=at,
             )
-        return len(rows)
+        return recovered
 
     def heartbeat(self, job_id: str, *, at: UtcTimestamp, minimum_interval_ms: int) -> bool:
         row = self._row(job_id)

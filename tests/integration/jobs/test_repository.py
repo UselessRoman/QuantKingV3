@@ -152,15 +152,47 @@ def test_recovery_interrupts_legacy_running_jobs_and_emits_event(tmp_path: Path)
     initialize_database(database)
     service = _service(database)
     job_id = _create(service)
-    service.transition(job_id, JobStatus.RUNNING, worker_id="dead-worker", summary="claimed")
+    service.transition(
+        job_id,
+        JobStatus.RUNNING,
+        worker_id="dead-worker",
+        summary="claimed",
+        at=UtcTimestamp(datetime(2026, 7, 15, 1, 0, tzinfo=UTC)),
+    )
 
-    assert service.recover_running_jobs(reason="worker process restarted") == 1
+    assert (
+        service.recover_stale_running_jobs(
+            reason="worker process restarted",
+            stale_before=UtcTimestamp(datetime(2026, 7, 15, 2, 0, tzinfo=UTC)),
+            at=UtcTimestamp(datetime(2026, 7, 15, 3, 0, tzinfo=UTC)),
+        )
+        == 1
+    )
 
     recovered = service.get_job(job_id)
     assert recovered.status is JobStatus.INTERRUPTED
     assert recovered.failure is not None
     assert recovered.failure.error_type == "WorkerInterrupted"
     assert service.list_events(after_event_id=0, limit=100)[-1].event_type == "job_interrupted"
+
+
+def test_stale_recovery_preserves_fresh_heartbeat(tmp_path: Path) -> None:
+    database = tmp_path / "lease-recovery.db"
+    initialize_database(database)
+    service = _service(database)
+    job_id = _create(service)
+    started = UtcTimestamp(datetime(2026, 7, 15, 1, 0, tzinfo=UTC))
+    service.transition(job_id, JobStatus.RUNNING, worker_id="active-worker", at=started)
+    service.heartbeat(job_id, at=UtcTimestamp(started.value + timedelta(seconds=30)))
+
+    recovered = service.recover_stale_running_jobs(
+        reason="worker lease expired",
+        stale_before=UtcTimestamp(started.value + timedelta(seconds=20)),
+        at=UtcTimestamp(started.value + timedelta(seconds=31)),
+    )
+
+    assert recovered == 0
+    assert service.get_job(job_id).status is JobStatus.RUNNING
 
 
 def test_heartbeat_and_duplicate_progress_are_rate_limited(tmp_path: Path) -> None:

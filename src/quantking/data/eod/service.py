@@ -5,13 +5,15 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
+from typing import Protocol
 
 from quantking.data.eod.contracts import (
     EOD_CONFIG_SCHEMA,
     EOD_JOB_TYPE,
     EOD_REQUEST_MANIFEST_SCHEMA,
+    EodBaseVersion,
     EodDatasetConfig,
     EodRunRequest,
     canonical_json,
@@ -58,8 +60,8 @@ class EodExecutionConfig:
             DatasetKind(key)
             if not isinstance(config, EodDatasetConfig):
                 raise TypeError("dataset config must be EodDatasetConfig")
-            if config.base_version is not None and config.base_version.dataset != key:
-                raise ValueError("base_version must belong to its configured dataset")
+            if config.base_version is not None:
+                raise ValueError("runtime dataset config must not preselect a base_version")
             normalized[key] = config
         object.__setattr__(self, "datasets", MappingProxyType(dict(sorted(normalized.items()))))
 
@@ -83,7 +85,12 @@ class EodExecutionConfig:
             },
         )
 
-    def to_dict(self, *, selected: tuple[str, ...]) -> dict[str, object]:
+    def to_dict(
+        self,
+        *,
+        selected: tuple[str, ...],
+        bases: Mapping[str, EodBaseVersion],
+    ) -> dict[str, object]:
         missing = set(selected) - set(self.datasets)
         if missing:
             raise ValueError("selected dataset has no frozen execution config")
@@ -95,7 +102,14 @@ class EodExecutionConfig:
             "lookback_days": self.lookback_days,
             "max_days_per_chunk": self.max_days_per_chunk,
             "max_items_per_chunk": self.max_items_per_chunk,
-            "datasets": {key: self.datasets[key].to_dict() for key in selected},
+            "datasets": {
+                key: replace(
+                    self.datasets[key],
+                    known_coverage=(),
+                    base_version=bases.get(key),
+                ).to_dict()
+                for key in selected
+            },
             "schema_versions": {key: descriptor_for(key).schema_version for key in selected},
         }
 
@@ -108,16 +122,35 @@ class EodEnqueueResult:
     created: bool
 
 
+class EodBaseVersionResolver(Protocol):
+    """Resolve and verify one exact published base; never select a latest alias."""
+
+    def resolve(
+        self,
+        *,
+        dataset: str,
+        version_id: str,
+        scope: tuple[str, ...],
+    ) -> EodBaseVersion: ...
+
+
 class EodCommandService:
     """The single enqueue port shared by CLI and Web."""
 
-    def __init__(self, jobs: JobService, *, config: EodExecutionConfig) -> None:
+    def __init__(
+        self,
+        jobs: JobService,
+        *,
+        config: EodExecutionConfig,
+        base_resolver: EodBaseVersionResolver | None = None,
+    ) -> None:
         if not isinstance(jobs, JobService):
             raise TypeError("jobs must be a JobService")
         if not isinstance(config, EodExecutionConfig):
             raise TypeError("config must be an EodExecutionConfig")
         self._jobs = jobs
         self._config = config
+        self._base_resolver = base_resolver
 
     def enqueue(
         self,
@@ -138,7 +171,19 @@ class EodCommandService:
             raise ValueError("requester must be non-empty text")
         request_json = canonical_request_json(request)
         request_sha = request_sha256(request)
-        config_json = canonical_json(self._config.to_dict(selected=request.datasets))
+        resolved_bases: dict[str, EodBaseVersion] = {}
+        if request.base_versions:
+            if self._base_resolver is None:
+                raise ValueError("base version resolver is unavailable")
+            for dataset in request.datasets:
+                resolved_bases[dataset] = self._base_resolver.resolve(
+                    dataset=dataset,
+                    version_id=request.base_versions[dataset],
+                    scope=self._config.datasets[dataset].scope,
+                )
+        config_json = canonical_json(
+            self._config.to_dict(selected=request.datasets, bases=resolved_bases)
+        )
         config_sha = sha256_text(config_json)
         log_key = hashlib.sha256(f"{EOD_JOB_TYPE}\0{idempotency_key}".encode()).hexdigest()
         outcome = self._jobs.create_job_result(
@@ -177,4 +222,9 @@ class EodCommandService:
         )
 
 
-__all__ = ["EodCommandService", "EodEnqueueResult", "EodExecutionConfig"]
+__all__ = [
+    "EodBaseVersionResolver",
+    "EodCommandService",
+    "EodEnqueueResult",
+    "EodExecutionConfig",
+]

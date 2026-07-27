@@ -176,11 +176,25 @@ class JobService:
             raise ValueError("limit must be between 1 and 1000")
         return self._execute(lambda repository: repository.list_audits(action=action, limit=limit))
 
-    def recover_running_jobs(self, *, reason: str, at: UtcTimestamp | None = None) -> int:
+    def recover_stale_running_jobs(
+        self,
+        *,
+        reason: str,
+        stale_before: UtcTimestamp,
+        at: UtcTimestamp | None = None,
+    ) -> int:
         _required_text(reason, field="reason")
+        if not isinstance(stale_before, UtcTimestamp):
+            raise TypeError("stale_before must be a UtcTimestamp")
         occurred_at = at or self._now()
+        if stale_before.value > occurred_at.value:
+            raise ValueError("stale_before must not follow recovery time")
         return self._execute(
-            lambda repository: repository.recover_running(at=occurred_at, reason=reason)
+            lambda repository: repository.recover_stale_running(
+                stale_before=stale_before,
+                at=occurred_at,
+                reason=reason,
+            )
         )
 
     def heartbeat(self, job_id: str, *, at: UtcTimestamp | None = None) -> bool:

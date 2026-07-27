@@ -49,6 +49,12 @@ def _parser() -> argparse.ArgumentParser:
     enqueue = commands.add_parser("eod-enqueue")
     enqueue.add_argument("--trade-date", required=True)
     enqueue.add_argument("--datasets", nargs="+", required=True)
+    enqueue.add_argument(
+        "--base-version",
+        action="append",
+        default=[],
+        metavar="DATASET=VERSION_ID",
+    )
     enqueue.add_argument("--idempotency-key", required=True)
     enqueue.add_argument(
         "--publish-intent",
@@ -95,6 +101,18 @@ def _job_payload(job: JobRun) -> dict[str, object]:
     }
 
 
+def _base_versions(values: Sequence[str]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for value in values:
+        if not isinstance(value, str) or value.count("=") != 1:
+            raise _ArgumentError
+        dataset, version_id = value.split("=", 1)
+        if not dataset or not version_id or dataset in result:
+            raise _ArgumentError
+        result[dataset] = version_id
+    return result
+
+
 def run_cli(
     argv: Sequence[str],
     *,
@@ -128,6 +146,7 @@ def run_cli(
                 end_date=trade_date,
                 datasets=tuple(arguments.datasets),
                 publish_intent=EodPublishIntent(arguments.publish_intent),
+                base_versions=_base_versions(arguments.base_version),
             )
         except (_ArgumentError, TypeError, ValueError):
             _write(
@@ -229,9 +248,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         _parser().parse_args(list(arguments))
         return 0
     try:
-        from quantking.runtime import build_eod_runtime, load_runtime_settings
+        from quantking.common.time import UtcTimestamp, utc_now
+        from quantking.runtime import (
+            WORKER_LEASE_TIMEOUT,
+            build_eod_runtime,
+            load_runtime_settings,
+        )
 
         runtime = build_eod_runtime(load_runtime_settings())
+        if arguments and arguments[0] == "worker-run":
+            now = utc_now()
+            runtime.jobs.recover_stale_running_jobs(
+                reason="expired Worker lease recovered at explicit Worker startup",
+                stale_before=UtcTimestamp(now.value - WORKER_LEASE_TIMEOUT),
+                at=now,
+            )
     except Exception:
         _write(
             sys.stdout,

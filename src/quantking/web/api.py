@@ -78,6 +78,7 @@ def create_api_router(
                         end_date=body.end_date,
                         datasets=body.datasets,
                         publish_intent=body.publish_intent,
+                        base_versions=body.base_versions,
                     ),
                     idempotency_key=idempotency_key,
                     requester="web-api",

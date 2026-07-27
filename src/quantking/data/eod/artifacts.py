@@ -6,16 +6,17 @@ import hashlib
 import json
 import os
 import re
-import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from quantking.common.ids import parse_entity_id
 from quantking.common.paths import is_reparse_point
-from quantking.common.time import UtcTimestamp
+from quantking.common.time import TradingDate, UtcTimestamp
 from quantking.data.adapters.persistence.sqlite import DataSqliteUnitOfWorkFactory
 from quantking.data.adapters.warehouse.manifest import path_safe_id
+from quantking.data.adapters.warehouse.query import CanonicalQueryAdapter
 from quantking.data.adapters.warehouse.verifier import verify_canonical_directory
 from quantking.data.eod.contracts import (
     EodDatasetResult,
@@ -24,7 +25,18 @@ from quantking.data.eod.contracts import (
     canonical_json,
     request_sha256,
 )
-from quantking.data.models import DatasetVersionStatus, QualityRunStatus
+from quantking.data.eod.frozen import (
+    FrozenEodCommand,
+    FrozenEodCommandError,
+    parse_evidence_command,
+)
+from quantking.data.incremental import IncrementalPlanRequest, build_incremental_plan
+from quantking.data.models import (
+    DatasetVersionStatus,
+    IngestionBatchStatus,
+    QualityRunStatus,
+)
+from quantking.jobs.models import JobRun, JobStatus
 
 _SUCCESS_FILES = frozenset({"request.json", "result.json", "manifest.json", "COMPLETE"})
 _FAILURE_FILES = frozenset({"request.json", "failure.json"})
@@ -105,49 +117,15 @@ def _safe_directory(
     return resolved
 
 
-def _request_from_evidence(value: Mapping[str, object]) -> EodRunRequest:
-    expected = {
-        "schema_version",
-        "request",
-        "request_sha256",
-        "config",
-        "config_sha256",
-        "version_manifest",
-    }
-    if set(value) != expected or value.get("schema_version") != _REQUEST_EVIDENCE_SCHEMA:
-        raise EodEvidenceConflictError("EOD request evidence fields are invalid")
-    raw_request = value.get("request")
-    raw_config = value.get("config")
-    raw_versions = value.get("version_manifest")
-    if not isinstance(raw_request, Mapping):
-        raise EodEvidenceConflictError("EOD request evidence request is invalid")
-    if not isinstance(raw_config, Mapping) or not isinstance(raw_versions, Mapping):
-        raise EodEvidenceConflictError("EOD request evidence manifests are invalid")
+def _command_from_evidence(value: Mapping[str, object]) -> FrozenEodCommand:
     try:
-        request = EodRunRequest.from_dict(raw_request)
-    except (TypeError, ValueError) as error:
-        raise EodEvidenceConflictError("EOD request evidence request is invalid") from error
-    if value.get("request_sha256") != request_sha256(request):
-        raise EodEvidenceConflictError("EOD request evidence request SHA is invalid")
-    config_sha = value.get("config_sha256")
-    if (
-        not isinstance(config_sha, str)
-        or _SHA256.fullmatch(config_sha) is None
-        or config_sha != _sha(_json_bytes(raw_config))
-    ):
-        raise EodEvidenceConflictError("EOD request evidence config SHA is invalid")
-    if set(raw_versions) != {
-        "adapter_version",
-        "code_version",
-        "rule_version",
-        "schema_versions_sha256",
-    }:
-        raise EodEvidenceConflictError("EOD version manifest fields are invalid")
-    if any(not isinstance(item, str) or not item for item in raw_versions.values()):
-        raise EodEvidenceConflictError("EOD version manifest values are invalid")
-    if _SHA256.fullmatch(str(raw_versions["schema_versions_sha256"])) is None:
-        raise EodEvidenceConflictError("EOD version manifest SHA is invalid")
-    return request
+        return parse_evidence_command(value)
+    except FrozenEodCommandError as error:
+        raise EodEvidenceConflictError("EOD frozen command evidence is invalid") from error
+
+
+def _request_from_evidence(value: Mapping[str, object]) -> EodRunRequest:
+    return _command_from_evidence(value).request
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +135,7 @@ class VerifiedEodEvidence:
     manifest_sha256: str
     parsed_request: EodRunRequest
     parsed_result: EodRunResult
+    frozen_command: FrozenEodCommand
 
 
 def verify_eod_success_evidence(directory: Path, *, artifacts_root: Path) -> VerifiedEodEvidence:
@@ -165,7 +144,8 @@ def verify_eod_success_evidence(directory: Path, *, artifacts_root: Path) -> Ver
     request, request_bytes = _read_json(resolved / "request.json")
     result, result_bytes = _read_json(resolved / "result.json")
     manifest, _manifest_bytes = _read_json(resolved / "manifest.json")
-    parsed_request = _request_from_evidence(request)
+    frozen_command = _command_from_evidence(request)
+    parsed_request = frozen_command.request
     try:
         parsed_result = EodRunResult.from_dict(
             result,
@@ -178,6 +158,7 @@ def verify_eod_success_evidence(directory: Path, *, artifacts_root: Path) -> Ver
         "job_id",
         "request_sha256",
         "result_sha256",
+        "authority_state",
         "manifest_sha256",
     }
     try:
@@ -187,6 +168,7 @@ def verify_eod_success_evidence(directory: Path, *, artifacts_root: Path) -> Ver
     if (
         set(manifest) != expected_manifest_fields
         or manifest.get("schema_version") != "eod-evidence-manifest.v1"
+        or manifest.get("authority_state") != "PROVISIONAL_UNTIL_JOB_SUCCEEDED"
         or manifest.get("request_sha256") != _sha(request_bytes)
         or manifest.get("result_sha256") != _sha(result_bytes)
         or parsed_result.job_id != manifest.get("job_id")
@@ -213,6 +195,7 @@ def verify_eod_success_evidence(directory: Path, *, artifacts_root: Path) -> Ver
         manifest_sha256=declared_sha,
         parsed_request=parsed_request,
         parsed_result=parsed_result,
+        frozen_command=frozen_command,
     )
 
 
@@ -228,11 +211,20 @@ def verify_eod_success_evidence_deep(
         directory,
         artifacts_root=artifacts_root,
     )
+    plans = {item.dataset.value: item for item in verified_evidence.frozen_command.datasets}
+    command = verified_evidence.frozen_command
+    query = CanonicalQueryAdapter(data_root=data_root, uow_factory=uow_factory)
     for result in verified_evidence.parsed_result.datasets:
-        with uow_factory() as uow:
-            version = uow.data.get_version(result.version_id)
-            quality = uow.data.get_quality_run(result.quality_run_id)
-            uow.rollback()
+        plan = plans[result.dataset]
+        try:
+            with uow_factory() as uow:
+                version = uow.data.get_version(result.version_id)
+                quality = uow.data.get_quality_run(result.quality_run_id)
+                batch = None if result.batch_id is None else uow.data.get_batch(result.batch_id)
+                uow.rollback()
+        except Exception as error:
+            raise EodEvidenceConflictError("EOD result repository lineage is missing") from error
+        frozen_parent = None if plan.base_version is None else plan.base_version.version_id
         if (
             version.status is not DatasetVersionStatus.PUBLISHED
             or version.dataset.value != result.dataset
@@ -241,13 +233,44 @@ def verify_eod_success_evidence_deep(
             or version.content_sha256 != result.content_sha256
             or version.manifest_sha256 != result.manifest_sha256
             or str(version.quality_run_id) != result.quality_run_id
+            or (result.status == "PUBLISHED_NEW" and result.parent_version_id != frozen_parent)
         ):
             raise EodEvidenceConflictError("EOD result version credentials do not match")
-        if result.status == "PUBLISHED_NEW" and (
-            result.batch_id is None
-            or result.batch_id not in {str(item) for item in version.input_batch_ids}
+        if result.status == "PUBLISHED_NEW":
+            if (
+                batch is None
+                or batch.status is not IngestionBatchStatus.SUCCEEDED
+                or batch.dataset.value != result.dataset
+                or batch.source.value != "XTQUANT"
+                or batch.adapter_version != command.adapter_version
+                or result.batch_id not in {str(item) for item in version.input_batch_ids}
+            ):
+                raise EodEvidenceConflictError("EOD result batch lineage does not match")
+            expected_plan = build_incremental_plan(
+                IncrementalPlanRequest(
+                    batch_id=parse_entity_id(result.batch_id),
+                    dataset=plan.dataset,
+                    scope=plan.scope,
+                    request_start=TradingDate(command.request.start_date),
+                    request_end=TradingDate(command.request.end_date),
+                    start_inclusive=True,
+                    end_inclusive=True,
+                    known_coverage=plan.known_coverage,
+                    lookback_days=command.lookback_days,
+                    max_days_per_chunk=command.max_days_per_chunk,
+                    max_items_per_chunk=command.max_items_per_chunk,
+                    adapter_version=command.adapter_version,
+                )
+            )
+            if dict(batch.request_params) != dict(expected_plan.request_params):
+                raise EodEvidenceConflictError("EOD batch request does not match frozen command")
+        elif (
+            plan.base_version is None
+            or result.version_id != plan.base_version.version_id
+            or result.content_sha256 != plan.base_version.content_sha256
+            or result.manifest_sha256 != plan.base_version.manifest_sha256
         ):
-            raise EodEvidenceConflictError("EOD result batch lineage does not match")
+            raise EodEvidenceConflictError("unchanged result does not match frozen base")
         if quality.status is not QualityRunStatus.PASSED or (
             str(quality.version_id) != result.version_id
             or quality.rule_version != version.rule_version
@@ -268,7 +291,67 @@ def verify_eod_success_evidence_deep(
             or verified_directory.manifest.get("version_id") != result.version_id
         ):
             raise EodEvidenceConflictError("EOD Warehouse credentials do not match")
+        table = query.query_by_id(
+            version_id=result.version_id,
+            dataset=result.dataset,
+        )
+        date_field = "effective_from" if result.dataset == "security_master" else "trade_date"
+        scope_field = "exchange" if result.dataset == "exchange_calendar" else "code"
+        coverage: dict[str, list[date]] = {item: [] for item in plan.scope}
+        for row in table.select([scope_field, date_field]).to_pylist():
+            if row[scope_field] in coverage and isinstance(row[date_field], date):
+                coverage[row[scope_field]].append(row[date_field])
+        base_coverage = (
+            {}
+            if plan.base_version is None
+            else {scope: (start, end) for scope, start, end in plan.base_version.coverage}
+        )
+        for scope in plan.scope:
+            if not coverage[scope]:
+                raise EodEvidenceConflictError("EOD output coverage is incomplete")
+            required_start = min(
+                command.request.start_date.isoformat(),
+                base_coverage.get(scope, ("9999-12-31", ""))[0],
+            )
+            required_end = max(
+                command.request.end_date.isoformat(),
+                base_coverage.get(scope, ("", "0001-01-01"))[1],
+            )
+            actual_start = min(coverage[scope]).isoformat()
+            actual_end = max(coverage[scope]).isoformat()
+            if actual_start > required_start or actual_end < required_end:
+                raise EodEvidenceConflictError("EOD output coverage is incomplete")
     return verified_evidence
+
+
+def verify_eod_terminal_success(
+    directory: Path,
+    *,
+    artifacts_root: Path,
+    data_root: Path,
+    uow_factory: DataSqliteUnitOfWorkFactory,
+    job: JobRun,
+) -> VerifiedEodEvidence:
+    """Accept success as authoritative only after the durable Job commits it."""
+    verified = verify_eod_success_evidence_deep(
+        directory,
+        artifacts_root=artifacts_root,
+        data_root=data_root,
+        uow_factory=uow_factory,
+    )
+    try:
+        relative = (
+            directory.resolve(strict=True).relative_to(data_root.resolve(strict=True)).as_posix()
+        )
+    except (OSError, ValueError) as error:
+        raise EodEvidenceConflictError("terminal evidence path is unmanaged") from error
+    if (
+        job.status is not JobStatus.SUCCEEDED
+        or verified.parsed_result.job_id != job.job_id
+        or relative not in job.artifacts
+    ):
+        raise EodEvidenceConflictError("success evidence is uncommitted forensic evidence")
+    return verified
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,6 +480,7 @@ class EodEvidenceWriter:
             "job_id": job_id,
             "request_sha256": _sha(request_bytes),
             "result_sha256": _sha(result_bytes),
+            "authority_state": "PROVISIONAL_UNTIL_JOB_SUCCEEDED",
         }
         manifest = {**unsigned, "manifest_sha256": _sha(_json_bytes(unsigned))}
         (incomplete / "request.json").write_bytes(request_bytes)
@@ -543,10 +627,9 @@ class EodEvidenceWriter:
         directory = self._root / f"{safe_id}.incomplete"
         success = self._root / safe_id
         if success.exists():
-            if not replace_uncommitted_success:
-                raise EodEvidenceConflictError("successful evidence already occupies this job_id")
             verify_eod_success_evidence(success, artifacts_root=self._root)
-            shutil.rmtree(success)
+            if not replace_uncommitted_success:
+                raise EodEvidenceConflictError("terminal success evidence already exists")
         completed = tuple(EodDatasetResult.from_dict(item) for item in completed_datasets)
         failure = {
             "schema_version": _FAILURE_SCHEMA,
@@ -586,4 +669,5 @@ __all__ = [
     "verify_eod_failure_evidence",
     "verify_eod_success_evidence",
     "verify_eod_success_evidence_deep",
+    "verify_eod_terminal_success",
 ]

@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
-from datetime import UTC, datetime, timedelta
+import subprocess
+import sys
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+import pyarrow as pa
 import pytest
 
+from quantking.common.config import AppSettings
 from quantking.common.ids import new_entity_id
-from quantking.common.time import UtcTimestamp
+from quantking.common.paths import RuntimePaths
+from quantking.common.time import TradingDate, UtcTimestamp
+from quantking.data.adapters.canonical_schema import canonical_schema
 from quantking.data.adapters.eod import (
     EodExecutionError,
     EodWorkerHandler,
@@ -39,6 +46,7 @@ from quantking.data.eod.artifacts import (
     verify_eod_failure_evidence,
     verify_eod_success_evidence,
     verify_eod_success_evidence_deep,
+    verify_eod_terminal_success,
 )
 from quantking.data.eod.contracts import (
     EodBaseVersion,
@@ -47,6 +55,7 @@ from quantking.data.eod.contracts import (
     EodRunRequest,
 )
 from quantking.data.eod.service import EodCommandService, EodExecutionConfig
+from quantking.data.incremental import FetchChunk
 from quantking.data.models import (
     BatchFailureInfo,
     BatchFailureKind,
@@ -67,8 +76,29 @@ from quantking.jobs.adapters.persistence.sqlite import (
 from quantking.jobs.models import JobStatus
 from quantking.jobs.services import JobService
 from quantking.jobs.worker import Worker, WorkerRegistry
+from quantking.runtime import build_eod_runtime
 
 _NOW = UtcTimestamp(datetime(2026, 7, 15, 18, 0, tzinfo=UTC))
+
+
+def _settings(tmp_path: Path) -> AppSettings:
+    return AppSettings(
+        paths=RuntimePaths(
+            code_root=Path.cwd(),
+            data_root=tmp_path / "runtime-data",
+            offsite_backup_root=tmp_path / "offsite",
+        ),
+        xtquant_site_packages_root=tmp_path / "missing-sdk",
+        web_host="127.0.0.1",
+        web_port=8765,
+        sqlite_busy_timeout_ms=250,
+        sqlite_max_attempts=7,
+        sqlite_retry_base_delay_ms=10,
+        sqlite_retry_cap_delay_ms=160,
+        sqlite_retry_jitter_ratio=0.0,
+        job_heartbeat_min_interval_ms=1000,
+        job_progress_min_interval_ms=250,
+    )
 
 
 class CalendarGateway:
@@ -147,6 +177,18 @@ class ExplodingQualityRunner:
     def run(self, *, request: object, table: object) -> QualityRunArtifact:
         del request, table
         raise RuntimeError(r"password=secret E:\private\payload")
+
+
+class ExactBaseResolver:
+    def __init__(self, bases: dict[str, EodBaseVersion]) -> None:
+        self.bases = bases
+
+    def resolve(self, *, dataset: str, version_id: str, scope: tuple[str, ...]):
+        del scope
+        base = self.bases[version_id]
+        if base.dataset != dataset:
+            raise ValueError("dataset mismatch")
+        return base
 
 
 class SixDatasetGateway:
@@ -255,6 +297,7 @@ def _runtime(
     capability_check=None,
     quality_runner_override=None,
     execution_config: EodExecutionConfig | None = None,
+    base_resolver=None,
     fault_injector=None,
 ) -> tuple[JobService, EodCommandService, Worker]:
     database = tmp_path / "metadata.db"
@@ -298,6 +341,7 @@ def _runtime(
     command = EodCommandService(
         jobs,
         config=execution_config or EodExecutionConfig.production(code_version="test-code"),
+        base_resolver=base_resolver,
     )
     return jobs, command, Worker(jobs, registry, worker_id="worker-1")
 
@@ -327,6 +371,7 @@ def _enqueue(
     *,
     datasets=("exchange_calendar",),
     key: str = "eod-worker-test",
+    base_versions: dict[str, str] | None = None,
 ) -> str:
     return command.enqueue(
         EodRunRequest(
@@ -334,6 +379,7 @@ def _enqueue(
             end_date=_NOW.value.date(),
             datasets=datasets,
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={} if base_versions is None else base_versions,
         ),
         idempotency_key=key,
         requester="pytest",
@@ -360,6 +406,15 @@ def test_complete_fake_gateway_flow_publishes_and_writes_strict_evidence(
     evidence = verify_eod_success_evidence(
         tmp_path / job.artifacts[0],
         artifacts_root=tmp_path / "artifacts" / "eod",
+    )
+    verify_eod_terminal_success(
+        tmp_path / job.artifacts[0],
+        artifacts_root=tmp_path / "artifacts" / "eod",
+        data_root=tmp_path,
+        uow_factory=DataSqliteUnitOfWorkFactory(
+            create_data_engine(tmp_path / "metadata.db", busy_timeout_ms=250)
+        ),
+        job=job,
     )
     result = evidence.result["datasets"][0]  # type: ignore[index]
     assert result["status"] == "PUBLISHED_NEW"
@@ -588,10 +643,10 @@ def test_second_incremental_publish_preserves_base_history(tmp_path: Path) -> No
             datasets={
                 DatasetKind.EXCHANGE_CALENDAR.value: EodDatasetConfig(
                     scope=("BJ", "SH", "SZ"),
-                    base_version=base,
                 )
             },
         ),
+        base_resolver=ExactBaseResolver({base.version_id: base}),
     )
     second_job_id = second_command.enqueue(
         EodRunRequest(
@@ -599,6 +654,7 @@ def test_second_incremental_publish_preserves_base_history(tmp_path: Path) -> No
             end_date=_NOW.value.date() + timedelta(days=1),
             datasets=("exchange_calendar",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={"exchange_calendar": base.version_id},
         ),
         idempotency_key="history-second",
         requester="pytest",
@@ -625,6 +681,154 @@ def test_second_incremental_publish_preserves_base_history(tmp_path: Path) -> No
         "2026-07-15",
         "2026-07-16",
     ]
+
+
+def test_formal_runtime_resolves_exact_base_and_reuses_no_change(tmp_path: Path) -> None:
+    gateway = CalendarGateway()
+    runtime = build_eod_runtime(_settings(tmp_path), gateway=gateway)
+    first = runtime.eod_commands.enqueue(
+        EodRunRequest(
+            start_date=date(2026, 7, 15),
+            end_date=date(2026, 7, 15),
+            datasets=("exchange_calendar",),
+            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={},
+        ),
+        idempotency_key="formal-root",
+        requester="pytest",
+    )
+    runtime.worker.run(first.job_id)
+    first_result = verify_eod_success_evidence(
+        runtime.settings.paths.data_root / runtime.jobs.get_job(first.job_id).artifacts[0],
+        artifacts_root=runtime.settings.paths.data_root / "artifacts" / "eod",
+    ).parsed_result.datasets[0]
+
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("QUANTKING_")
+    }
+    environment.update(
+        {
+            "QUANTKING_CODE_ROOT": str(Path.cwd()),
+            "QUANTKING_DATA_ROOT": str(runtime.settings.paths.data_root),
+            "QUANTKING_OFFSITE_BACKUP_ROOT": str(tmp_path / "offsite"),
+            "QUANTKING_XTQUANT_SITE_PACKAGES_ROOT": str(tmp_path / "missing-sdk"),
+        }
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "quantking.cli.eod",
+            "eod-enqueue",
+            "--trade-date",
+            "2026-07-16",
+            "--datasets",
+            "exchange_calendar",
+            "--base-version",
+            f"exchange_calendar={first_result.version_id}",
+            "--idempotency-key",
+            "formal-child",
+            "--publish-intent",
+            "PUBLISH_AFTER_QUALITY",
+        ],
+        cwd=Path.cwd(),
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    second_job_id = json.loads(completed.stdout)["job_id"]
+    second_runtime = build_eod_runtime(_settings(tmp_path), gateway=gateway)
+    second_runtime.worker.run(second_job_id)
+    second_result = verify_eod_success_evidence(
+        second_runtime.settings.paths.data_root
+        / second_runtime.jobs.get_job(second_job_id).artifacts[0],
+        artifacts_root=second_runtime.settings.paths.data_root / "artifacts" / "eod",
+    ).parsed_result.datasets[0]
+    assert second_result.parent_version_id == first_result.version_id
+
+    third_job_id = second_runtime.eod_commands.enqueue(
+        EodRunRequest(
+            start_date=date(2026, 7, 16),
+            end_date=date(2026, 7, 16),
+            datasets=("exchange_calendar",),
+            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={"exchange_calendar": second_result.version_id},
+        ),
+        idempotency_key="formal-no-change",
+        requester="pytest",
+    ).job_id
+    second_runtime.worker.run(third_job_id)
+    third_result = verify_eod_success_evidence(
+        second_runtime.settings.paths.data_root
+        / second_runtime.jobs.get_job(third_job_id).artifacts[0],
+        artifacts_root=second_runtime.settings.paths.data_root / "artifacts" / "eod",
+    ).parsed_result.datasets[0]
+    with sqlite3.connect(
+        second_runtime.settings.paths.data_root / "metadata" / "quantking.db"
+    ) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ingestion_batches").fetchone() == (2,)
+        assert connection.execute("SELECT COUNT(*) FROM dataset_versions").fetchone() == (2,)
+    assert third_result.status == "REUSED_UNCHANGED"
+    assert third_result.version_id == second_result.version_id
+
+
+def test_web_cli_runtime_never_recovers_fresh_worker_lease(tmp_path: Path) -> None:
+    runtime = build_eod_runtime(_settings(tmp_path), gateway=CalendarGateway())
+    outcome = runtime.eod_commands.enqueue(
+        EodRunRequest(
+            start_date=date(2026, 7, 15),
+            end_date=date(2026, 7, 15),
+            datasets=("exchange_calendar",),
+            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={},
+        ),
+        idempotency_key="runtime-lease",
+        requester="pytest",
+    )
+    started = UtcTimestamp(datetime(2026, 7, 15, 1, 0, tzinfo=UTC))
+    runtime.jobs.transition(
+        outcome.job_id,
+        JobStatus.RUNNING,
+        worker_id="active-worker",
+        at=started,
+    )
+    heartbeat = UtcTimestamp(started.value + timedelta(seconds=30))
+    runtime.jobs.heartbeat(outcome.job_id, at=heartbeat)
+
+    web_cli_runtime = build_eod_runtime(_settings(tmp_path), gateway=CalendarGateway())
+    assert web_cli_runtime.jobs.get_job(outcome.job_id).status is JobStatus.RUNNING
+    assert (
+        web_cli_runtime.jobs.recover_stale_running_jobs(
+            reason="expired lease",
+            stale_before=UtcTimestamp(heartbeat.value - timedelta(seconds=1)),
+            at=UtcTimestamp(heartbeat.value + timedelta(minutes=3)),
+        )
+        == 0
+    )
+    assert web_cli_runtime.jobs.get_job(outcome.job_id).status is JobStatus.RUNNING
+    assert (
+        web_cli_runtime.jobs.recover_stale_running_jobs(
+            reason="expired lease",
+            stale_before=UtcTimestamp(heartbeat.value + timedelta(minutes=2)),
+            at=UtcTimestamp(heartbeat.value + timedelta(minutes=3)),
+        )
+        == 1
+    )
+    assert web_cli_runtime.jobs.get_job(outcome.job_id).status is JobStatus.INTERRUPTED
+
+
+def test_formal_runtime_rejects_existing_database_at_wrong_revision(tmp_path: Path) -> None:
+    runtime = build_eod_runtime(_settings(tmp_path), gateway=CalendarGateway())
+    database = runtime.settings.paths.data_root / "metadata" / "quantking.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE alembic_version SET version_num = 'forged_revision'")
+        connection.commit()
+
+    with pytest.raises(Exception, match="revision"):
+        build_eod_runtime(_settings(tmp_path), gateway=CalendarGateway())
 
 
 def test_post_publish_failure_discovers_version_in_failure_evidence(
@@ -677,12 +881,16 @@ def test_fully_covered_request_reuses_base_without_empty_batch_or_version(
             datasets={
                 DatasetKind.EXCHANGE_CALENDAR.value: EodDatasetConfig(
                     scope=("BJ", "SH", "SZ"),
-                    base_version=base,
                 )
             },
         ),
+        base_resolver=ExactBaseResolver({base.version_id: base}),
     )
-    job_id = _enqueue(command, key="no-change-second")
+    job_id = _enqueue(
+        command,
+        key="no-change-second",
+        base_versions={"exchange_calendar": base.version_id},
+    )
     worker.run(job_id)
 
     evidence = verify_eod_success_evidence(
@@ -728,12 +936,16 @@ def test_tampered_base_credentials_fail_before_gateway(tmp_path: Path) -> None:
             datasets={
                 DatasetKind.EXCHANGE_CALENDAR.value: EodDatasetConfig(
                     scope=("BJ", "SH", "SZ"),
-                    base_version=invalid,
                 )
             },
         ),
+        base_resolver=ExactBaseResolver({invalid.version_id: invalid}),
     )
-    job_id = _enqueue(command, key="base-invalid")
+    job_id = _enqueue(
+        command,
+        key="base-invalid",
+        base_versions={"exchange_calendar": invalid.version_id},
+    )
 
     with pytest.raises(EodExecutionError, match="base version"):
         worker.run(job_id)
@@ -777,6 +989,97 @@ def test_each_post_publish_fault_retains_completed_failure_evidence(
     assert job.status is JobStatus.FAILED
     assert len(failure["completed_datasets"]) == 1
     assert failure["completed_datasets"][0]["status"] == "PUBLISHED_NEW"
+    if fault_point == "after_success_evidence_before_job_succeeded":
+        forensic = tmp_path / "artifacts" / "eod" / job_id.replace(":", "_")
+        assert forensic.is_dir()
+        assert (
+            json.loads((forensic / "manifest.json").read_bytes())["authority_state"]
+            == "PROVISIONAL_UNTIL_JOB_SUCCEEDED"
+        )
+        with pytest.raises(EodEvidenceConflictError, match="forensic"):
+            verify_eod_terminal_success(
+                forensic,
+                artifacts_root=tmp_path / "artifacts" / "eod",
+                data_root=tmp_path,
+                uow_factory=DataSqliteUnitOfWorkFactory(
+                    create_data_engine(tmp_path / "metadata.db", busy_timeout_ms=250)
+                ),
+                job=job,
+            )
+
+
+def test_lookback_authoritative_slice_removes_missing_base_row() -> None:
+    base = pa.Table.from_pylist(
+        [
+            {"exchange": "SZ", "trade_date": date(2026, 7, 13), "is_open": True},
+            {"exchange": "SZ", "trade_date": date(2026, 7, 14), "is_open": True},
+            {"exchange": "SZ", "trade_date": date(2026, 7, 15), "is_open": True},
+        ],
+        schema=canonical_schema("exchange_calendar"),
+    )
+    candidate = pa.Table.from_pylist(
+        [{"exchange": "SZ", "trade_date": date(2026, 7, 15), "is_open": False}],
+        schema=canonical_schema("exchange_calendar"),
+    )
+    chunk = FetchChunk(
+        sequence=0,
+        dataset=DatasetKind.EXCHANGE_CALENDAR,
+        scope=("SZ",),
+        start=TradingDate(date(2026, 7, 14)),
+        end=TradingDate(date(2026, 7, 15)),
+        request_sha256="a" * 64,
+    )
+
+    merged = EodWorkerHandler._merge_snapshot(
+        DatasetKind.EXCHANGE_CALENDAR,
+        base=base,
+        candidate=candidate,
+        chunks=(chunk,),
+    )
+
+    assert merged.to_pylist() == [
+        {"exchange": "SZ", "trade_date": date(2026, 7, 13), "is_open": True},
+        {"exchange": "SZ", "trade_date": date(2026, 7, 15), "is_open": False},
+    ]
+
+
+@pytest.mark.parametrize("case", ["partial_scope", "duplicate_pk", "out_of_range"])
+def test_lookback_merge_rejects_unsafe_candidate_inventory(case: str) -> None:
+    base = pa.Table.from_pylist(
+        [
+            {"exchange": exchange, "trade_date": date(2026, 7, 15), "is_open": True}
+            for exchange in ("SH", "SZ")
+        ],
+        schema=canonical_schema("exchange_calendar"),
+    )
+    records = [{"exchange": "SZ", "trade_date": date(2026, 7, 15), "is_open": False}]
+    scope = ("SH", "SZ")
+    if case == "duplicate_pk":
+        records.append(dict(records[0]))
+        scope = ("SZ",)
+    elif case == "out_of_range":
+        records[0]["trade_date"] = date(2026, 7, 16)
+        scope = ("SZ",)
+    candidate = pa.Table.from_pylist(
+        records,
+        schema=canonical_schema("exchange_calendar"),
+    )
+    chunk = FetchChunk(
+        sequence=0,
+        dataset=DatasetKind.EXCHANGE_CALENDAR,
+        scope=scope,
+        start=TradingDate(date(2026, 7, 15)),
+        end=TradingDate(date(2026, 7, 15)),
+        request_sha256="a" * 64,
+    )
+
+    with pytest.raises(EodExecutionError, match="candidate"):
+        EodWorkerHandler._merge_snapshot(
+            DatasetKind.EXCHANGE_CALENDAR,
+            base=base,
+            candidate=candidate,
+            chunks=(chunk,),
+        )
 
 
 def test_retry_reuses_strictly_verified_post_publish_result(tmp_path: Path) -> None:
@@ -846,6 +1149,7 @@ def test_deep_success_verifier_rejects_resigned_repository_mismatch(
         "job_id": job_id,
         "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
         "result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+        "authority_state": "PROVISIONAL_UNTIL_JOB_SUCCEEDED",
     }
     manifest_sha = hashlib.sha256(canonical_bytes(unsigned)).hexdigest()
     (directory / "manifest.json").write_bytes(
@@ -866,6 +1170,106 @@ def test_deep_success_verifier_rejects_resigned_repository_mismatch(
     )
 
     with pytest.raises(EodEvidenceConflictError, match="credentials"):
+        verify_eod_success_evidence_deep(
+            directory,
+            artifacts_root=tmp_path / "artifacts" / "eod",
+            data_root=tmp_path,
+            uow_factory=DataSqliteUnitOfWorkFactory(
+                create_data_engine(tmp_path / "metadata.db", busy_timeout_ms=250)
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "attack",
+    ["request_date", "scope", "base", "chunk", "batch", "schema_version"],
+)
+def test_deep_success_verifier_rejects_resigned_frozen_command_attack(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    gateway = CalendarGateway()
+    jobs, command, worker = _runtime(tmp_path, gateway)
+    job_id = _enqueue(command, key="deep-request-binding")
+    worker.run(job_id)
+    directory = tmp_path / jobs.get_job(job_id).artifacts[0]
+    request = json.loads((directory / "request.json").read_bytes())
+    result = json.loads((directory / "result.json").read_bytes())
+    if attack == "request_date":
+        request["request"]["start_date"] = "2026-07-14"
+        request["request"]["end_date"] = "2026-07-14"
+    elif attack == "scope":
+        request["config"]["datasets"]["exchange_calendar"]["scope"] = ["SZ"]
+    elif attack == "base":
+        dataset_result = result["datasets"][0]
+        version_id = dataset_result["version_id"]
+        request["request"]["base_versions"] = {"exchange_calendar": version_id}
+        base = {
+            "version_id": version_id,
+            "dataset": "exchange_calendar",
+            "schema_version": "exchange_calendar.v1",
+            "content_sha256": dataset_result["content_sha256"],
+            "manifest_sha256": dataset_result["manifest_sha256"],
+            "coverage": [
+                {"scope": item, "start": "2026-07-15", "end": "2026-07-15"}
+                for item in ("BJ", "SH", "SZ")
+            ],
+        }
+        request["config"]["datasets"]["exchange_calendar"]["base_version"] = base
+        request["config"]["datasets"]["exchange_calendar"]["known_coverage"] = base["coverage"]
+    elif attack == "chunk":
+        request["config"]["max_days_per_chunk"] = 1
+    elif attack == "batch":
+        result["datasets"][0]["batch_id"] = "data_batch:99999999-9999-4999-8999-999999999999"
+    else:
+        request["config"]["schema_versions"]["exchange_calendar"] = "forged.v1"
+        request["version_manifest"]["schema_versions_sha256"] = hashlib.sha256(
+            json.dumps(
+                request["config"]["schema_versions"],
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+
+    def canonical_bytes(value: object) -> bytes:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+
+    request["request_sha256"] = hashlib.sha256(canonical_bytes(request["request"])).hexdigest()
+    request["config_sha256"] = hashlib.sha256(canonical_bytes(request["config"])).hexdigest()
+    request_bytes = canonical_bytes(request)
+    (directory / "request.json").write_bytes(request_bytes)
+    result_bytes = canonical_bytes(result)
+    (directory / "result.json").write_bytes(result_bytes)
+    unsigned = {
+        "schema_version": "eod-evidence-manifest.v1",
+        "job_id": job_id,
+        "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
+        "result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+        "authority_state": "PROVISIONAL_UNTIL_JOB_SUCCEEDED",
+    }
+    manifest_sha = hashlib.sha256(canonical_bytes(unsigned)).hexdigest()
+    (directory / "manifest.json").write_bytes(
+        canonical_bytes({**unsigned, "manifest_sha256": manifest_sha})
+    )
+    (directory / "COMPLETE").write_bytes(
+        canonical_bytes(
+            {
+                "schema_version": "eod-evidence-complete.v1",
+                "job_id": job_id,
+                "manifest_sha256": manifest_sha,
+            }
+        )
+    )
+
+    with pytest.raises(EodEvidenceConflictError):
         verify_eod_success_evidence_deep(
             directory,
             artifacts_root=tmp_path / "artifacts" / "eod",

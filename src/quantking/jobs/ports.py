@@ -45,7 +45,13 @@ class JobRepository(Protocol):
 
     def list_audits(self, *, action: str | None, limit: int) -> list[AuditRecord]: ...
 
-    def recover_running(self, *, at: UtcTimestamp, reason: str) -> int: ...
+    def recover_stale_running(
+        self,
+        *,
+        stale_before: UtcTimestamp,
+        at: UtcTimestamp,
+        reason: str,
+    ) -> int: ...
 
     def heartbeat(self, job_id: str, *, at: UtcTimestamp, minimum_interval_ms: int) -> bool: ...
 

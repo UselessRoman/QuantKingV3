@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from quantking.cli.eod import run_cli
+from quantking.data.eod.contracts import EodBaseVersion
 from quantking.data.eod.service import EodCommandService, EodExecutionConfig
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
@@ -62,6 +63,59 @@ def test_cli_enqueue_outputs_stable_created_and_reused_json(tmp_path: Path) -> N
     assert replay_payload["created"] is False
     assert replay_payload["reused"] is True
     assert worker.calls == []
+
+
+def test_cli_freezes_controlled_exact_base_mapping(tmp_path: Path) -> None:
+    database = tmp_path / "cli-base.db"
+    initialize_database(database)
+    jobs = JobService(SqliteUnitOfWorkFactory(create_sqlite_engine(database, busy_timeout_ms=250)))
+    version_id = "data_version:11111111-1111-4111-8111-111111111111"
+    base = EodBaseVersion(
+        version_id=version_id,
+        dataset="exchange_calendar",
+        schema_version="exchange_calendar.v1",
+        content_sha256="a" * 64,
+        manifest_sha256="b" * 64,
+        coverage=tuple((exchange, "2026-07-15", "2026-07-15") for exchange in ("BJ", "SH", "SZ")),
+    )
+
+    class Resolver:
+        def resolve(self, *, dataset: str, version_id: str, scope: tuple[str, ...]):
+            assert dataset == base.dataset
+            assert version_id == base.version_id
+            assert scope == ("BJ", "SH", "SZ")
+            return base
+
+    command = EodCommandService(
+        jobs,
+        config=EodExecutionConfig.production(code_version="test-code"),
+        base_resolver=Resolver(),
+    )
+    output = io.StringIO()
+    code = run_cli(
+        [
+            "eod-enqueue",
+            "--trade-date",
+            "2026-07-15",
+            "--datasets",
+            "exchange_calendar",
+            "--base-version",
+            f"exchange_calendar={version_id}",
+            "--idempotency-key",
+            "cli-base",
+            "--publish-intent",
+            "PUBLISH_AFTER_QUALITY",
+        ],
+        eod_commands=command,
+        worker=NoWorker(),
+        jobs=jobs,
+        stdout=output,
+    )
+
+    job = jobs.get_job(json.loads(output.getvalue())["job_id"])
+    frozen = json.loads(job.config_manifest["config_json"])
+    assert code == 0
+    assert frozen["datasets"]["exchange_calendar"]["base_version"]["version_id"] == version_id
 
 
 def test_cli_invalid_or_forbidden_inputs_return_stable_nonzero_error(tmp_path: Path) -> None:

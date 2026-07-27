@@ -62,6 +62,7 @@ class EodRunRequest:
     end_date: date
     datasets: tuple[str, ...]
     publish_intent: EodPublishIntent
+    base_versions: Mapping[str, str]
 
     def __post_init__(self) -> None:
         if (
@@ -91,6 +92,31 @@ class EodRunRequest:
         )
         if not isinstance(self.publish_intent, EodPublishIntent):
             raise TypeError("publish_intent must be an EodPublishIntent")
+        if not isinstance(self.base_versions, Mapping):
+            raise TypeError("base_versions must be a mapping")
+        normalized_bases: dict[str, str] = {}
+        for dataset, version_id in self.base_versions.items():
+            if not isinstance(dataset, str) or not isinstance(version_id, str):
+                raise TypeError("base_versions must map strings to strings")
+            if dataset not in _DATASET_RANK:
+                raise ValueError("base_versions contains an unknown dataset")
+            _entity_id(version_id, field="base version_id", namespace="data_version")
+            if version_id.casefold() == "latest":
+                raise ValueError("base version_id must be explicit")
+            normalized_bases[dataset] = version_id
+        if normalized_bases and set(normalized_bases) != set(self.datasets):
+            raise ValueError("base_versions must be empty or exactly match datasets")
+        object.__setattr__(
+            self,
+            "base_versions",
+            MappingProxyType(
+                {
+                    dataset: normalized_bases[dataset]
+                    for dataset in self.datasets
+                    if dataset in normalized_bases
+                }
+            ),
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -98,6 +124,7 @@ class EodRunRequest:
             "start_date": self.start_date.isoformat(),
             "end_date": self.end_date.isoformat(),
             "datasets": list(self.datasets),
+            "base_versions": dict(self.base_versions),
             "publish_intent": self.publish_intent.value,
             "source": "XTQUANT",
         }
@@ -111,6 +138,7 @@ class EodRunRequest:
             "start_date",
             "end_date",
             "datasets",
+            "base_versions",
             "publish_intent",
             "source",
         }
@@ -121,10 +149,15 @@ class EodRunRequest:
         if value.get("source") != "XTQUANT":
             raise ValueError("EOD source must be XTQUANT")
         raw_datasets = value.get("datasets")
+        raw_bases = value.get("base_versions")
         if not isinstance(raw_datasets, list):
             raise TypeError("datasets must be a JSON array")
         if not all(isinstance(item, str) for item in raw_datasets):
             raise TypeError("datasets must contain strings")
+        if not isinstance(raw_bases, dict) or not all(
+            isinstance(key, str) and isinstance(item, str) for key, item in raw_bases.items()
+        ):
+            raise TypeError("base_versions must be a JSON object of strings")
         raw_start = value.get("start_date")
         raw_end = value.get("end_date")
         raw_intent = value.get("publish_intent")
@@ -143,6 +176,7 @@ class EodRunRequest:
             end_date=end,
             datasets=tuple(raw_datasets),
             publish_intent=intent,
+            base_versions=raw_bases,
         )
         if request.to_dict() != dict(value):
             raise ValueError("EOD request is not in canonical form")
@@ -183,6 +217,21 @@ class EodReferenceVersion:
             "version_id": self.version_id,
             "content_sha256": self.content_sha256,
         }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> EodReferenceVersion:
+        if set(value) != {"dataset", "version_id", "content_sha256"}:
+            raise ValueError("reference fields are invalid")
+        if not all(isinstance(value[field], str) for field in value):
+            raise TypeError("reference values must be strings")
+        result = cls(
+            dataset=value["dataset"],  # type: ignore[arg-type]
+            version_id=value["version_id"],  # type: ignore[arg-type]
+            content_sha256=value["content_sha256"],  # type: ignore[arg-type]
+        )
+        if result.to_dict() != dict(value):
+            raise ValueError("reference is not canonical")
+        return result
 
 
 def _entity_id(value: object, *, field: str, namespace: str) -> str:
@@ -523,6 +572,45 @@ class EodDatasetConfig:
             "base_version": (None if self.base_version is None else self.base_version.to_dict()),
             "references": {key: reference.to_dict() for key, reference in self.references.items()},
         }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> EodDatasetConfig:
+        if set(value) != {"scope", "known_coverage", "base_version", "references"}:
+            raise ValueError("dataset config fields are invalid")
+        scope = value["scope"]
+        coverage = value["known_coverage"]
+        references = value["references"]
+        base = value["base_version"]
+        if not isinstance(scope, list) or not all(isinstance(item, str) for item in scope):
+            raise TypeError("dataset scope must be an array of strings")
+        if not isinstance(coverage, list):
+            raise TypeError("known_coverage must be an array")
+        coverage_values: list[tuple[str, str, str]] = []
+        for item in coverage:
+            if not isinstance(item, Mapping) or set(item) != {"scope", "start", "end"}:
+                raise ValueError("known_coverage fields are invalid")
+            parts = (item["scope"], item["start"], item["end"])
+            if not all(isinstance(part, str) for part in parts):
+                raise TypeError("known_coverage values must be strings")
+            coverage_values.append((str(parts[0]), str(parts[1]), str(parts[2])))
+        if base is not None and not isinstance(base, Mapping):
+            raise TypeError("base_version must be an object or null")
+        if not isinstance(references, Mapping):
+            raise TypeError("references must be an object")
+        parsed_references: dict[str, EodReferenceVersion] = {}
+        for key, item in references.items():
+            if not isinstance(key, str) or not isinstance(item, Mapping):
+                raise TypeError("reference entries are invalid")
+            parsed_references[key] = EodReferenceVersion.from_dict(item)
+        result = cls(
+            scope=tuple(scope),
+            known_coverage=tuple(coverage_values),
+            base_version=None if base is None else EodBaseVersion.from_dict(base),
+            references=parsed_references,
+        )
+        if result.to_dict() != dict(value):
+            raise ValueError("dataset config is not canonical")
+        return result
 
 
 def load_canonical_json(value: str) -> Mapping[str, object]:

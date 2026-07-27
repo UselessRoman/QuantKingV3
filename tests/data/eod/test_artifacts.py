@@ -23,10 +23,29 @@ def _request() -> dict[str, object]:
         "start_date": "2026-07-15",
         "end_date": "2026-07-15",
         "datasets": ["exchange_calendar"],
+        "base_versions": {},
         "publish_intent": "PUBLISH_AFTER_QUALITY",
         "source": "XTQUANT",
     }
-    config = {"schema_version": "eod-execution-config.v1"}
+    schema_versions = {"exchange_calendar": "exchange_calendar.v1"}
+    config = {
+        "schema_version": "eod-execution-config.v1",
+        "code_version": "test-code",
+        "adapter_version": "test-adapter",
+        "rule_version": "test-rules",
+        "lookback_days": 0,
+        "max_days_per_chunk": 31,
+        "max_items_per_chunk": 500,
+        "datasets": {
+            "exchange_calendar": {
+                "scope": ["BJ", "SH", "SZ"],
+                "known_coverage": [],
+                "base_version": None,
+                "references": {},
+            }
+        },
+        "schema_versions": schema_versions,
+    }
     return {
         "schema_version": "eod-request-evidence.v2",
         "request": request,
@@ -37,7 +56,7 @@ def _request() -> dict[str, object]:
             "adapter_version": "test-adapter",
             "code_version": "test-code",
             "rule_version": "test-rules",
-            "schema_versions_sha256": "b" * 64,
+            "schema_versions_sha256": hashlib.sha256(_canonical_bytes(schema_versions)).hexdigest(),
         },
     }
 
@@ -167,6 +186,7 @@ def test_resigned_failed_result_is_not_valid_success_evidence(tmp_path: Path) ->
         "job_id": JOB_ID,
         "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
         "result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+        "authority_state": "PROVISIONAL_UNTIL_JOB_SUCCEEDED",
     }
     manifest_sha = hashlib.sha256(_canonical_bytes(unsigned)).hexdigest()
     (directory / "manifest.json").write_bytes(

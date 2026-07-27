@@ -33,22 +33,23 @@ from quantking.data.eod.artifacts import (
     verify_eod_success_evidence_deep,
 )
 from quantking.data.eod.contracts import (
-    EOD_CONFIG_SCHEMA,
     EOD_JOB_TYPE,
-    EOD_REQUEST_MANIFEST_SCHEMA,
-    EodBaseVersion,
-    EodDatasetConfig,
     EodDatasetResult,
-    EodPublishIntent,
-    EodReferenceVersion,
-    EodRunRequest,
     EodRunResult,
-    canonical_json,
-    load_canonical_json,
-    sha256_text,
+)
+from quantking.data.eod.frozen import (
+    FrozenEodCommand as _FrozenCommand,
+)
+from quantking.data.eod.frozen import (
+    FrozenEodCommandError,
+    parse_frozen_eod_command,
+)
+from quantking.data.eod.frozen import (
+    FrozenEodDataset as _DatasetPlan,
 )
 from quantking.data.incremental import (
     CoverageWindow,
+    FetchChunk,
     IncrementalPlanRequest,
     build_incremental_plan,
 )
@@ -95,209 +96,23 @@ class _PublishedDatasetFailure(EodExecutionError):
 
 
 @dataclass(frozen=True, slots=True)
-class _DatasetPlan:
-    dataset: DatasetKind
-    schema_version: str
-    scope: tuple[str, ...]
-    known_coverage: tuple[CoverageWindow, ...]
-    base_version: EodBaseVersion | None
-    references: Mapping[str, EodReferenceVersion]
-
-
-@dataclass(frozen=True, slots=True)
-class _FrozenCommand:
-    request: EodRunRequest
-    request_sha256: str
-    config_sha256: str
-    code_version: str
-    adapter_version: str
-    rule_version: str
-    lookback_days: int
-    max_days_per_chunk: int
-    max_items_per_chunk: int
-    datasets: tuple[_DatasetPlan, ...]
-    evidence_request: Mapping[str, object]
-
-
-@dataclass(frozen=True, slots=True)
 class _VerifiedBase:
     version: DatasetVersion
     table: pa.Table
     known_coverage: tuple[CoverageWindow, ...]
 
 
-def _required_int(value: object, *, field: str, minimum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ValueError(f"{field} is invalid")
-    return value
-
-
 def _reconstruct(job: JobRun) -> _FrozenCommand:
-    if job.job_type != EOD_JOB_TYPE:
-        raise EodExecutionError("REQUEST_MANIFEST_INVALID", "job type is not EOD")
-    if (
-        set(job.input_manifest)
-        != {
-            "schema_version",
-            "request_json",
-            "request_sha256",
-        }
-        or job.input_manifest.get("schema_version") != EOD_REQUEST_MANIFEST_SCHEMA
-    ):
-        raise EodExecutionError("REQUEST_MANIFEST_INVALID", "request manifest fields are invalid")
-    request_json = job.input_manifest["request_json"]
-    request_sha = job.input_manifest["request_sha256"]
-    if sha256_text(request_json) != request_sha:
-        raise EodExecutionError("REQUEST_MANIFEST_INVALID", "request SHA does not match")
     try:
-        request = EodRunRequest.from_dict(load_canonical_json(request_json))
-    except (TypeError, ValueError) as error:
-        raise EodExecutionError(
-            "REQUEST_MANIFEST_INVALID", "request reconstruction failed"
-        ) from error
-    if request.publish_intent is not EodPublishIntent.PUBLISH_AFTER_QUALITY:
-        raise EodExecutionError("REQUEST_MANIFEST_INVALID", "publish intent is invalid")
-    if (
-        set(job.config_manifest)
-        != {
-            "schema_version",
-            "config_json",
-            "config_sha256",
-        }
-        or job.config_manifest.get("schema_version") != EOD_CONFIG_SCHEMA
-    ):
-        raise EodExecutionError("CONFIG_MANIFEST_INVALID", "config manifest fields are invalid")
-    config_json = job.config_manifest["config_json"]
-    config_sha = job.config_manifest["config_sha256"]
-    if sha256_text(config_json) != config_sha:
-        raise EodExecutionError("CONFIG_MANIFEST_INVALID", "config SHA does not match")
-    try:
-        config = load_canonical_json(config_json)
-        expected_config_keys = {
-            "schema_version",
-            "code_version",
-            "adapter_version",
-            "rule_version",
-            "lookback_days",
-            "max_days_per_chunk",
-            "max_items_per_chunk",
-            "datasets",
-            "schema_versions",
-        }
-        if set(config) != expected_config_keys or config["schema_version"] != EOD_CONFIG_SCHEMA:
-            raise ValueError("config fields are invalid")
-        raw_datasets = config["datasets"]
-        raw_schemas = config["schema_versions"]
-        if not isinstance(raw_datasets, dict) or not isinstance(raw_schemas, dict):
-            raise TypeError("dataset config is invalid")
-        if set(raw_datasets) != set(request.datasets) or set(raw_schemas) != set(request.datasets):
-            raise ValueError("selected dataset config does not match request")
-        plans: list[_DatasetPlan] = []
-        for name in request.datasets:
-            raw = raw_datasets[name]
-            if not isinstance(raw, dict) or set(raw) != {
-                "scope",
-                "known_coverage",
-                "base_version",
-                "references",
-            }:
-                raise ValueError("dataset plan fields are invalid")
-            raw_scope = raw["scope"]
-            raw_coverage = raw["known_coverage"]
-            raw_references = raw["references"]
-            raw_base = raw["base_version"]
-            if (
-                not isinstance(raw_scope, list)
-                or not isinstance(raw_coverage, list)
-                or not isinstance(raw_references, dict)
-            ):
-                raise TypeError("dataset plan values are invalid")
-            coverage: list[CoverageWindow] = []
-            coverage_values: list[tuple[str, str, str]] = []
-            for item in raw_coverage:
-                if not isinstance(item, dict) or set(item) != {"scope", "start", "end"}:
-                    raise ValueError("coverage fields are invalid")
-                if any(not isinstance(item[key], str) for key in ("scope", "start", "end")):
-                    raise TypeError("coverage values are invalid")
-                coverage_values.append((item["scope"], item["start"], item["end"]))
-                coverage.append(
-                    CoverageWindow(
-                        scope=item["scope"],
-                        start=TradingDate.from_iso(item["start"]),
-                        end=TradingDate.from_iso(item["end"]),
-                    )
-                )
-            references: dict[str, EodReferenceVersion] = {}
-            for key, value in raw_references.items():
-                if not isinstance(key, str) or not isinstance(value, dict):
-                    raise TypeError("reference config is invalid")
-                references[key] = EodReferenceVersion(
-                    dataset=str(value.get("dataset")),
-                    version_id=str(value.get("version_id")),
-                    content_sha256=str(value.get("content_sha256")),
-                )
-            base = None
-            if raw_base is not None:
-                if not isinstance(raw_base, dict):
-                    raise TypeError("base_version config is invalid")
-                base = EodBaseVersion.from_dict(raw_base)
-            dataset_config = EodDatasetConfig(
-                scope=tuple(raw_scope),
-                known_coverage=tuple(coverage_values),
-                base_version=base,
-                references=references,
-            )
-            plans.append(
-                _DatasetPlan(
-                    dataset=DatasetKind(name),
-                    schema_version=str(raw_schemas[name]),
-                    scope=dataset_config.scope,
-                    known_coverage=tuple(coverage),
-                    base_version=base,
-                    references=references,
-                )
-            )
-        versions = {
-            "adapter_version": str(config["adapter_version"]),
-            "code_version": str(config["code_version"]),
-            "rule_version": str(config["rule_version"]),
-            "schema_versions_sha256": sha256_text(canonical_json(raw_schemas)),
-        }
-        if dict(job.version_manifest) != versions:
-            raise ValueError("version manifest does not match config")
-    except (KeyError, TypeError, ValueError) as error:
-        raise EodExecutionError(
-            "CONFIG_MANIFEST_INVALID", "config reconstruction failed"
-        ) from error
-    evidence_request = {
-        "schema_version": "eod-request-evidence.v2",
-        "request": request.to_dict(),
-        "request_sha256": request_sha,
-        "config": dict(config),
-        "config_sha256": config_sha,
-        "version_manifest": dict(job.version_manifest),
-    }
-    return _FrozenCommand(
-        request=request,
-        request_sha256=request_sha,
-        config_sha256=config_sha,
-        code_version=str(config["code_version"]),
-        adapter_version=str(config["adapter_version"]),
-        rule_version=str(config["rule_version"]),
-        lookback_days=_required_int(config["lookback_days"], field="lookback_days", minimum=0),
-        max_days_per_chunk=_required_int(
-            config["max_days_per_chunk"],
-            field="max_days_per_chunk",
-            minimum=1,
-        ),
-        max_items_per_chunk=_required_int(
-            config["max_items_per_chunk"],
-            field="max_items_per_chunk",
-            minimum=1,
-        ),
-        datasets=tuple(plans),
-        evidence_request=evidence_request,
-    )
+        return parse_frozen_eod_command(
+            job_type=job.job_type,
+            input_manifest=job.input_manifest,
+            config_manifest=job.config_manifest,
+            version_manifest=job.version_manifest,
+        )
+    except FrozenEodCommandError as error:
+        code = "REQUEST_MANIFEST_INVALID" if "request" in str(error) else "CONFIG_MANIFEST_INVALID"
+        raise EodExecutionError(code, "request and config reconstruction failed") from error
 
 
 class EodWorkerHandler:
@@ -601,6 +416,7 @@ class EodWorkerHandler:
                 plan.dataset,
                 base=verified_base.table,
                 candidate=candidate,
+                chunks=fetch_plan.chunks,
             )
         version = DatasetVersion.building(
             version_id=new_entity_id("data_version"),
@@ -870,11 +686,59 @@ class EodWorkerHandler:
         *,
         base: pa.Table,
         candidate: pa.Table,
+        chunks: tuple[FetchChunk, ...],
     ) -> pa.Table:
         descriptor = canonical_schema(dataset.value)
+        if not chunks or any(chunk.dataset is not dataset for chunk in chunks):
+            raise EodExecutionError(
+                "MERGED_SNAPSHOT_INVALID",
+                "actual fetch chunk inventory is invalid",
+            )
+        base = ensure_sorted(dataset.value, base)
+        candidate = ensure_sorted(dataset.value, candidate)
+        validation = validate_table(dataset.value, candidate)
+        if not validation.ok:
+            raise EodExecutionError(
+                "MERGED_SNAPSHOT_INVALID",
+                "candidate violates the Canonical contract",
+            )
+        date_field = "effective_from" if dataset is DatasetKind.SECURITY_MASTER else "trade_date"
+        scope_field = "exchange" if dataset is DatasetKind.EXCHANGE_CALENDAR else "code"
+        candidate_rows = candidate.to_pylist()
+        for chunk in chunks:
+            observed = {
+                row[scope_field]
+                for row in candidate_rows
+                if row[scope_field] in chunk.scope
+                and chunk.start.value <= row[date_field] <= chunk.end.value
+            }
+            if observed != set(chunk.scope):
+                raise EodExecutionError(
+                    "MERGED_SNAPSHOT_INVALID",
+                    "candidate does not cover every fetched scope",
+                )
+        for row in candidate_rows:
+            if not any(
+                row[scope_field] in chunk.scope
+                and chunk.start.value <= row[date_field] <= chunk.end.value
+                for chunk in chunks
+            ):
+                raise EodExecutionError(
+                    "MERGED_SNAPSHOT_INVALID",
+                    "candidate contains a record outside the fetched slices",
+                )
         key_fields = descriptor_for(dataset.value).primary_key
         rows: dict[tuple[object, ...], dict[str, object]] = {}
-        for row in (*base.to_pylist(), *candidate.to_pylist()):
+        for row in base.to_pylist():
+            if any(
+                row[scope_field] in chunk.scope
+                and chunk.start.value <= row[date_field] <= chunk.end.value
+                for chunk in chunks
+            ):
+                continue
+            key = tuple(row[field] for field in key_fields)
+            rows[key] = row
+        for row in candidate_rows:
             key = tuple(row[field] for field in key_fields)
             rows[key] = row
         merged = pa.Table.from_pylist(list(rows.values()), schema=descriptor)
