@@ -1,6 +1,7 @@
 # Stage 1 数据源矩阵
 
-状态：S1-04-R6 修复已提交、等待主验收。本文件固化 Stage 1 数据源的生产角色与当前评估
+状态：S1-04 已于 2026-07-22 在提交 `2f99491e9dc410acf85ca81c131a77cae08d0cc3`
+完成主验收，证据见 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。本文件固化 Stage 1 数据源的生产角色与当前评估
 状态。权威来源是 `src/quantking/data/assessment/matrix.py` 的 `default_source_matrix()`；
 文档不得替代源码与契约测试。
 

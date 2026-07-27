@@ -1,6 +1,7 @@
 # Stage 1 质量与跨源合同
 
-状态：S1-04-R6 修复已提交、等待主验收。本文件固化 Stage 1 单源质量规则、跨源差异比较和
+状态：S1-04 已于 2026-07-22 在提交 `2f99491e9dc410acf85ca81c131a77cae08d0cc3`
+完成主验收，证据见 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。本文件固化 Stage 1 单源质量规则、跨源差异比较和
 显式 SourceOverride 的可执行合同。权威来源是：
 
 - `src/quantking/data/quality/`（质量规则与执行器）

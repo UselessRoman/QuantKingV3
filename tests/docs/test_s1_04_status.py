@@ -1,5 +1,5 @@
 # ruff: noqa: RUF001
-"""S1-04 status must remain offline-implemented and pending main acceptance."""
+"""S1-04 main-acceptance status and later-task boundaries must stay accurate."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def test_s1_03_acceptance_doc_records_offline_only_main_acceptance() -> None:
     assert "账号" in text or "凭据" in text or "密码" in text
 
 
-def test_s1_04_remains_pending_main_acceptance() -> None:
+def test_s1_04_is_main_accepted_with_evidence() -> None:
     for relative in (
         "docs/stage1/README.md",
         "docs/stage1/TASKS.md",
@@ -33,13 +33,13 @@ def test_s1_04_remains_pending_main_acceptance() -> None:
         "docs/stage1/DATA_CONTRACTS.md",
     ):
         text = _read(relative)
-        # S1-04-R6 修复已提交, 等待主验收 (不得写成已主验收)
-        assert (
-            "S1-04-R6 修复已提交，等待主验收" in text or "S1-04-R6 修复已提交、等待主验收" in text
-        )
-        assert "S1-04 已主验收" not in text
-        assert "S1-04 已完成" not in text
+        assert "S1-04" in text
+        assert "完成主验收" in text
         assert "Stage 1 已完成" not in text
+    evidence = _read("docs/stage1/S1-04_ACCEPTANCE.md")
+    assert "2f99491e9dc410acf85ca81c131a77cae08d0cc3" in evidence
+    assert "788 passed" in evidence
+    assert "20260722_0009" in evidence
 
 
 def test_quality_and_source_matrix_documents_exist() -> None:
@@ -59,10 +59,11 @@ def test_quality_and_source_matrix_documents_exist() -> None:
     assert "自动接管" not in matrix
 
 
-def test_later_tasks_and_real_sources_remain_unauthorized() -> None:
+def test_s1_05_is_authorized_but_external_and_later_tasks_remain_unauthorized() -> None:
     tasks = _read("docs/stage1/TASKS.md")
     assert "S1-05" in tasks
-    assert "未开始" in tasks or "未获授权" in tasks
+    assert "已获离线实施授权" in tasks
+    assert "S1-06～S1-08 未开始、未获授权" in tasks
     contracts = _read("docs/stage1/DATA_CONTRACTS.md")
     # 真实 XTQuant 样本验证仍须逐项授权
     assert "真实 XTQuant" in contracts or "逐项授权" in contracts
