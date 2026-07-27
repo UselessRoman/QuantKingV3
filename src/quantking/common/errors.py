@@ -20,6 +20,7 @@ class ErrorCode(StrEnum):
     DATASET_VERSION_NOT_FOUND = "dataset_version_not_found"
     OVERRIDE_NOT_APPLICABLE = "override_not_applicable"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+    JOB_CONFLICT = "job_conflict"
     JOB_NOT_FOUND = "job_not_found"
     PERSISTENCE_BUSY = "persistence_busy"
     UNKNOWN_JOB_TYPE = "unknown_job_type"
@@ -128,6 +129,13 @@ class IdempotencyConflictError(QuantKingError):
 
     def __init__(self, message: str, *, context: Mapping[str, str] | None = None) -> None:
         super().__init__(ErrorCode.IDEMPOTENCY_CONFLICT, message, context=context)
+
+
+class JobConflictError(QuantKingError):
+    """A job command conflicts with optimistic or non-cancellable state."""
+
+    def __init__(self, message: str, *, context: Mapping[str, str] | None = None) -> None:
+        super().__init__(ErrorCode.JOB_CONFLICT, message, context=context)
 
 
 class JobNotFoundError(QuantKingError):

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from quantking.common.errors import UpstreamJobNotReadyError
+from quantking.common.errors import InvalidJobTransitionError, UpstreamJobNotReadyError
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     create_sqlite_engine,
@@ -126,3 +128,53 @@ def test_handler_exception_persists_structured_failure_and_is_re_raised(tmp_path
             "SELECT failure_json FROM job_runs WHERE job_id = ?", (job_id,)
         ).fetchone()[0]
     assert secret not in stored
+
+
+def test_handler_return_value_is_rejected_and_never_leaves_running(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    job_id = _create(service, "bad-return")
+    registry = WorkerRegistry()
+    registry.register("synthetic", lambda context: {"not": "serializable result"})
+
+    with pytest.raises(TypeError, match="return None"):
+        Worker(service, registry, worker_id="worker-1").run(job_id)
+
+    assert service.get_job(job_id).status is JobStatus.FAILED
+
+
+def test_two_workers_competing_for_one_job_execute_handler_once(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    job_id = _create(service, "two-workers")
+    registry = WorkerRegistry()
+    barrier = threading.Barrier(2)
+    handler_started = threading.Event()
+    release_handler = threading.Event()
+    calls = 0
+    lock = threading.Lock()
+
+    def handler(context: WorkerContext) -> None:
+        del context
+        nonlocal calls
+        with lock:
+            calls += 1
+        handler_started.set()
+        assert release_handler.wait(timeout=5)
+
+    def run(worker_id: str) -> BaseException | None:
+        barrier.wait(timeout=5)
+        try:
+            Worker(service, registry, worker_id=worker_id).run(job_id)
+        except BaseException as error:
+            return error
+        return None
+
+    registry.register("synthetic", handler)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(run, f"worker-{index}") for index in range(2)]
+        assert handler_started.wait(timeout=5)
+        release_handler.set()
+        outcomes = [future.result(timeout=5) for future in futures]
+
+    assert calls == 1
+    assert service.get_job(job_id).status is JobStatus.SUCCEEDED
+    assert sum(isinstance(item, InvalidJobTransitionError) for item in outcomes) == 1

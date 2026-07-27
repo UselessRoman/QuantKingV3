@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict
+from datetime import date
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from quantking.common.time import UtcTimestamp
+from quantking.data.eod.contracts import EodPublishIntent
 from quantking.jobs.models import FailureInfo, JobEvent, JobRun
 
 
@@ -63,6 +66,25 @@ class ErrorDetail(PublicSchema):
 
 class ErrorResponse(PublicSchema):
     error: ErrorDetail
+
+
+class EodRunBody(PublicSchema):
+    start_date: date
+    end_date: date
+    datasets: tuple[str, ...]
+    publish_intent: EodPublishIntent
+
+
+class EodEnqueueResponse(PublicSchema):
+    job_id: str
+    status: str
+    row_version: int
+    created: bool
+
+
+class CancelJobBody(PublicSchema):
+    expected_row_version: int | None = Field(default=None, ge=1)
+    reason: str = Field(min_length=1, max_length=256)
 
 
 def _timestamp(value: UtcTimestamp | None) -> str | None:

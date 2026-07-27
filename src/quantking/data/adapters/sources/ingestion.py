@@ -65,6 +65,7 @@ from quantking.data.models import (
     ManifestFileEntry,
     transition_batch,
 )
+from quantking.jobs.worker import JobCancelledAtCheckpoint
 
 _PREFIX_CODE = re.compile(r"(SZ|SH|BJ)(\d{6})\Z")
 _EMPTY_REQUEST_SCHEMA_VERSION = "xtquant-empty-request.v1"
@@ -116,6 +117,7 @@ class XtQuantIngestionService:
         plan: IncrementalFetchPlan,
         *,
         empty_result: EmptyResultInfo | None = None,
+        checkpoint: Callable[[], None] | None = None,
     ) -> IngestionOutcome:
         validate_incremental_plan(plan)
         started_at = self._now()
@@ -131,7 +133,19 @@ class XtQuantIngestionService:
         try:
             if not plan.chunks:
                 return self._run_empty_universe(running, plan, empty_result=empty_result)
-            return self._fetch_and_land(running, plan, empty_result=empty_result)
+            return self._fetch_and_land(
+                running,
+                plan,
+                empty_result=empty_result,
+                checkpoint=checkpoint,
+            )
+        except JobCancelledAtCheckpoint:
+            self._fail_before_payload(
+                running,
+                plan,
+                SourceAdapterError(SourceErrorCode.INTERNAL_SDK),
+            )
+            raise
         except Exception as error:
             return self._fail_before_payload(
                 running,
@@ -145,9 +159,12 @@ class XtQuantIngestionService:
         plan: IncrementalFetchPlan,
         *,
         empty_result: EmptyResultInfo | None,
+        checkpoint: Callable[[], None] | None,
     ) -> IngestionOutcome:
         responses: list[SupplierResponse] = []
         for chunk in plan.chunks:
+            if checkpoint is not None:
+                checkpoint()
             try:
                 raw_response = self._gateway.fetch(chunk)
                 response = self._validate_gateway_response(raw_response, chunk)
@@ -169,6 +186,8 @@ class XtQuantIngestionService:
                     empty_result=empty_result,
                 )
             responses.append(response)
+            if checkpoint is not None:
+                checkpoint()
         return self._land_and_normalize(
             running,
             plan,

@@ -23,6 +23,7 @@ from quantking.common.errors import (
     IdempotencyConflictError,
     InvalidJobTransitionError,
     InvalidPathError,
+    JobConflictError,
     JobNotFoundError,
     PersistenceBusyError,
 )
@@ -348,8 +349,6 @@ class SQLiteJobRepository:
             existing.input_manifest == job.input_manifest
             and existing.config_manifest == job.config_manifest
             and existing.version_manifest == job.version_manifest
-            and existing.requester == job.requester
-            and existing.log_id == job.log_id
             and tuple(sorted(existing.upstream_job_ids)) == tuple(sorted(job.upstream_job_ids))
         )
         if not same_command:
@@ -580,9 +579,31 @@ class SQLiteJobRepository:
         )
         return True
 
-    def request_cancel(self, job_id: str, *, reason: str, at: UtcTimestamp) -> JobRun:
+    def request_cancel(
+        self,
+        job_id: str,
+        *,
+        reason: str,
+        at: UtcTimestamp,
+        expected_row_version: int | None,
+        reject_if_non_cancellable: bool,
+    ) -> JobRun:
         row = self._row(job_id)
         domain = self._domain(row)
+        if expected_row_version is not None and domain.row_version != expected_row_version:
+            raise JobConflictError(
+                "job row_version changed before cancellation",
+                context={"job_id": job_id},
+            )
+        if (
+            reject_if_non_cancellable
+            and domain.status is JobStatus.RUNNING
+            and domain.non_cancellable_phase is not None
+        ):
+            raise JobConflictError(
+                "job is in a non-cancellable critical section",
+                context={"job_id": job_id},
+            )
         if domain.status is JobStatus.PENDING:
             changed = transition_job(
                 domain,
@@ -616,6 +637,33 @@ class SQLiteJobRepository:
             stage=row.stage,
             progress=row.progress,
             summary=reason,
+            at=at,
+        )
+        return self._domain(row)
+
+    def add_artifact(self, job_id: str, *, relative_path: str, at: UtcTimestamp) -> JobRun:
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or "\\" in relative_path
+            or relative_path.startswith("/")
+            or ".." in relative_path.split("/")
+        ):
+            raise ValueError("artifact path must be a safe managed relative path")
+        row = self._row(job_id)
+        domain = self._domain(row)
+        if domain.status is not JobStatus.RUNNING:
+            raise ValueError("artifacts may only be attached to a RUNNING job")
+        if relative_path in domain.artifacts:
+            return domain
+        row.artifacts_json = _json_sequence((*domain.artifacts, relative_path))
+        row.row_version += 1
+        self._event(
+            job_id=job_id,
+            event_type="job_artifact",
+            stage=row.stage,
+            progress=row.progress,
+            summary="managed artifact recorded",
             at=at,
         )
         return self._domain(row)

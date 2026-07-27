@@ -39,6 +39,27 @@ class WorkerContext:
             summary=summary,
         )
 
+    def activity(
+        self,
+        *,
+        stage: str,
+        progress: float,
+        summary: str,
+        audit_action: str,
+    ) -> None:
+        """Persist one low-frequency event and audit fact atomically."""
+        job = self.service.get_job(self.job_id)
+        if job.worker_id is None:
+            raise ValueError("worker activity requires a claimed job")
+        self.service.record_activity(
+            self.job_id,
+            worker_id=job.worker_id,
+            stage=stage,
+            progress=progress,
+            summary=summary,
+            audit_action=audit_action,
+        )
+
     @contextmanager
     def non_cancellable(self, phase: str) -> Iterator[None]:
         """Persist a short non-cancellable phase and always clear it afterward."""
@@ -49,7 +70,7 @@ class WorkerContext:
             self.service.set_non_cancellable_phase(self.job_id, phase=None)
 
 
-JobHandler = Callable[[WorkerContext], None]
+JobHandler = Callable[[WorkerContext], object]
 
 
 class WorkerRegistry:
@@ -97,7 +118,9 @@ class Worker:
         )
         context = WorkerContext(self._service, job_id)
         try:
-            handler(context)
+            result = handler(context)
+            if result is not None:
+                raise TypeError("registered job handlers must return None")
         except JobCancelledAtCheckpoint:
             self._service.transition(
                 job_id,

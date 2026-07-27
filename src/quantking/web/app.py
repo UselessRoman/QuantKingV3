@@ -10,10 +10,16 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from quantking.common.errors import ErrorCode, JobNotFoundError, QuantKingError
+from quantking.common.errors import (
+    ErrorCode,
+    IdempotencyConflictError,
+    JobConflictError,
+    JobNotFoundError,
+    QuantKingError,
+)
 from quantking.common.time import Clock
 from quantking.web.api import InvalidRequestError, create_api_router
-from quantking.web.ports import JobReadPort
+from quantking.web.ports import EodCommandPort, JobCommandPort, JobReadPort
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -64,6 +70,16 @@ def _install_error_handlers(app: FastAPI) -> None:
     async def missing_job(_request: Request, _error_value: JobNotFoundError) -> JSONResponse:
         return _error(404, ErrorCode.JOB_NOT_FOUND.value, "任务不存在。")
 
+    @app.exception_handler(IdempotencyConflictError)
+    async def idempotency_conflict(
+        _request: Request, _error_value: IdempotencyConflictError
+    ) -> JSONResponse:
+        return _error(409, ErrorCode.IDEMPOTENCY_CONFLICT.value, "幂等键与既有请求冲突。")
+
+    @app.exception_handler(JobConflictError)
+    async def job_conflict(_request: Request, _error_value: JobConflictError) -> JSONResponse:
+        return _error(409, ErrorCode.JOB_CONFLICT.value, "任务状态已变化或当前不可取消。")
+
     @app.exception_handler(QuantKingError)
     async def quantking_error(_request: Request, error_value: QuantKingError) -> JSONResponse:
         status = 503 if error_value.code is ErrorCode.PERSISTENCE_BUSY else 400
@@ -79,6 +95,8 @@ def _install_error_handlers(app: FastAPI) -> None:
 def create_app(
     job_port: JobReadPort,
     *,
+    eod_command_port: EodCommandPort | None = None,
+    job_command_port: JobCommandPort | None = None,
     static_root: Path | None = None,
     clock: Clock | None = None,
 ) -> FastAPI:
@@ -86,7 +104,14 @@ def create_app(
     resolved_static = _validate_static_root(static_root)
     app = FastAPI(title="QuantKing 本地控制台", docs_url=None, redoc_url=None)
     _install_error_handlers(app)
-    app.include_router(create_api_router(job_port, clock=clock))
+    app.include_router(
+        create_api_router(
+            job_port,
+            eod_command_port=eod_command_port,
+            job_command_port=job_command_port,
+            clock=clock,
+        )
+    )
 
     @app.api_route(
         "/api/{unmatched:path}",

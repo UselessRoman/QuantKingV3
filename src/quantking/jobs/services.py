@@ -50,6 +50,14 @@ class CreateJob:
             _required_text(value, field=field)
 
 
+@dataclass(frozen=True, slots=True)
+class CreateJobResult:
+    """One idempotent create outcome including whether this call inserted the row."""
+
+    job: JobRun
+    created: bool
+
+
 class JobService:
     """Keep handlers and long calculation outside all repository transactions."""
 
@@ -71,6 +79,9 @@ class JobService:
         return self._transactions.execute(operation, self._retry_policy)
 
     def create_job(self, command: CreateJob) -> JobRun:
+        return self.create_job_result(command).job
+
+    def create_job_result(self, command: CreateJob) -> CreateJobResult:
         created_at = self._now()
         candidate = JobRun.pending(
             job_id=str(new_entity_id("job")),
@@ -84,7 +95,8 @@ class JobService:
             log_id=command.log_id,
             upstream_job_ids=command.upstream_job_ids,
         )
-        return self._execute(lambda repository: repository.create_or_get(candidate)[0])
+        job, created = self._execute(lambda repository: repository.create_or_get(candidate))
+        return CreateJobResult(job=job, created=created)
 
     def get_job(self, job_id: str) -> JobRun:
         return self._execute(lambda repository: repository.get(job_id))
@@ -209,12 +221,43 @@ class JobService:
         job_id: str,
         *,
         reason: str,
+        expected_row_version: int | None = None,
+        reject_if_non_cancellable: bool = False,
         at: UtcTimestamp | None = None,
     ) -> JobRun:
         _required_text(reason, field="reason")
+        if expected_row_version is not None and (
+            isinstance(expected_row_version, bool)
+            or not isinstance(expected_row_version, int)
+            or expected_row_version < 1
+        ):
+            raise ValueError("expected_row_version must be a positive integer")
         occurred_at = at or self._now()
         return self._execute(
-            lambda repository: repository.request_cancel(job_id, reason=reason, at=occurred_at)
+            lambda repository: repository.request_cancel(
+                job_id,
+                reason=reason,
+                at=occurred_at,
+                expected_row_version=expected_row_version,
+                reject_if_non_cancellable=reject_if_non_cancellable,
+            )
+        )
+
+    def add_artifact(
+        self,
+        job_id: str,
+        *,
+        relative_path: str,
+        at: UtcTimestamp | None = None,
+    ) -> JobRun:
+        _required_text(relative_path, field="relative_path")
+        occurred_at = at or self._now()
+        return self._execute(
+            lambda repository: repository.add_artifact(
+                job_id,
+                relative_path=relative_path,
+                at=occurred_at,
+            )
         )
 
     def require_upstreams_succeeded(self, job_id: str) -> None:

@@ -60,7 +60,17 @@ class JobRepository(Protocol):
         minimum_interval_ms: int,
     ) -> bool: ...
 
-    def request_cancel(self, job_id: str, *, reason: str, at: UtcTimestamp) -> JobRun: ...
+    def request_cancel(
+        self,
+        job_id: str,
+        *,
+        reason: str,
+        at: UtcTimestamp,
+        expected_row_version: int | None,
+        reject_if_non_cancellable: bool,
+    ) -> JobRun: ...
+
+    def add_artifact(self, job_id: str, *, relative_path: str, at: UtcTimestamp) -> JobRun: ...
 
     def set_non_cancellable_phase(
         self,

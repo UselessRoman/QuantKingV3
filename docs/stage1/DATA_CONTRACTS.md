@@ -6,7 +6,7 @@
 进行中，但尚未完成；S1-03-R1 修复中/待主验收。S1-04 已于 2026-07-22 在提交
 `2f99491e9dc410acf85ca81c131a77cae08d0cc3` 完成主验收，证据见
 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。真实 XTQuant 样本验证仍须逐项授权，合成数据不能
-标生产可用。S1-05 已获离线实施授权、尚未开始；S1-06～S1-08 未开始、未获授权。
+标生产可用。S1-05 离线实现已提交，等待主验收；S1-06～S1-08 未开始、未获授权。
 
 本文件固化 Stage 1 六类 Canonical 数据集的可执行合同。权威来源是 `src/quantking/data/schemas.py`（框架无关描述符）和 `src/quantking/data/adapters/canonical_schema.py`（PyArrow 映射与验证）。文档不得替代 schema 与契约测试。
 
@@ -252,3 +252,23 @@ Raw/请求构造失败和标准化异常在 `RUNNING` 已持久化后都必须�
 `PARTIAL_SOURCE` 或 `INTERNAL`，S1-03 不产生 `QUALITY`。终态 `batch_id` 不再调用供应商；
 失败或部分响应不得变成成功，相同参数只允许使用新 `batch_id` 重试。S1-03 不调用
 `CanonicalPublishCoordinator`，不创建或推进任何 `PUBLISHED DatasetVersion`。
+
+## S1-05 EOD 请求、执行与证据合同
+
+- 固定任务类型是 `data.eod.v1`；请求只接受明确起止交易日期、六类 allowlist 中非空且
+  无重复的数据集，以及不可省略的 `PUBLISH_AFTER_QUALITY`。来源固定为 `XTQUANT`。
+- 应用服务将规范 request JSON、request SHA、冻结的 adapter/code/rule/schema 版本、
+  scope、known coverage、lookback、chunk 参数和显式 reference version 凭证分别写入
+  `JobRun` manifests。Worker 只能从持久 manifests 重建并复验，不使用进程内请求对象。
+- `job_type + idempotency_key` 相同且三类 manifests 完全相同才复用原 `job_id`；任一请求、
+  配置或版本凭证变化均返回稳定幂等冲突。失败或中断重试必须使用新 job/key，并产生新
+  batch/version ID。
+- 每个数据集依次执行能力预检、现有 XTQuant ingestion、真实 BUILDING version、
+  QualityRunner 和 CanonicalPublishCoordinator。只有 ingestion `SUCCEEDED`、quality
+  `PASSED` 且发布目录的 manifest/COMPLETE/content SHA/元数据全部复验一致才记为完成。
+- 生产能力矩阵仍只有 `exchange_calendar` 可用；其余五类在 Gateway 调用前返回
+  `CAPABILITY_UNAVAILABLE`。Fake Gateway 的六类合成覆盖不改变生产矩阵。
+- 成功证据位于 `artifacts/eod/<job_id>/` 的严格
+  `request.json/result.json/manifest.json/COMPLETE` 文件集；失败证据位于对应
+  `.incomplete` 目录。证据只记录稳定 ID、状态、SHA 和脱敏错误，不记录供应商 payload、
+  token、账号、密码或绝对路径，且终态不可覆盖。
