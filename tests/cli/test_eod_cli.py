@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from quantking.cli.eod import run_cli
@@ -87,3 +89,48 @@ def test_cli_invalid_or_forbidden_inputs_return_stable_nonzero_error(tmp_path: P
                 "message": "CLI arguments are invalid.",
             }
         }
+
+
+def test_module_entrypoint_help_is_available_without_runtime_side_effects() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "quantking.cli.eod", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0
+    assert "usage:" in completed.stdout
+    assert "eod-enqueue" in completed.stdout
+
+
+def test_internal_type_error_is_runtime_failure_not_argument_error(tmp_path: Path) -> None:
+    _command, jobs, worker = _ports(tmp_path)
+
+    class ExplodingCommand:
+        def enqueue(self, request, *, idempotency_key, requester):
+            del request, idempotency_key, requester
+            raise TypeError("internal persistence bug")
+
+    output = io.StringIO()
+    code = run_cli(
+        [
+            "eod-enqueue",
+            "--trade-date",
+            "2026-07-15",
+            "--datasets",
+            "exchange_calendar",
+            "--idempotency-key",
+            "internal-error",
+            "--publish-intent",
+            "PUBLISH_AFTER_QUALITY",
+        ],
+        eod_commands=ExplodingCommand(),
+        worker=worker,
+        jobs=jobs,
+        stdout=output,
+    )
+
+    assert code == 1
+    assert json.loads(output.getvalue())["error"]["code"] == "COMMAND_FAILED"

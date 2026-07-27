@@ -45,6 +45,10 @@ class EodExecutionConfig:
             value = getattr(self, field)
             if not isinstance(value, str) or _SAFE_VERSION.fullmatch(value) is None:
                 raise ValueError(f"{field} must be a safe stable identifier")
+        for field in ("lookback_days", "max_days_per_chunk", "max_items_per_chunk"):
+            value = getattr(self, field)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{field} must be an integer")
         if self.lookback_days < 0:
             raise ValueError("lookback_days must be non-negative")
         if self.max_days_per_chunk <= 0 or self.max_items_per_chunk <= 0:
@@ -54,6 +58,8 @@ class EodExecutionConfig:
             DatasetKind(key)
             if not isinstance(config, EodDatasetConfig):
                 raise TypeError("dataset config must be EodDatasetConfig")
+            if config.base_version is not None and config.base_version.dataset != key:
+                raise ValueError("base_version must belong to its configured dataset")
             normalized[key] = config
         object.__setattr__(self, "datasets", MappingProxyType(dict(sorted(normalized.items()))))
 

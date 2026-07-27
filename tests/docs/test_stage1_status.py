@@ -51,6 +51,22 @@ class TestStage1DocsExist:
         assert "Stage 1 已完成验收" not in text
         assert "已获实施授权" in text
 
+    @pytest.mark.parametrize(
+        "path",
+        (
+            _STAGE1_DIR / "README.md",
+            _STAGE1_DIR / "TASKS.md",
+            _STAGE1_DIR / "ACCEPTANCE.md",
+            _STAGE1_DIR / "DATA_CONTRACTS.md",
+            _REPO_ROOT / "docs" / "ARCHITECTURE.md",
+            _REPO_ROOT / "docs" / "ROADMAP.md",
+        ),
+    )
+    def test_s1_05_r1_status_is_pending_main_acceptance(self, path: Path) -> None:
+        text = _read(path)
+        assert "S1-05-R1 修复已提交，等待主验收" in text
+        assert "S1-05 已主验收" not in text
+
     def test_stage1_tasks_lists_s1_01_through_s1_08(self) -> None:
         text = _read(_STAGE1_DIR / "TASKS.md")
         for code in ("S1-01", "S1-02", "S1-03", "S1-04", "S1-05", "S1-06", "S1-07", "S1-08"):

@@ -189,10 +189,14 @@ S1-02 已于 2026-07-18 在提交 `79f9fa3e682e212cf74e7886a04c6fb52158f302`
 该适配器只产生经验证的 Canonical 候选表，五类未获源码证据支持的供应商能力会安全失败，
 不会发布 DatasetVersion。S1-04 已于 2026-07-22 在提交
 `2f99491e9dc410acf85ca81c131a77cae08d0cc3` 完成主验收；真实备用源验证仍须逐项授权。
-S1-05 离线实现已提交，等待主验收。CLI 和 Web API 共用同一个 EOD Command Service，
+S1-05-R1 修复已提交，等待主验收。CLI 和 Web API 共用同一个 EOD Command Service，
 只创建持久 `data.eod.v1` Job；显式 Worker 按 `job_id` claim 后在事务外串联现有
 ingestion、QualityRunner 和 CanonicalPublishCoordinator，并生成 SHA/COMPLETE 绑定的
 不可覆盖 EOD 证据。没有后台轮询器、Windows 计划任务、自动切源或隐式发布。
+R1 进一步固定显式 base version 凭证，以完整基表加本次供应商响应构建完整快照；全覆盖
+请求采用 `REUSED_UNCHANGED`，新版本采用 `PUBLISHED_NEW`。正式 CLI/Web 入口使用同一
+类型化 runtime，XTQuant SDK 只在显式 Worker 实际 fetch 时延迟加载。深层证据 verifier
+绑定 SQLite、PASSED QualityRun 和 Warehouse，发布 checkpoint 支持发布后故障恢复。
 S1-06～S1-08 尚未实现且未获授权。各模块状态以
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)、[路线图](ROADMAP.md) 和 Stage 1
 任务卡为准。

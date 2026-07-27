@@ -21,6 +21,10 @@ dependencies = [
     "uvicorn>=0.34,<1",
 ]
 
+[project.scripts]
+quantking-data = "quantking.cli.eod:main"
+quantking-web = "quantking.web.main:main"
+
 [dependency-groups]
 dev = [
     "httpx>=0.28,<1",

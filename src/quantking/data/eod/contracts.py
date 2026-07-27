@@ -11,12 +11,14 @@ from datetime import date
 from enum import StrEnum
 from types import MappingProxyType
 
+from quantking.common.ids import parse_entity_id
 from quantking.data.models import DatasetKind
 
 EOD_JOB_TYPE = "data.eod.v1"
 EOD_REQUEST_SCHEMA = "eod-request.v1"
 EOD_REQUEST_MANIFEST_SCHEMA = "eod-request-manifest.v1"
 EOD_CONFIG_SCHEMA = "eod-execution-config.v1"
+EOD_RESULT_SCHEMA = "eod-result.v1"
 
 _DATASET_ORDER = (
     DatasetKind.EXCHANGE_CALENDAR,
@@ -28,6 +30,7 @@ _DATASET_ORDER = (
 )
 _DATASET_RANK = {item.value: index for index, item in enumerate(_DATASET_ORDER)}
 _SAFE_SCOPE_PATTERN = re.compile(r"(?:SZ|SH|BJ|\d{6}\.(?:SZ|SH|BJ))\Z")
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class EodPublishIntent(StrEnum):
@@ -101,6 +104,8 @@ class EodRunRequest:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> EodRunRequest:
+        if not isinstance(value, Mapping):
+            raise TypeError("EOD request must be an object")
         expected = {
             "schema_version",
             "start_date",
@@ -118,10 +123,19 @@ class EodRunRequest:
         raw_datasets = value.get("datasets")
         if not isinstance(raw_datasets, list):
             raise TypeError("datasets must be a JSON array")
+        if not all(isinstance(item, str) for item in raw_datasets):
+            raise TypeError("datasets must contain strings")
+        raw_start = value.get("start_date")
+        raw_end = value.get("end_date")
+        raw_intent = value.get("publish_intent")
+        if not isinstance(raw_start, str) or not isinstance(raw_end, str):
+            raise TypeError("EOD request dates must be ISO strings")
+        if not isinstance(raw_intent, str):
+            raise TypeError("publish_intent must be a string")
         try:
-            start = date.fromisoformat(str(value["start_date"]))
-            end = date.fromisoformat(str(value["end_date"]))
-            intent = EodPublishIntent(str(value["publish_intent"]))
+            start = date.fromisoformat(raw_start)
+            end = date.fromisoformat(raw_end)
+            intent = EodPublishIntent(raw_intent)
         except (KeyError, ValueError) as error:
             raise ValueError("EOD request contains an invalid date or publish intent") from error
         request = cls(
@@ -171,31 +185,156 @@ class EodReferenceVersion:
         }
 
 
+def _entity_id(value: object, *, field: str, namespace: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be a string")
+    parsed = parse_entity_id(value)
+    if parsed.namespace != namespace:
+        raise ValueError(f"{field} uses an invalid namespace")
+    return str(parsed)
+
+
+def _sha256(value: object, *, field: str) -> str:
+    if not isinstance(value, str) or _SHA256_PATTERN.fullmatch(value) is None:
+        raise ValueError(f"{field} must be lowercase SHA-256")
+    return value
+
+
+def _coverage(
+    value: object,
+    *,
+    scope: tuple[str, ...] | None = None,
+) -> tuple[tuple[str, str, str], ...]:
+    if not isinstance(value, tuple):
+        raise TypeError("known_coverage must be a tuple")
+    normalized: list[tuple[str, str, str]] = []
+    for item in value:
+        if not isinstance(item, tuple) or len(item) != 3:
+            raise TypeError("known_coverage entries must be three-item tuples")
+        raw_scope, raw_start, raw_end = item
+        if not all(isinstance(part, str) for part in item):
+            raise TypeError("known_coverage values must be strings")
+        if _SAFE_SCOPE_PATTERN.fullmatch(raw_scope) is None:
+            raise ValueError("known_coverage scope is invalid")
+        if scope is not None and raw_scope not in scope:
+            raise ValueError("known_coverage scope must be configured")
+        try:
+            start = date.fromisoformat(raw_start)
+            end = date.fromisoformat(raw_end)
+        except ValueError as error:
+            raise ValueError("known_coverage dates must be canonical ISO dates") from error
+        if start > end:
+            raise ValueError("known_coverage start must not follow end")
+        if raw_start != start.isoformat() or raw_end != end.isoformat():
+            raise ValueError("known_coverage dates must be canonical ISO dates")
+        normalized.append((raw_scope, raw_start, raw_end))
+    ordered = tuple(sorted(normalized))
+    if tuple(normalized) != ordered or len(set(normalized)) != len(normalized):
+        raise ValueError("known_coverage must be sorted and unique")
+    return ordered
+
+
+@dataclass(frozen=True, slots=True)
+class EodBaseVersion:
+    """Frozen credentials for one explicit full-snapshot incremental base."""
+
+    version_id: str
+    dataset: str
+    schema_version: str
+    content_sha256: str
+    manifest_sha256: str
+    coverage: tuple[tuple[str, str, str], ...]
+
+    def __post_init__(self) -> None:
+        _entity_id(self.version_id, field="version_id", namespace="data_version")
+        if self.dataset not in _DATASET_RANK:
+            raise ValueError("base dataset is unknown")
+        if not isinstance(self.schema_version, str) or not self.schema_version:
+            raise ValueError("base schema_version must be non-empty text")
+        _sha256(self.content_sha256, field="content_sha256")
+        _sha256(self.manifest_sha256, field="manifest_sha256")
+        object.__setattr__(self, "coverage", _coverage(self.coverage))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "version_id": self.version_id,
+            "dataset": self.dataset,
+            "schema_version": self.schema_version,
+            "content_sha256": self.content_sha256,
+            "manifest_sha256": self.manifest_sha256,
+            "coverage": [
+                {"scope": scope, "start": start, "end": end} for scope, start, end in self.coverage
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> EodBaseVersion:
+        expected = {
+            "version_id",
+            "dataset",
+            "schema_version",
+            "content_sha256",
+            "manifest_sha256",
+            "coverage",
+        }
+        if set(value) != expected:
+            raise ValueError("base_version fields are invalid")
+        raw_coverage = value["coverage"]
+        if not isinstance(raw_coverage, list):
+            raise TypeError("base_version coverage must be an array")
+        coverage: list[tuple[str, str, str]] = []
+        for item in raw_coverage:
+            if not isinstance(item, dict) or set(item) != {"scope", "start", "end"}:
+                raise ValueError("base_version coverage fields are invalid")
+            parts = (item["scope"], item["start"], item["end"])
+            if not all(isinstance(part, str) for part in parts):
+                raise TypeError("base_version coverage values must be strings")
+            coverage.append(parts)
+        result = cls(
+            version_id=value["version_id"],  # type: ignore[arg-type]
+            dataset=value["dataset"],  # type: ignore[arg-type]
+            schema_version=value["schema_version"],  # type: ignore[arg-type]
+            content_sha256=value["content_sha256"],  # type: ignore[arg-type]
+            manifest_sha256=value["manifest_sha256"],  # type: ignore[arg-type]
+            coverage=tuple(coverage),
+        )
+        if result.to_dict() != dict(value):
+            raise ValueError("base_version is not canonical")
+        return result
+
+
 @dataclass(frozen=True, slots=True)
 class EodDatasetResult:
     dataset: str
     status: str
-    batch_id: str
+    batch_id: str | None
     version_id: str
     quality_run_id: str
     content_sha256: str
+    manifest_sha256: str
+    parent_version_id: str | None
 
     def __post_init__(self) -> None:
         if self.dataset not in _DATASET_RANK:
             raise ValueError("result dataset is unknown")
-        if self.status != "PUBLISHED":
-            raise ValueError("completed EOD dataset result must be PUBLISHED")
-        for field, prefix in (
-            ("batch_id", "data_batch:"),
-            ("version_id", "data_version:"),
-            ("quality_run_id", "data_quality:"),
-        ):
-            if not getattr(self, field).startswith(prefix):
-                raise ValueError(f"{field} uses an invalid namespace")
-        if _SHA256_PATTERN.fullmatch(self.content_sha256) is None:
-            raise ValueError("content_sha256 must be lowercase SHA-256")
+        if self.status not in {"PUBLISHED_NEW", "REUSED_UNCHANGED"}:
+            raise ValueError("result status is invalid")
+        if self.status == "PUBLISHED_NEW":
+            _entity_id(self.batch_id, field="batch_id", namespace="data_batch")
+        elif self.batch_id is not None:
+            raise ValueError("REUSED_UNCHANGED must not carry a batch_id")
+        _entity_id(self.version_id, field="version_id", namespace="data_version")
+        _entity_id(self.quality_run_id, field="quality_run_id", namespace="data_quality")
+        if self.parent_version_id is not None:
+            _entity_id(
+                self.parent_version_id,
+                field="parent_version_id",
+                namespace="data_version",
+            )
+        _sha256(self.content_sha256, field="content_sha256")
+        _sha256(self.manifest_sha256, field="manifest_sha256")
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, object]:
         return {
             "dataset": self.dataset,
             "status": self.status,
@@ -203,32 +342,132 @@ class EodDatasetResult:
             "version_id": self.version_id,
             "quality_run_id": self.quality_run_id,
             "content_sha256": self.content_sha256,
+            "manifest_sha256": self.manifest_sha256,
+            "parent_version_id": self.parent_version_id,
         }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> EodDatasetResult:
+        expected = {
+            "dataset",
+            "status",
+            "batch_id",
+            "version_id",
+            "quality_run_id",
+            "content_sha256",
+            "manifest_sha256",
+            "parent_version_id",
+        }
+        if set(value) != expected:
+            raise ValueError("EOD dataset result fields are invalid")
+        for field in (
+            "dataset",
+            "status",
+            "version_id",
+            "quality_run_id",
+            "content_sha256",
+            "manifest_sha256",
+        ):
+            if not isinstance(value[field], str):
+                raise TypeError(f"{field} must be a string")
+        if value["batch_id"] is not None and not isinstance(value["batch_id"], str):
+            raise TypeError("batch_id must be a string or null")
+        if value["parent_version_id"] is not None and not isinstance(
+            value["parent_version_id"], str
+        ):
+            raise TypeError("parent_version_id must be a string or null")
+        dataset = value["dataset"]
+        status = value["status"]
+        batch_id = value["batch_id"]
+        version_id = value["version_id"]
+        quality_run_id = value["quality_run_id"]
+        content_sha256 = value["content_sha256"]
+        manifest_sha256 = value["manifest_sha256"]
+        parent_version_id = value["parent_version_id"]
+        assert isinstance(dataset, str)
+        assert isinstance(status, str)
+        assert batch_id is None or isinstance(batch_id, str)
+        assert isinstance(version_id, str)
+        assert isinstance(quality_run_id, str)
+        assert isinstance(content_sha256, str)
+        assert isinstance(manifest_sha256, str)
+        assert parent_version_id is None or isinstance(parent_version_id, str)
+        return cls(
+            dataset=dataset,
+            status=status,
+            batch_id=batch_id,
+            version_id=version_id,
+            quality_run_id=quality_run_id,
+            content_sha256=content_sha256,
+            manifest_sha256=manifest_sha256,
+            parent_version_id=parent_version_id,
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class EodRunResult:
     job_id: str
     datasets: tuple[EodDatasetResult, ...]
+    expected_datasets: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.job_id.startswith("job:"):
-            raise ValueError("job_id uses an invalid namespace")
+        _entity_id(self.job_id, field="job_id", namespace="job")
+        if not isinstance(self.datasets, tuple):
+            raise TypeError("datasets must be a tuple")
+        if not isinstance(self.expected_datasets, tuple):
+            raise TypeError("expected_datasets must be a tuple")
+        if any(item not in _DATASET_RANK for item in self.expected_datasets):
+            raise ValueError("expected_datasets contains an unknown dataset")
         object.__setattr__(self, "datasets", tuple(self.datasets))
         names = tuple(item.dataset for item in self.datasets)
-        if tuple(sorted(names, key=_DATASET_RANK.__getitem__)) != names:
-            raise ValueError("dataset results must use deterministic order")
+        expected = tuple(sorted(self.expected_datasets, key=_DATASET_RANK.__getitem__))
+        if self.expected_datasets != expected or len(set(expected)) != len(expected):
+            raise ValueError("expected_datasets must be sorted and unique")
+        if names != expected:
+            raise ValueError("dataset results must exactly match the requested datasets")
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "eod-result.v1",
+            "schema_version": EOD_RESULT_SCHEMA,
             "job_id": self.job_id,
             "status": "SUCCEEDED",
             "datasets": [item.to_dict() for item in self.datasets],
         }
 
+    @classmethod
+    def from_dict(
+        cls,
+        value: Mapping[str, object],
+        *,
+        expected_datasets: tuple[str, ...],
+    ) -> EodRunResult:
+        if set(value) != {"schema_version", "job_id", "status", "datasets"}:
+            raise ValueError("EOD result fields are invalid")
+        if value["schema_version"] != EOD_RESULT_SCHEMA or value["status"] != "SUCCEEDED":
+            raise ValueError("EOD result schema or status is invalid")
+        if not isinstance(value["job_id"], str):
+            raise TypeError("result job_id must be a string")
+        raw_datasets = value["datasets"]
+        if not isinstance(raw_datasets, list):
+            raise TypeError("result datasets must be an array")
+        results = tuple(
+            EodDatasetResult.from_dict(item)
+            if isinstance(item, Mapping)
+            else (_raise_dataset_result_type())
+            for item in raw_datasets
+        )
+        result = cls(
+            job_id=value["job_id"],
+            datasets=results,
+            expected_datasets=expected_datasets,
+        )
+        if result.to_dict() != dict(value):
+            raise ValueError("EOD result is not canonical")
+        return result
 
-_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+
+def _raise_dataset_result_type() -> EodDatasetResult:
+    raise TypeError("dataset result must be an object")
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +476,7 @@ class EodDatasetConfig:
 
     scope: tuple[str, ...]
     known_coverage: tuple[tuple[str, str, str], ...] = ()
+    base_version: EodBaseVersion | None = None
     references: Mapping[str, EodReferenceVersion] = MappingProxyType({})
 
     def __post_init__(self) -> None:
@@ -248,9 +488,22 @@ class EodDatasetConfig:
             raise ValueError("scope must be sorted and unique")
         if any(_SAFE_SCOPE_PATTERN.fullmatch(item) is None for item in self.scope):
             raise ValueError("scope must contain canonical exchanges or security codes")
-        coverage = tuple(sorted(self.known_coverage))
-        if coverage != self.known_coverage:
-            raise ValueError("known_coverage must be deterministically sorted")
+        coverage = _coverage(self.known_coverage, scope=self.scope)
+        if self.base_version is None:
+            if coverage:
+                raise ValueError("known_coverage requires a verified explicit base_version")
+        else:
+            if not isinstance(self.base_version, EodBaseVersion):
+                raise TypeError("base_version must be an EodBaseVersion")
+            if self.base_version.dataset not in _DATASET_RANK:
+                raise ValueError("base_version dataset is invalid")
+            if not coverage:
+                coverage = self.base_version.coverage
+            if coverage != self.base_version.coverage:
+                raise ValueError("known_coverage must be derived from base_version coverage")
+            if any(item[0] not in self.scope for item in coverage):
+                raise ValueError("base_version coverage scope must be configured")
+        object.__setattr__(self, "known_coverage", coverage)
         normalized: dict[str, EodReferenceVersion] = {}
         for key, reference in self.references.items():
             if not isinstance(key, str) or not key:
@@ -267,6 +520,7 @@ class EodDatasetConfig:
                 {"scope": scope, "start": start, "end": end}
                 for scope, start, end in self.known_coverage
             ],
+            "base_version": (None if self.base_version is None else self.base_version.to_dict()),
             "references": {key: reference.to_dict() for key, reference in self.references.items()},
         }
 
@@ -286,6 +540,8 @@ __all__ = [
     "EOD_JOB_TYPE",
     "EOD_REQUEST_MANIFEST_SCHEMA",
     "EOD_REQUEST_SCHEMA",
+    "EOD_RESULT_SCHEMA",
+    "EodBaseVersion",
     "EodDatasetConfig",
     "EodDatasetResult",
     "EodPublishIntent",

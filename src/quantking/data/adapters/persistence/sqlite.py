@@ -783,6 +783,22 @@ class DataRepository:
             )
         return _version_domain(self._session, row)
 
+    def list_versions(
+        self,
+        *,
+        dataset: DatasetKind | None = None,
+        status: DatasetVersionStatus | None = None,
+    ) -> list[DatasetVersion]:
+        statement = select(DatasetVersionRow).order_by(
+            DatasetVersionRow.created_at,
+            DatasetVersionRow.version_id,
+        )
+        if dataset is not None:
+            statement = statement.where(DatasetVersionRow.dataset == dataset.value)
+        if status is not None:
+            statement = statement.where(DatasetVersionRow.status == status.value)
+        return [_version_domain(self._session, row) for row in self._session.scalars(statement)]
+
     # -- quality runs ------------------------------------------------------
 
     def save_quality_run(self, run: QualityRun) -> QualityRun:

@@ -91,3 +91,27 @@ def test_enqueue_rejects_unsafe_idempotency_keys(tmp_path: Path, key: str) -> No
     command, _jobs = _service(tmp_path)
     with pytest.raises(ValueError, match="idempotency"):
         command.enqueue(_request(), idempotency_key=key, requester="pytest")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("lookback_days", True),
+        ("max_days_per_chunk", True),
+        ("max_items_per_chunk", True),
+    ],
+)
+def test_execution_config_rejects_bool_integer_fields(field: str, value: bool) -> None:
+    arguments = {
+        "code_version": "test-code",
+        "adapter_version": "test-adapter",
+        "rule_version": "test-rules",
+        "lookback_days": 0,
+        "max_days_per_chunk": 1,
+        "max_items_per_chunk": 1,
+        "datasets": {},
+    }
+    arguments[field] = value
+
+    with pytest.raises((TypeError, ValueError)):
+        EodExecutionConfig(**arguments)  # type: ignore[arg-type]

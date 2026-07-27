@@ -7,7 +7,7 @@ S1-02 已于 2026-07-18 在提交 `79f9fa3e682e212cf74e7886a04c6fb52158f302`
 完成主验收，证据见 [S1-02 主验收证据](S1-02_ACCEPTANCE.md)。S1-03-R1 修复中/待主验收。
 S1-04 已于 2026-07-22 在提交 `2f99491e9dc410acf85ca81c131a77cae08d0cc3`
 完成主验收，证据见 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。
-S1-05 离线实现已提交，等待主验收；S1-06～S1-08 未开始、未获授权。
+S1-05-R1 修复已提交，等待主验收；S1-06～S1-08 未开始、未获授权。
 
 真实 XTQuant 和备用源验证仍延期并阻断 Stage 1 最终验收。
 
@@ -61,16 +61,24 @@ S1-05 离线实现已提交，等待主验收；S1-06～S1-08 未开始、未获
 
 ## S1-05：EOD、Worker、CLI 与 API
 
-- **状态**：S1-05 离线实现已提交，等待主验收；真实网络、QMT 和正式数据根仍未授权。
+- **状态**：S1-05-R1 修复已提交，等待主验收；真实网络、QMT 和正式数据根仍未授权。
 - **授权**：本实现仅使用已获离线实施授权的范围；该授权不包含任何真实外部访问。
 - **范围**：Web/CLI 手动触发的同一 EOD 应用服务、持久 Worker handler、幂等命令和 API；
   串联已完成的 Warehouse、XTQuant 与质量能力。
 - **实现**：固定 `data.eod.v1` 任务从持久 request/config/version manifests 重建请求，
   逐数据集执行能力预检、增量 ingestion、BUILDING version、QualityRunner、显式质量后发布
   和发布凭证复验；成功或失败均保留不可覆盖 EOD 证据和脱敏 JSONL/JobEvent。
+- **R1 完整性**：增量配置冻结并严格复验显式 base version；新候选按 Canonical 主键合并
+  完整基表后执行全表质量和发布，直接父版本固定为 base。全覆盖请求返回
+  `REUSED_UNCHANGED`，不会创建空 batch/version；新快照返回 `PUBLISHED_NEW`。
+- **R1 恢复**：发布后立即保存不可变数据集 checkpoint；严格 success/failure verifier
+  同时校验业务语义、仓库、版本和质量凭证，发布后故障可发现已有版本且重试不重复发布。
 - **入口**：CLI 只提供显式入队、按 `job_id` 执行 Worker 和状态查询；API 提供
   `POST /api/data/eod-runs`、`GET /api/jobs/{job_id}` 和
   `POST /api/jobs/{job_id}/cancel`。
+- **正式组合**：`quantking-data`、`python -m quantking.cli.eod` 和
+  `quantking.web.main:create_runtime_app` 共用类型化本地 runtime；SDK、数据库和数据根
+  只来自受控设置，import、`--help` 和 API 入队不会加载 XTQuant SDK。
 - **依赖**：S1-04 完成。
 - **禁止项**：不建设内部调度器、Windows 任务计划或自动切源；发布意图必须显式为
   `PUBLISH_AFTER_QUALITY`，不会因质量通过而隐式发布。

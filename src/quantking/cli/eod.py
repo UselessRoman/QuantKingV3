@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Sequence
 from datetime import date
 from typing import NoReturn, Protocol, TextIO
@@ -105,31 +106,79 @@ def run_cli(
     """Parse one explicit command and emit exactly one stable JSON line."""
     try:
         arguments = _parser().parse_args(list(argv))
-        if arguments.command == "eod-enqueue":
+    except _ArgumentError:
+        _write(
+            stdout,
+            {
+                "error": {
+                    "code": "INVALID_ARGUMENT",
+                    "message": "CLI arguments are invalid.",
+                }
+            },
+        )
+        return 2
+    if arguments.command == "eod-enqueue":
+        try:
             try:
                 trade_date = date.fromisoformat(arguments.trade_date)
             except ValueError as error:
                 raise _ArgumentError from error
-            outcome = eod_commands.enqueue(
-                EodRunRequest(
-                    start_date=trade_date,
-                    end_date=trade_date,
-                    datasets=tuple(arguments.datasets),
-                    publish_intent=EodPublishIntent(arguments.publish_intent),
-                ),
-                idempotency_key=arguments.idempotency_key,
-                requester="cli",
+            request = EodRunRequest(
+                start_date=trade_date,
+                end_date=trade_date,
+                datasets=tuple(arguments.datasets),
+                publish_intent=EodPublishIntent(arguments.publish_intent),
             )
+        except (_ArgumentError, TypeError, ValueError):
             _write(
                 stdout,
                 {
-                    "job_id": outcome.job_id,
-                    "status": outcome.status.value,
-                    "created": outcome.created,
-                    "reused": not outcome.created,
+                    "error": {
+                        "code": "INVALID_ARGUMENT",
+                        "message": "CLI arguments are invalid.",
+                    }
                 },
             )
-            return 0
+            return 2
+        try:
+            outcome = eod_commands.enqueue(
+                request,
+                idempotency_key=arguments.idempotency_key,
+                requester="cli",
+            )
+        except QuantKingError as error:
+            _write(
+                stdout,
+                {
+                    "error": {
+                        "code": error.code.value,
+                        "message": "The command could not be completed.",
+                    }
+                },
+            )
+            return 1
+        except Exception:
+            _write(
+                stdout,
+                {
+                    "error": {
+                        "code": "COMMAND_FAILED",
+                        "message": "The command could not be completed.",
+                    }
+                },
+            )
+            return 1
+        _write(
+            stdout,
+            {
+                "job_id": outcome.job_id,
+                "status": outcome.status.value,
+                "created": outcome.created,
+                "reused": not outcome.created,
+            },
+        )
+        return 0
+    try:
         if arguments.command == "worker-run":
             worker.run(arguments.job_id)
             _write(stdout, _job_payload(jobs.get_job(arguments.job_id)))
@@ -138,7 +187,7 @@ def run_cli(
             _write(stdout, _job_payload(jobs.get_job(arguments.job_id)))
             return 0
         raise _ArgumentError
-    except (_ArgumentError, TypeError, ValueError):
+    except _ArgumentError:
         _write(
             stdout,
             {
@@ -173,4 +222,38 @@ def run_cli(
         return 1
 
 
-__all__ = ["WorkerRunPort", "run_cli"]
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the installed local CLI; runtime construction is deferred until after help."""
+    arguments = tuple(sys.argv[1:] if argv is None else argv)
+    if any(item in {"-h", "--help"} for item in arguments):
+        _parser().parse_args(list(arguments))
+        return 0
+    try:
+        from quantking.runtime import build_eod_runtime, load_runtime_settings
+
+        runtime = build_eod_runtime(load_runtime_settings())
+    except Exception:
+        _write(
+            sys.stdout,
+            {
+                "error": {
+                    "code": "RUNTIME_UNAVAILABLE",
+                    "message": "The local EOD runtime could not be initialized.",
+                }
+            },
+        )
+        return 1
+    return run_cli(
+        arguments,
+        eod_commands=runtime.eod_commands,
+        worker=runtime.worker,
+        jobs=runtime.jobs,
+        stdout=sys.stdout,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+__all__ = ["WorkerRunPort", "main", "run_cli"]

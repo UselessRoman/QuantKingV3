@@ -5,11 +5,19 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
+
+import pyarrow as pa
 
 from quantking.common.errors import DatasetVersionNotFoundError
 from quantking.common.ids import new_entity_id, parse_entity_id
 from quantking.common.time import TradingDate, UtcTimestamp
+from quantking.data.adapters.canonical_schema import (
+    canonical_schema,
+    ensure_sorted,
+    validate_table,
+)
 from quantking.data.adapters.persistence.sqlite import DataSqliteUnitOfWorkFactory
 from quantking.data.adapters.sources.capabilities import capability_for
 from quantking.data.adapters.sources.ingestion import XtQuantIngestionService
@@ -18,12 +26,18 @@ from quantking.data.adapters.warehouse.publish_coordinator import (
     CanonicalPublishCoordinatorRequest,
     compute_content_sha256,
 )
+from quantking.data.adapters.warehouse.query import CanonicalQueryAdapter
 from quantking.data.adapters.warehouse.verifier import verify_canonical_directory
-from quantking.data.eod.artifacts import EodEvidenceWriter
+from quantking.data.eod.artifacts import (
+    EodEvidenceWriter,
+    verify_eod_success_evidence_deep,
+)
 from quantking.data.eod.contracts import (
     EOD_CONFIG_SCHEMA,
     EOD_JOB_TYPE,
     EOD_REQUEST_MANIFEST_SCHEMA,
+    EodBaseVersion,
+    EodDatasetConfig,
     EodDatasetResult,
     EodPublishIntent,
     EodReferenceVersion,
@@ -57,6 +71,7 @@ from quantking.data.quality.models import (
     RuleOutcomeStatus,
 )
 from quantking.data.quality.runner import QualityRunner
+from quantking.data.schemas import descriptor_for
 from quantking.jobs.jsonl import JsonLinesHandler
 from quantking.jobs.models import JobRun
 from quantking.jobs.worker import JobCancelledAtCheckpoint, WorkerContext, WorkerRegistry
@@ -70,12 +85,22 @@ class EodExecutionError(Exception):
         super().__init__(message)
 
 
+class _PublishedDatasetFailure(EodExecutionError):
+    def __init__(self, result: EodDatasetResult, error: BaseException) -> None:
+        self.result = result
+        super().__init__(
+            "POST_PUBLISH_FAILURE",
+            f"published dataset recovery required after {type(error).__name__}",
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class _DatasetPlan:
     dataset: DatasetKind
     schema_version: str
     scope: tuple[str, ...]
     known_coverage: tuple[CoverageWindow, ...]
+    base_version: EodBaseVersion | None
     references: Mapping[str, EodReferenceVersion]
 
 
@@ -92,6 +117,13 @@ class _FrozenCommand:
     max_items_per_chunk: int
     datasets: tuple[_DatasetPlan, ...]
     evidence_request: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedBase:
+    version: DatasetVersion
+    table: pa.Table
+    known_coverage: tuple[CoverageWindow, ...]
 
 
 def _required_int(value: object, *, field: str, minimum: int) -> int:
@@ -166,12 +198,14 @@ def _reconstruct(job: JobRun) -> _FrozenCommand:
             if not isinstance(raw, dict) or set(raw) != {
                 "scope",
                 "known_coverage",
+                "base_version",
                 "references",
             }:
                 raise ValueError("dataset plan fields are invalid")
             raw_scope = raw["scope"]
             raw_coverage = raw["known_coverage"]
             raw_references = raw["references"]
+            raw_base = raw["base_version"]
             if (
                 not isinstance(raw_scope, list)
                 or not isinstance(raw_coverage, list)
@@ -179,14 +213,18 @@ def _reconstruct(job: JobRun) -> _FrozenCommand:
             ):
                 raise TypeError("dataset plan values are invalid")
             coverage: list[CoverageWindow] = []
+            coverage_values: list[tuple[str, str, str]] = []
             for item in raw_coverage:
                 if not isinstance(item, dict) or set(item) != {"scope", "start", "end"}:
                     raise ValueError("coverage fields are invalid")
+                if any(not isinstance(item[key], str) for key in ("scope", "start", "end")):
+                    raise TypeError("coverage values are invalid")
+                coverage_values.append((item["scope"], item["start"], item["end"]))
                 coverage.append(
                     CoverageWindow(
-                        scope=str(item["scope"]),
-                        start=TradingDate.from_iso(str(item["start"])),
-                        end=TradingDate.from_iso(str(item["end"])),
+                        scope=item["scope"],
+                        start=TradingDate.from_iso(item["start"]),
+                        end=TradingDate.from_iso(item["end"]),
                     )
                 )
             references: dict[str, EodReferenceVersion] = {}
@@ -198,12 +236,24 @@ def _reconstruct(job: JobRun) -> _FrozenCommand:
                     version_id=str(value.get("version_id")),
                     content_sha256=str(value.get("content_sha256")),
                 )
+            base = None
+            if raw_base is not None:
+                if not isinstance(raw_base, dict):
+                    raise TypeError("base_version config is invalid")
+                base = EodBaseVersion.from_dict(raw_base)
+            dataset_config = EodDatasetConfig(
+                scope=tuple(raw_scope),
+                known_coverage=tuple(coverage_values),
+                base_version=base,
+                references=references,
+            )
             plans.append(
                 _DatasetPlan(
                     dataset=DatasetKind(name),
                     schema_version=str(raw_schemas[name]),
-                    scope=tuple(raw_scope),
+                    scope=dataset_config.scope,
                     known_coverage=tuple(coverage),
+                    base_version=base,
                     references=references,
                 )
             )
@@ -220,9 +270,10 @@ def _reconstruct(job: JobRun) -> _FrozenCommand:
             "CONFIG_MANIFEST_INVALID", "config reconstruction failed"
         ) from error
     evidence_request = {
-        "schema_version": "eod-request-evidence.v1",
+        "schema_version": "eod-request-evidence.v2",
         "request": request.to_dict(),
         "request_sha256": request_sha,
+        "config": dict(config),
         "config_sha256": config_sha,
         "version_manifest": dict(job.version_manifest),
     }
@@ -265,6 +316,8 @@ class EodWorkerHandler:
         clock: Callable[[], UtcTimestamp],
         capability_check: Callable[[DatasetKind], bool] | None = None,
         log_root: Path | None = None,
+        query_adapter: CanonicalQueryAdapter | None = None,
+        fault_injector: Callable[[str], None] | None = None,
     ) -> None:
         self._ingestion = ingestion
         self._quality_runner = quality_runner
@@ -278,19 +331,29 @@ class EodWorkerHandler:
             lambda dataset: capability_for(dataset).available
         )
         self._log_root = log_root
+        self._query = query_adapter or CanonicalQueryAdapter(
+            data_root=data_root,
+            uow_factory=data_uow_factory,
+        )
+        self._fault_injector = fault_injector
+
+    def _fault(self, point: str) -> None:
+        if self._fault_injector is not None:
+            self._fault_injector(point)
 
     def __call__(self, context: WorkerContext) -> None:
         job = context.service.get_job(context.job_id)
         logger, log_handler = self._job_logger(job)
         command: _FrozenCommand | None = None
         completed: list[EodDatasetResult] = []
+        success_written = False
         try:
             logger.info(
                 "EOD execution started",
                 extra={"event": "eod_started", "job_id": context.job_id},
             )
             command = _reconstruct(job)
-            self._preflight(command)
+            bases = self._preflight(command)
             total = len(command.datasets)
             published_by_dataset: dict[DatasetKind, EodDatasetResult] = {}
             for index, plan in enumerate(command.datasets):
@@ -304,12 +367,13 @@ class EodWorkerHandler:
                     context,
                     command=command,
                     plan=plan,
+                    verified_base=bases.get(plan.dataset),
                     published_by_dataset=published_by_dataset,
                 )
                 completed.append(result)
                 published_by_dataset[plan.dataset] = result
                 logger.info(
-                    "EOD dataset published",
+                    "EOD dataset completed",
                     extra={
                         "event": "eod_dataset_published",
                         "job_id": context.job_id,
@@ -320,18 +384,31 @@ class EodWorkerHandler:
                     },
                 )
                 context.checkpoint()
+                self._fault("before_job_event_audit")
                 context.activity(
                     stage=f"eod:{plan.dataset.value}:published",
                     progress=(index + 1) / total,
-                    summary="EOD dataset published",
+                    summary="EOD dataset completed",
                     audit_action="eod_dataset_published",
                 )
-            run_result = EodRunResult(job_id=context.job_id, datasets=tuple(completed))
+            run_result = EodRunResult(
+                job_id=context.job_id,
+                datasets=tuple(completed),
+                expected_datasets=command.request.datasets,
+            )
             directory = self._evidence.write_success(
                 job_id=context.job_id,
                 request=command.evidence_request,
                 result=run_result.to_dict(),
             )
+            success_written = True
+            verify_eod_success_evidence_deep(
+                directory,
+                artifacts_root=directory.parent,
+                data_root=self._data_root,
+                uow_factory=self._data_uow,
+            )
+            self._fault("after_success_evidence_before_job_succeeded")
             context.service.add_artifact(
                 context.job_id,
                 relative_path=directory.relative_to(self._data_root).as_posix(),
@@ -345,6 +422,21 @@ class EodWorkerHandler:
                 },
             )
         except BaseException as error:
+            if isinstance(error, _PublishedDatasetFailure) and all(
+                item.dataset != error.result.dataset for item in completed
+            ):
+                completed.append(error.result)
+            if command is not None:
+                for recovered in self._evidence.load_checkpoints(
+                    job_id=context.job_id,
+                    request_sha256_value=command.request_sha256,
+                    config_sha256=command.config_sha256,
+                ):
+                    if all(item.dataset != recovered.dataset for item in completed):
+                        self._verify_completed_result(recovered)
+                        completed.append(recovered)
+                order = {name: index for index, name in enumerate(command.request.datasets)}
+                completed.sort(key=lambda item: order[item.dataset])
             code = (
                 error.code
                 if isinstance(error, EodExecutionError)
@@ -359,12 +451,20 @@ class EodWorkerHandler:
                     "request_manifest_valid": False,
                 }
             )
+            terminal_status = (
+                "CANCELLED" if isinstance(error, JobCancelledAtCheckpoint) else "FAILED"
+            )
+            failure_request_sha = command.request_sha256 if command is not None else "0" * 64
             directory = self._evidence.write_failure(
                 job_id=context.job_id,
                 request=evidence_request,
                 code=code,
                 message=str(error),
+                terminal_status=terminal_status,
+                failed_at=self._clock(),
+                request_sha256_value=failure_request_sha,
                 completed_datasets=tuple(item.to_dict() for item in completed),
+                replace_uncommitted_success=success_written,
             )
             context.service.add_artifact(
                 context.job_id,
@@ -396,7 +496,11 @@ class EodWorkerHandler:
         logger.addHandler(handler)
         return logger, handler
 
-    def _preflight(self, command: _FrozenCommand) -> None:
+    def _preflight(
+        self,
+        command: _FrozenCommand,
+    ) -> Mapping[DatasetKind, _VerifiedBase]:
+        bases: dict[DatasetKind, _VerifiedBase] = {}
         for plan in command.datasets:
             if not self._capability_check(plan.dataset):
                 raise EodExecutionError(
@@ -408,6 +512,9 @@ class EodWorkerHandler:
                     "CAPABILITY_UNAVAILABLE",
                     f"frozen scope is unavailable for {plan.dataset.value}",
                 )
+            if plan.base_version is not None:
+                bases[plan.dataset] = self._verify_base(plan)
+        return bases
 
     def _execute_dataset(
         self,
@@ -415,9 +522,33 @@ class EodWorkerHandler:
         *,
         command: _FrozenCommand,
         plan: _DatasetPlan,
+        verified_base: _VerifiedBase | None,
         published_by_dataset: Mapping[DatasetKind, EodDatasetResult],
     ) -> EodDatasetResult:
+        reusable = self._evidence.find_reusable_published(
+            request_sha256_value=command.request_sha256,
+            config_sha256=command.config_sha256,
+            dataset=plan.dataset.value,
+        )
+        if reusable is not None:
+            expected_parent = (
+                None if verified_base is None else str(verified_base.version.version_id)
+            )
+            if reusable.parent_version_id != expected_parent:
+                raise EodExecutionError(
+                    "RETRY_RESULT_CONFLICT",
+                    "reusable published result has different lineage",
+                )
+            self._verify_completed_result(reusable)
+            self._evidence.write_checkpoint(
+                job_id=context.job_id,
+                request_sha256_value=command.request_sha256,
+                config_sha256=command.config_sha256,
+                result=reusable,
+            )
+            return reusable
         batch_id = new_entity_id("data_batch")
+        known_coverage = () if verified_base is None else verified_base.known_coverage
         fetch_plan = build_incremental_plan(
             IncrementalPlanRequest(
                 batch_id=batch_id,
@@ -427,13 +558,24 @@ class EodWorkerHandler:
                 request_end=TradingDate(command.request.end_date),
                 start_inclusive=True,
                 end_inclusive=True,
-                known_coverage=plan.known_coverage,
+                known_coverage=known_coverage,
                 lookback_days=command.lookback_days,
                 max_days_per_chunk=command.max_days_per_chunk,
                 max_items_per_chunk=command.max_items_per_chunk,
                 adapter_version=command.adapter_version,
             )
         )
+        if not fetch_plan.chunks:
+            if verified_base is None:
+                raise EodExecutionError(
+                    "NO_CHANGE_WITHOUT_BASE",
+                    "an empty incremental plan requires a verified base",
+                )
+            return self._result_from_version(
+                verified_base.version,
+                status="REUSED_UNCHANGED",
+                batch_id=None,
+            )
 
         def chunk_checkpoint() -> None:
             context.checkpoint()
@@ -450,14 +592,23 @@ class EodWorkerHandler:
                 else "INGESTION_FAILED"
             )
             raise EodExecutionError(code, "ingestion did not produce a complete candidate")
-        table = ingestion.canonical_table
+        candidate = ingestion.canonical_table
+        if verified_base is None:
+            self._prove_initial_coverage(command=command, plan=plan, table=candidate)
+            table = candidate
+        else:
+            table = self._merge_snapshot(
+                plan.dataset,
+                base=verified_base.table,
+                candidate=candidate,
+            )
         version = DatasetVersion.building(
             version_id=new_entity_id("data_version"),
             dataset=plan.dataset,
             schema_version=str(plan.schema_version),
             code_version=command.code_version,
             rule_version=command.rule_version,
-            parent_version_id=None,
+            parent_version_id=(None if verified_base is None else verified_base.version.version_id),
             input_batch_ids=(batch_id,),
             created_at=self._clock(),
         )
@@ -473,6 +624,7 @@ class EodWorkerHandler:
             )
             references = self._references(plan, published_by_dataset)
             content_sha = compute_content_sha256((table,), dataset=plan.dataset)
+            coverage_start, coverage_end = self._table_coverage(table, plan.dataset)
             quality_request = QualityRequest(
                 dataset=plan.dataset,
                 version_id=version.version_id,
@@ -489,8 +641,8 @@ class EodWorkerHandler:
                     if plan.dataset is DatasetKind.EXCHANGE_CALENDAR
                     else tuple(sorted({item.rsplit(".", 1)[-1] for item in plan.scope}))
                 ),
-                coverage_start=TradingDate(command.request.start_date),
-                coverage_end=TradingDate(command.request.end_date),
+                coverage_start=coverage_start,
+                coverage_end=coverage_end,
                 reference_data=references,
                 empty_result=ingestion.batch.empty_result,
             )
@@ -536,10 +688,12 @@ class EodWorkerHandler:
                         empty_result=ingestion.batch.empty_result,
                     )
                 )
+                self._fault("after_coordinator_return")
                 verified = verify_canonical_directory(
                     published.directory,
                     data_root=self._data_root,
                 )
+                self._fault("after_warehouse_verify")
                 stored = self._get_version(str(version.version_id))
                 if (
                     stored.status is not DatasetVersionStatus.PUBLISHED
@@ -551,18 +705,265 @@ class EodWorkerHandler:
                         "PUBLISH_CREDENTIAL_MISMATCH",
                         "published credentials do not match",
                     )
-            assert stored.content_sha256 is not None
-            return EodDatasetResult(
-                dataset=plan.dataset.value,
-                status="PUBLISHED",
+            result = self._result_from_version(
+                stored,
+                status="PUBLISHED_NEW",
                 batch_id=str(batch_id),
-                version_id=str(stored.version_id),
-                quality_run_id=str(quality_run.run_id),
-                content_sha256=stored.content_sha256,
             )
-        except BaseException:
+            self._fault("before_checkpoint_write")
+            self._evidence.write_checkpoint(
+                job_id=context.job_id,
+                request_sha256_value=command.request_sha256,
+                config_sha256=command.config_sha256,
+                result=result,
+            )
+            self._fault("after_checkpoint_write")
+            return result
+        except BaseException as error:
             self._fail_nonterminal_version(version)
+            try:
+                stored = self._get_version(str(version.version_id))
+            except DatasetVersionNotFoundError:
+                raise
+            if stored.status is DatasetVersionStatus.PUBLISHED:
+                result = self._result_from_version(
+                    stored,
+                    status="PUBLISHED_NEW",
+                    batch_id=str(batch_id),
+                )
+                self._evidence.write_checkpoint(
+                    job_id=context.job_id,
+                    request_sha256_value=command.request_sha256,
+                    config_sha256=command.config_sha256,
+                    result=result,
+                )
+                raise _PublishedDatasetFailure(result, error) from error
             raise
+
+    def _verify_base(self, plan: _DatasetPlan) -> _VerifiedBase:
+        frozen = plan.base_version
+        if frozen is None:
+            raise EodExecutionError("BASE_VERSION_INVALID", "base_version is required")
+        try:
+            with self._data_uow() as uow:
+                version = uow.data.get_version(frozen.version_id)
+                quality = (
+                    None
+                    if version.quality_run_id is None
+                    else uow.data.get_quality_run(str(version.quality_run_id))
+                )
+                uow.rollback()
+            verified = self._query.verify_manifest_by_id(
+                version_id=frozen.version_id,
+                dataset=plan.dataset.value,
+            )
+            table = self._query.query_by_id(
+                version_id=frozen.version_id,
+                dataset=plan.dataset.value,
+            )
+            actual_coverage = self._coverage_by_scope(
+                table,
+                dataset=plan.dataset,
+                scope=plan.scope,
+            )
+        except Exception as error:
+            raise EodExecutionError(
+                "BASE_VERSION_INVALID",
+                "base version could not be strictly verified",
+            ) from error
+        if (
+            version.status is not DatasetVersionStatus.PUBLISHED
+            or version.dataset is not plan.dataset
+            or version.schema_version != frozen.schema_version
+            or version.content_sha256 != frozen.content_sha256
+            or version.manifest_sha256 != frozen.manifest_sha256
+            or verified.manifest_sha != frozen.manifest_sha256
+            or verified.manifest.get("content_sha256") != frozen.content_sha256
+            or actual_coverage != frozen.coverage
+            or tuple((item.scope, str(item.start), str(item.end)) for item in plan.known_coverage)
+            != actual_coverage
+            or quality is None
+            or quality.status is not QualityRunStatus.PASSED
+            or quality.version_id != version.version_id
+            or quality.rule_version != version.rule_version
+            or quality.schema_version != version.schema_version
+            or quality.content_sha256 != version.content_sha256
+        ):
+            raise EodExecutionError(
+                "BASE_VERSION_INVALID",
+                "base version credentials do not match",
+            )
+        return _VerifiedBase(
+            version=version,
+            table=table,
+            known_coverage=tuple(
+                CoverageWindow(
+                    scope=item[0],
+                    start=TradingDate.from_iso(item[1]),
+                    end=TradingDate.from_iso(item[2]),
+                )
+                for item in actual_coverage
+            ),
+        )
+
+    @staticmethod
+    def _coverage_by_scope(
+        table: pa.Table,
+        *,
+        dataset: DatasetKind,
+        scope: tuple[str, ...],
+    ) -> tuple[tuple[str, str, str], ...]:
+        date_field = "effective_from" if dataset is DatasetKind.SECURITY_MASTER else "trade_date"
+        scope_field = "exchange" if dataset is DatasetKind.EXCHANGE_CALENDAR else "code"
+        if date_field not in table.column_names or scope_field not in table.column_names:
+            raise EodExecutionError(
+                "BASE_VERSION_INVALID",
+                "base table cannot derive incremental coverage",
+            )
+        dates_by_scope: dict[str, list[date]] = {item: [] for item in scope}
+        for row in table.select([scope_field, date_field]).to_pylist():
+            raw_scope = row[scope_field]
+            raw_date = row[date_field]
+            if (
+                isinstance(raw_scope, str)
+                and raw_scope in dates_by_scope
+                and isinstance(raw_date, date)
+            ):
+                dates_by_scope[raw_scope].append(raw_date)
+        if any(not values for values in dates_by_scope.values()):
+            raise EodExecutionError(
+                "BASE_VERSION_INVALID",
+                "base table does not cover every configured scope",
+            )
+        return tuple(
+            (
+                item,
+                min(dates_by_scope[item]).isoformat(),
+                max(dates_by_scope[item]).isoformat(),
+            )
+            for item in sorted(dates_by_scope)
+        )
+
+    def _prove_initial_coverage(
+        self,
+        *,
+        command: _FrozenCommand,
+        plan: _DatasetPlan,
+        table: pa.Table,
+    ) -> None:
+        actual = self._coverage_by_scope(
+            table,
+            dataset=plan.dataset,
+            scope=plan.scope,
+        )
+        requested_start = command.request.start_date.isoformat()
+        requested_end = command.request.end_date.isoformat()
+        if any(start > requested_start or end < requested_end for _, start, end in actual):
+            raise EodExecutionError(
+                "INITIAL_COVERAGE_INCOMPLETE",
+                "initial candidate does not cover the complete requested range",
+            )
+
+    @staticmethod
+    def _merge_snapshot(
+        dataset: DatasetKind,
+        *,
+        base: pa.Table,
+        candidate: pa.Table,
+    ) -> pa.Table:
+        descriptor = canonical_schema(dataset.value)
+        key_fields = descriptor_for(dataset.value).primary_key
+        rows: dict[tuple[object, ...], dict[str, object]] = {}
+        for row in (*base.to_pylist(), *candidate.to_pylist()):
+            key = tuple(row[field] for field in key_fields)
+            rows[key] = row
+        merged = pa.Table.from_pylist(list(rows.values()), schema=descriptor)
+        merged = ensure_sorted(dataset.value, merged)
+        validation = validate_table(dataset.value, merged)
+        if not validation.ok:
+            raise EodExecutionError(
+                "MERGED_SNAPSHOT_INVALID",
+                "merged full snapshot violates the Canonical contract",
+            )
+        return merged
+
+    @staticmethod
+    def _table_coverage(
+        table: pa.Table,
+        dataset: DatasetKind,
+    ) -> tuple[TradingDate, TradingDate]:
+        date_field = "effective_from" if dataset is DatasetKind.SECURITY_MASTER else "trade_date"
+        if date_field not in table.column_names:
+            raise EodExecutionError(
+                "CANDIDATE_COVERAGE_INVALID",
+                "candidate has no canonical date field",
+            )
+        dates = [item for item in table.column(date_field).to_pylist() if item is not None]
+        if not dates:
+            raise EodExecutionError(
+                "CANDIDATE_COVERAGE_INVALID",
+                "candidate has no coverage dates",
+            )
+        return TradingDate(min(dates)), TradingDate(max(dates))
+
+    def _result_from_version(
+        self,
+        version: DatasetVersion,
+        *,
+        status: str,
+        batch_id: str | None,
+    ) -> EodDatasetResult:
+        if (
+            version.status is not DatasetVersionStatus.PUBLISHED
+            or version.quality_run_id is None
+            or version.content_sha256 is None
+            or version.manifest_sha256 is None
+        ):
+            raise EodExecutionError(
+                "PUBLISH_CREDENTIAL_MISMATCH",
+                "published result credentials are incomplete",
+            )
+        result = EodDatasetResult(
+            dataset=version.dataset.value,
+            status=status,
+            batch_id=batch_id,
+            version_id=str(version.version_id),
+            quality_run_id=str(version.quality_run_id),
+            content_sha256=version.content_sha256,
+            manifest_sha256=version.manifest_sha256,
+            parent_version_id=(
+                None if version.parent_version_id is None else str(version.parent_version_id)
+            ),
+        )
+        self._verify_completed_result(result)
+        return result
+
+    def _verify_completed_result(self, result: EodDatasetResult) -> None:
+        with self._data_uow() as uow:
+            version = uow.data.get_version(result.version_id)
+            quality = uow.data.get_quality_run(result.quality_run_id)
+            uow.rollback()
+        verified = self._query.verify_manifest_by_id(
+            version_id=result.version_id,
+            dataset=result.dataset,
+        )
+        if (
+            version.status is not DatasetVersionStatus.PUBLISHED
+            or version.content_sha256 != result.content_sha256
+            or version.manifest_sha256 != result.manifest_sha256
+            or (None if version.parent_version_id is None else str(version.parent_version_id))
+            != result.parent_version_id
+            or quality.status is not QualityRunStatus.PASSED
+            or quality.version_id != version.version_id
+            or quality.rule_version != version.rule_version
+            or quality.schema_version != version.schema_version
+            or quality.content_sha256 != result.content_sha256
+            or verified.manifest_sha != result.manifest_sha256
+        ):
+            raise EodExecutionError(
+                "PUBLISH_CREDENTIAL_MISMATCH",
+                "completed result credentials do not match",
+            )
 
     def _references(
         self,
