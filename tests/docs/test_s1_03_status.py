@@ -27,7 +27,7 @@ def test_s1_03_r1_is_under_repair_and_not_main_accepted() -> None:
 
 def test_s1_05_authorization_does_not_authorize_real_xtquant_or_later_tasks() -> None:
     tasks = _read("docs/stage1/TASKS.md")
-    assert "S1-05-R3 修复已提交、等待主验收" in tasks
+    assert "S1-05-R4 修复已提交、等待主验收" in tasks
     assert "S1-06～S1-08 未开始、未获授权" in tasks
     contracts = _read("docs/stage1/DATA_CONTRACTS.md")
     assert "真实 XTQuant 样本验证仍须逐项授权" in contracts

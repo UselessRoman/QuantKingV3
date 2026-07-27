@@ -232,3 +232,79 @@ def test_active_long_handler_renews_lease_across_stale_threshold(tmp_path: Path)
     ).run(job_id)
 
     assert service.get_job(job_id).status is JobStatus.SUCCEEDED
+
+
+def test_worker_stops_lease_before_terminal_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "terminal-after-lease.db"
+    initialize_database(database)
+    service = JobService(
+        SqliteUnitOfWorkFactory(create_sqlite_engine(database, busy_timeout_ms=250))
+    )
+    job_id = _create(service, "terminal-after-lease")
+    registry = WorkerRegistry()
+    registry.register("synthetic", lambda context: None)
+
+    class ObservedRenewer:
+        active = False
+
+        @contextmanager
+        def maintain(self, callback):
+            del callback
+            self.active = True
+            try:
+                yield
+            finally:
+                self.active = False
+
+    renewer = ObservedRenewer()
+    original_transition = service.transition
+
+    def checked_transition(job_id_value, target, **kwargs):
+        if target in {
+            JobStatus.SUCCEEDED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+        }:
+            assert not renewer.active
+        return original_transition(job_id_value, target, **kwargs)
+
+    monkeypatch.setattr(service, "transition", checked_transition)
+    Worker(
+        service,
+        registry,
+        worker_id="terminal-order-worker",
+        lease_renewer=renewer,
+    ).run(job_id)
+
+    assert service.get_job(job_id).status is JobStatus.SUCCEEDED
+
+
+def test_lost_lease_cannot_commit_success(tmp_path: Path) -> None:
+    database = tmp_path / "lost-lease.db"
+    initialize_database(database)
+    service = JobService(
+        SqliteUnitOfWorkFactory(create_sqlite_engine(database, busy_timeout_ms=250))
+    )
+    job_id = _create(service, "lost-lease")
+    registry = WorkerRegistry()
+    registry.register("synthetic", lambda context: None)
+
+    class LostRenewer:
+        @contextmanager
+        def maintain(self, callback):
+            del callback
+            yield
+            raise RuntimeError("synthetic lease lost")
+
+    with pytest.raises(RuntimeError, match="lease lost"):
+        Worker(
+            service,
+            registry,
+            worker_id="lost-lease-worker",
+            lease_renewer=LostRenewer(),
+        ).run(job_id)
+
+    assert service.get_job(job_id).status is JobStatus.RUNNING

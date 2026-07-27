@@ -12,6 +12,9 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 
+import quantking.common.time as time_module
+import quantking.runtime as runtime_module
+from quantking.cli.eod import main as eod_cli_main
 from quantking.common.config import AppSettings
 from quantking.common.ids import new_entity_id
 from quantking.common.paths import RuntimePaths
@@ -150,6 +153,12 @@ def _settings(tmp_path: Path) -> AppSettings:
         sqlite_retry_jitter_ratio=0.0,
         job_heartbeat_min_interval_ms=1000,
         job_progress_min_interval_ms=250,
+    )
+
+
+def _data_uow(tmp_path: Path) -> DataSqliteUnitOfWorkFactory:
+    return DataSqliteUnitOfWorkFactory(
+        create_data_engine(tmp_path / "metadata.db", busy_timeout_ms=250)
     )
 
 
@@ -650,6 +659,8 @@ def test_worker_rejects_tampered_persisted_manifest_before_gateway(tmp_path: Pat
     verify_eod_terminal_failure(
         tmp_path / job.artifacts[0],
         artifacts_root=tmp_path / "artifacts" / "eod",
+        data_root=tmp_path,
+        uow_factory=_data_uow(tmp_path),
         job=job,
     )
 
@@ -1424,6 +1435,8 @@ def test_terminal_failure_rejects_self_signed_command_not_matching_job(
         verify_eod_terminal_failure(
             directory,
             artifacts_root=tmp_path / "artifacts" / "eod",
+            data_root=tmp_path,
+            uow_factory=_data_uow(tmp_path),
             job=job,
         )
 
@@ -1451,16 +1464,26 @@ def test_final_succeeded_commit_failure_is_recovered_without_republish(
 
     first = jobs.get_job(job_id)
     assert first.status is JobStatus.RUNNING
-    assert (tmp_path / "artifacts" / "eod" / f"{job_id.replace(':', '_')}.incomplete").is_dir()
+    failure_directory = tmp_path / "artifacts" / "eod" / f"{job_id.replace(':', '_')}.incomplete"
+    assert failure_directory.is_dir()
+    original_evidence = {item.name: item.read_bytes() for item in failure_directory.iterdir()}
+    original_artifacts = first.artifacts
     monkeypatch.setattr(jobs, "transition", original_transition)
-    assert (
-        jobs.recover_stale_running_jobs(
-            reason="expired after final commit failure",
-            stale_before=UtcTimestamp(_NOW.value + timedelta(minutes=2)),
-            at=UtcTimestamp(_NOW.value + timedelta(minutes=3)),
-        )
-        == 1
+    recovered_ids = jobs.recover_stale_running_job_ids(
+        reason="expired after final commit failure",
+        stale_before=UtcTimestamp(_NOW.value + timedelta(minutes=2)),
+        at=UtcTimestamp(_NOW.value + timedelta(minutes=3)),
     )
+    assert recovered_ids == (job_id,)
+    handler = worker._registry.resolve("data.eod.v1")  # type: ignore[attr-defined]
+    assert isinstance(handler, EodWorkerHandler)
+    handler.recover_interrupted(jobs, job_id)
+    handler.recover_interrupted(jobs, job_id)
+    assert {
+        item.name: item.read_bytes() for item in failure_directory.iterdir()
+    } == original_evidence
+    recovered_job = jobs.get_job(job_id)
+    assert recovered_job.artifacts == original_artifacts
 
     retry_id = _enqueue(command, key="final-commit-retry")
     worker.run(retry_id)
@@ -1469,6 +1492,179 @@ def test_final_succeeded_commit_failure_is_recovered_without_republish(
         assert connection.execute("SELECT COUNT(*) FROM dataset_versions").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM quality_runs").fetchone() == (1,)
     assert gateway.calls == 1
+
+
+def test_formal_worker_run_recovers_existing_failure_then_runs_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    gateway = CalendarGateway()
+    runtime = build_eod_runtime(_settings(tmp_path), gateway=gateway)
+    failed_id = runtime.eod_commands.enqueue(
+        EodRunRequest(
+            start_date=date(2026, 7, 15),
+            end_date=date(2026, 7, 15),
+            datasets=("exchange_calendar",),
+            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={},
+        ),
+        idempotency_key="formal-recovery-source",
+        requester="pytest",
+    ).job_id
+    original_transition = runtime.jobs.transition
+
+    def fail_final_transition(job_id_value, target, **kwargs):
+        if target is JobStatus.SUCCEEDED:
+            raise RuntimeError("synthetic final commit failure")
+        return original_transition(job_id_value, target, **kwargs)
+
+    monkeypatch.setattr(runtime.jobs, "transition", fail_final_transition)
+    with pytest.raises(RuntimeError, match="final commit"):
+        runtime.worker.run(failed_id)
+    monkeypatch.setattr(runtime.jobs, "transition", original_transition)
+    failed = runtime.jobs.get_job(failed_id)
+    assert failed.heartbeat_at is not None
+
+    target_id = runtime.eod_commands.enqueue(
+        EodRunRequest(
+            start_date=date(2026, 7, 15),
+            end_date=date(2026, 7, 15),
+            datasets=("exchange_calendar",),
+            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={},
+        ),
+        idempotency_key="formal-recovery-target",
+        requester="pytest",
+    ).job_id
+    monkeypatch.setattr(runtime_module, "load_runtime_settings", lambda: runtime.settings)
+    monkeypatch.setattr(runtime_module, "build_eod_runtime", lambda settings: runtime)
+    monkeypatch.setattr(
+        time_module,
+        "utc_now",
+        lambda: UtcTimestamp(failed.heartbeat_at.value + timedelta(minutes=3)),
+    )
+
+    assert eod_cli_main(["worker-run", "--job-id", target_id]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["job_id"] == target_id
+    assert output["status"] == "SUCCEEDED"
+    assert runtime.jobs.get_job(failed_id).status is JobStatus.INTERRUPTED
+    assert runtime.jobs.get_job(target_id).status is JobStatus.SUCCEEDED
+    database = runtime.settings.paths.data_root / "metadata" / "quantking.db"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ingestion_batches").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM dataset_versions").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM quality_runs").fetchone() == (1,)
+    assert gateway.calls == 1
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "version_id",
+        "batch_id",
+        "quality_run_id",
+        "content_sha256",
+        "manifest_sha256",
+        "parent_version_id",
+    ],
+)
+def test_terminal_failure_rejects_forged_completed_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    gateway = CalendarGateway()
+    jobs, command, worker = _runtime(tmp_path, gateway)
+    job_id = _enqueue(command, key=f"completed-forgery-{field}")
+    original_transition = jobs.transition
+
+    def fail_final_transition(job_id_value, target, **kwargs):
+        if target is JobStatus.SUCCEEDED:
+            raise RuntimeError("synthetic final commit failure")
+        return original_transition(job_id_value, target, **kwargs)
+
+    monkeypatch.setattr(jobs, "transition", fail_final_transition)
+    with pytest.raises(RuntimeError, match="final commit"):
+        worker.run(job_id)
+    monkeypatch.setattr(jobs, "transition", original_transition)
+    jobs.recover_stale_running_jobs(
+        reason="expired final commit",
+        stale_before=UtcTimestamp(_NOW.value + timedelta(minutes=2)),
+        at=UtcTimestamp(_NOW.value + timedelta(minutes=3)),
+    )
+    job = jobs.get_job(job_id)
+    directory = tmp_path / "artifacts" / "eod" / f"{job_id.replace(':', '_')}.incomplete"
+    failure = json.loads((directory / "failure.json").read_bytes())
+    result = failure["completed_datasets"][0]
+    replacements = {
+        "version_id": "data_version:99999999-9999-4999-8999-999999999999",
+        "batch_id": "data_batch:99999999-9999-4999-8999-999999999999",
+        "quality_run_id": "data_quality:99999999-9999-4999-8999-999999999999",
+        "content_sha256": "9" * 64,
+        "manifest_sha256": "8" * 64,
+        "parent_version_id": "data_version:88888888-8888-4888-8888-888888888888",
+    }
+    result[field] = replacements[field]
+    (directory / "failure.json").write_bytes(_canonical_bytes(failure))
+
+    with pytest.raises(EodEvidenceConflictError):
+        verify_eod_terminal_failure(
+            directory,
+            artifacts_root=tmp_path / "artifacts" / "eod",
+            data_root=tmp_path,
+            uow_factory=_data_uow(tmp_path),
+            job=job,
+        )
+
+
+@pytest.mark.parametrize("attack", ["missing", "extra", "tampered"])
+def test_terminal_failure_rejects_checkpoint_inventory_attack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attack: str,
+) -> None:
+    gateway = CalendarGateway()
+    jobs, command, worker = _runtime(tmp_path, gateway)
+    job_id = _enqueue(command, key=f"checkpoint-attack-{attack}")
+    original_transition = jobs.transition
+
+    def fail_final_transition(job_id_value, target, **kwargs):
+        if target is JobStatus.SUCCEEDED:
+            raise RuntimeError("synthetic final commit failure")
+        return original_transition(job_id_value, target, **kwargs)
+
+    monkeypatch.setattr(jobs, "transition", fail_final_transition)
+    with pytest.raises(RuntimeError, match="final commit"):
+        worker.run(job_id)
+    monkeypatch.setattr(jobs, "transition", original_transition)
+    jobs.recover_stale_running_jobs(
+        reason="expired final commit",
+        stale_before=UtcTimestamp(_NOW.value + timedelta(minutes=2)),
+        at=UtcTimestamp(_NOW.value + timedelta(minutes=3)),
+    )
+    job = jobs.get_job(job_id)
+    directory = tmp_path / "artifacts" / "eod" / f"{job_id.replace(':', '_')}.incomplete"
+    checkpoint_root = tmp_path / "artifacts" / "eod" / ".checkpoints" / job_id.replace(":", "_")
+    checkpoint = checkpoint_root / "exchange_calendar.json"
+    if attack == "missing":
+        checkpoint.unlink()
+    elif attack == "extra":
+        (checkpoint_root / "extra.json").write_bytes(checkpoint.read_bytes())
+    else:
+        payload = json.loads(checkpoint.read_bytes())
+        payload["dataset_result"]["content_sha256"] = "7" * 64
+        checkpoint.write_bytes(_canonical_bytes(payload))
+
+    with pytest.raises(EodEvidenceConflictError):
+        verify_eod_terminal_failure(
+            directory,
+            artifacts_root=tmp_path / "artifacts" / "eod",
+            data_root=tmp_path,
+            uow_factory=_data_uow(tmp_path),
+            job=job,
+        )
 
 
 def test_recovered_provisional_success_without_failure_is_strictly_reused(
@@ -1546,5 +1742,7 @@ def test_cancelled_eod_records_cancelled_failure_evidence(tmp_path: Path) -> Non
     verify_eod_terminal_failure(
         tmp_path / job.artifacts[0],
         artifacts_root=tmp_path / "artifacts" / "eod",
+        data_root=tmp_path,
+        uow_factory=_data_uow(tmp_path),
         job=job,
     )

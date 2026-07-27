@@ -17,12 +17,17 @@ class JobCancelledAtCheckpoint(Exception):
     """Cooperative cancellation raised only at a handler-declared safe point."""
 
 
+class WorkerLeaseLostError(RuntimeError):
+    """The durable RUNNING lease no longer belongs to this Worker."""
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerContext:
     """Minimal context exposed to a registered generic handler."""
 
     service: JobService
     job_id: str
+    worker_id: str | None = None
 
     def checkpoint(self) -> None:
         """Stop only when cancellation is requested and the phase is cancellable."""
@@ -31,7 +36,12 @@ class WorkerContext:
             raise JobCancelledAtCheckpoint(job.cancel_request or "cancellation requested")
 
     def heartbeat(self) -> bool:
-        return self.service.heartbeat(self.job_id)
+        if self.service.heartbeat(self.job_id):
+            return True
+        job = self.service.get_job(self.job_id)
+        return job.status is JobStatus.RUNNING and (
+            self.worker_id is None or job.worker_id == self.worker_id
+        )
 
     def progress(self, *, stage: str, progress: float, summary: str) -> bool:
         return self.service.report_progress(
@@ -97,7 +107,8 @@ class ThreadLeaseRenewer:
         def renew() -> None:
             while not stop.wait(self._interval):
                 try:
-                    heartbeat()
+                    if not heartbeat():
+                        raise WorkerLeaseLostError("Worker heartbeat lease was lost")
                 except BaseException as error:
                     failure.append(error)
                     stop.set()
@@ -109,6 +120,12 @@ class ThreadLeaseRenewer:
         finally:
             stop.set()
             thread.join(timeout=self._interval + 1.0)
+            if thread.is_alive():
+                failure.append(
+                    WorkerLeaseLostError(
+                        "Worker heartbeat thread did not stop before terminal commit"
+                    )
+                )
         if failure:
             raise RuntimeError("Worker heartbeat lease renewal failed") from failure[0]
 
@@ -164,40 +181,43 @@ class Worker:
             worker_id=self._worker_id,
             summary="worker claimed job",
         )
-        context = WorkerContext(self._service, job_id)
+        context = WorkerContext(self._service, job_id, self._worker_id)
+        handler_error: BaseException | None = None
         with self._lease_renewer.maintain(context.heartbeat):
             try:
                 result = handler(context)
                 if result is not None:
                     raise TypeError("registered job handlers must return None")
-            except JobCancelledAtCheckpoint:
-                self._service.transition(
-                    job_id,
-                    JobStatus.CANCELLED,
-                    cancel_result="cancelled at safe checkpoint",
-                    summary="job cancelled at safe checkpoint",
-                )
-                raise
             except BaseException as error:
-                self._service.transition(
-                    job_id,
-                    JobStatus.FAILED,
-                    failure=FailureInfo(
-                        error_type=type(error).__name__,
-                        message="registered job handler failed; inspect the managed JSONL log",
-                        retryable=False,
-                    ),
-                    summary="job handler failed",
-                )
-                raise
-            try:
-                self._service.transition(
-                    job_id,
-                    JobStatus.SUCCEEDED,
-                    summary="job handler succeeded",
-                )
-            except BaseException as error:
-                observer = getattr(handler, "on_success_commit_failure", None)
-                if callable(observer):
-                    observer(context, error)
-                raise
+                handler_error = error
+        if isinstance(handler_error, JobCancelledAtCheckpoint):
+            self._service.transition(
+                job_id,
+                JobStatus.CANCELLED,
+                cancel_result="cancelled at safe checkpoint",
+                summary="job cancelled at safe checkpoint",
+            )
+            raise handler_error
+        if handler_error is not None:
+            self._service.transition(
+                job_id,
+                JobStatus.FAILED,
+                failure=FailureInfo(
+                    error_type=type(handler_error).__name__,
+                    message="registered job handler failed; inspect the managed JSONL log",
+                    retryable=False,
+                ),
+                summary="job handler failed",
+            )
+            raise handler_error
+        try:
+            self._service.transition(
+                job_id,
+                JobStatus.SUCCEEDED,
+                summary="job handler succeeded",
+            )
+        except BaseException as error:
+            observer = getattr(handler, "on_success_commit_failure", None)
+            if callable(observer):
+                observer(context, error)
+            raise

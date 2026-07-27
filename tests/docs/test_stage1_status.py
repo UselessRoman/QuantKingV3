@@ -62,9 +62,9 @@ class TestStage1DocsExist:
             _REPO_ROOT / "docs" / "ROADMAP.md",
         ),
     )
-    def test_s1_05_r3_status_is_pending_main_acceptance(self, path: Path) -> None:
+    def test_s1_05_r4_status_is_pending_main_acceptance(self, path: Path) -> None:
         text = _read(path)
-        assert "S1-05-R3 修复已提交、等待主验收" in text
+        assert "S1-05-R4 修复已提交、等待主验收" in text
         assert "S1-05 已主验收" not in text
 
     def test_stage1_tasks_lists_s1_01_through_s1_08(self) -> None:

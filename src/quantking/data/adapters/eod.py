@@ -31,6 +31,7 @@ from quantking.data.adapters.warehouse.verifier import verify_canonical_director
 from quantking.data.eod.artifacts import (
     EodEvidenceWriter,
     verify_eod_success_evidence_deep,
+    verify_eod_terminal_failure,
 )
 from quantking.data.eod.contracts import (
     EOD_JOB_TYPE,
@@ -237,20 +238,25 @@ class EodWorkerHandler:
             )
             for result in completed:
                 self._verify_completed_result(result, command=command)
-        directory = self._evidence.write_failure(
-            job_id=job_id,
+        directory = self._evidence.coordinate_interrupted_failure(
+            job=job,
             request=request,
-            code="STALE_WORKER_RECOVERED",
-            message="expired Worker lease recovered",
-            terminal_status=JobStatus.INTERRUPTED.value,
             failed_at=job.ended_at or self._clock(),
             request_sha256_value=request_sha,
-            completed_datasets=tuple(item.to_dict() for item in completed),
-            replace_uncommitted_success=True,
+            completed_datasets=completed,
+            data_root=self._data_root,
+            uow_factory=self._data_uow,
         )
         service.add_recovery_artifact(
             job_id,
             relative_path=directory.relative_to(self._data_root).as_posix(),
+        )
+        verify_eod_terminal_failure(
+            directory,
+            artifacts_root=directory.parent,
+            data_root=self._data_root,
+            uow_factory=self._data_uow,
+            job=service.get_job(job_id),
         )
 
     def __call__(self, context: WorkerContext) -> None:
@@ -444,6 +450,8 @@ class EodWorkerHandler:
             job_lookup=context.service.get_job,
             recovered_at=self._clock(),
             bind_recovery_artifact=bind_recovery_artifact,
+            data_root=self._data_root,
+            uow_factory=self._data_uow,
         )
         if reusable is not None:
             expected_parent = (
@@ -486,11 +494,18 @@ class EodWorkerHandler:
                     "NO_CHANGE_WITHOUT_BASE",
                     "an empty incremental plan requires a verified base",
                 )
-            return self._result_from_version(
+            result = self._result_from_version(
                 verified_base.version,
                 status="REUSED_UNCHANGED",
                 batch_id=None,
             )
+            self._evidence.write_checkpoint(
+                job_id=context.job_id,
+                request_sha256_value=command.request_sha256,
+                config_sha256=command.config_sha256,
+                result=result,
+            )
+            return result
 
         def chunk_checkpoint() -> None:
             context.checkpoint()

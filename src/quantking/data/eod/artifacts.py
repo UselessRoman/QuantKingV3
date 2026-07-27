@@ -222,22 +222,17 @@ def verify_eod_success_evidence(directory: Path, *, artifacts_root: Path) -> Ver
     )
 
 
-def verify_eod_success_evidence_deep(
-    directory: Path,
+def _verify_completed_results_deep(
+    command: FrozenEodCommand,
+    results: Sequence[EodDatasetResult],
     *,
-    artifacts_root: Path,
     data_root: Path,
     uow_factory: DataSqliteUnitOfWorkFactory,
-) -> VerifiedEodEvidence:
-    """Bind success evidence to PUBLISHED metadata, Warehouse and PASSED quality facts."""
-    verified_evidence = verify_eod_success_evidence(
-        directory,
-        artifacts_root=artifacts_root,
-    )
-    plans = {item.dataset.value: item for item in verified_evidence.frozen_command.datasets}
-    command = verified_evidence.frozen_command
+) -> None:
+    """Bind completed results to PUBLISHED metadata, Warehouse and quality facts."""
+    plans = {item.dataset.value: item for item in command.datasets}
     query = CanonicalQueryAdapter(data_root=data_root, uow_factory=uow_factory)
-    for result in verified_evidence.parsed_result.datasets:
+    for result in results:
         plan = plans[result.dataset]
         try:
             with uow_factory() as uow:
@@ -357,6 +352,26 @@ def verify_eod_success_evidence_deep(
             actual_end = max(coverage[scope]).isoformat()
             if actual_start > required_start or actual_end < required_end:
                 raise EodEvidenceConflictError("EOD output coverage is incomplete")
+
+
+def verify_eod_success_evidence_deep(
+    directory: Path,
+    *,
+    artifacts_root: Path,
+    data_root: Path,
+    uow_factory: DataSqliteUnitOfWorkFactory,
+) -> VerifiedEodEvidence:
+    """Bind success evidence to PUBLISHED metadata, Warehouse and PASSED quality facts."""
+    verified_evidence = verify_eod_success_evidence(
+        directory,
+        artifacts_root=artifacts_root,
+    )
+    _verify_completed_results_deep(
+        verified_evidence.frozen_command,
+        verified_evidence.parsed_result.datasets,
+        data_root=data_root,
+        uow_factory=uow_factory,
+    )
     return verified_evidence
 
 
@@ -505,20 +520,28 @@ def verify_eod_failure_evidence(
     )
 
 
-def verify_eod_terminal_failure(
+def _verify_eod_terminal_failure(
     directory: Path,
     *,
     artifacts_root: Path,
+    data_root: Path,
+    uow_factory: DataSqliteUnitOfWorkFactory,
     job: JobRun,
+    require_artifact_binding: bool,
 ) -> VerifiedEodFailureEvidence:
-    """Bind failure evidence to the exact persisted command and terminal JobRun."""
+    """Bind failure evidence to its command, checkpoints and published lineage."""
     verified = verify_eod_failure_evidence(directory, artifacts_root=artifacts_root)
-    expected_artifact = f"artifacts/eod/{directory.name}"
+    try:
+        relative = (
+            directory.resolve(strict=True).relative_to(data_root.resolve(strict=True)).as_posix()
+        )
+    except (OSError, ValueError) as error:
+        raise EodEvidenceConflictError("terminal failure path is unmanaged") from error
     if (
         verified.failure["job_id"] != job.job_id
         or verified.failure["terminal_status"] != job.status.value
         or job.status not in {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.INTERRUPTED}
-        or expected_artifact not in job.artifacts
+        or (require_artifact_binding and relative not in job.artifacts)
     ):
         raise EodEvidenceConflictError("failure evidence is not bound to terminal JobRun")
     if verified.request.get("schema_version") == "eod-invalid-request-evidence.v1":
@@ -529,9 +552,56 @@ def verify_eod_terminal_failure(
             or dict(raw_fingerprints) != _manifest_fingerprints(job)
         ):
             raise EodEvidenceConflictError("invalid-command fingerprints do not match JobRun")
+        checkpoint_root = artifacts_root / ".checkpoints" / _safe_job_id(job.job_id)
+        if verified.completed_datasets or (
+            checkpoint_root.exists()
+            and (
+                is_reparse_point(checkpoint_root)
+                or not checkpoint_root.is_dir()
+                or any(checkpoint_root.iterdir())
+            )
+        ):
+            raise EodEvidenceConflictError(
+                "invalid-command failure cannot contain completed checkpoints"
+            )
     else:
-        _bind_evidence_command_to_job(_command_from_evidence(verified.request), job=job)
+        command = _command_from_evidence(verified.request)
+        _bind_evidence_command_to_job(command, job=job)
+        _verify_completed_results_deep(
+            command,
+            verified.completed_datasets,
+            data_root=data_root,
+            uow_factory=uow_factory,
+        )
+        checkpoints = EodEvidenceWriter(artifacts_root=artifacts_root).load_checkpoints(
+            job_id=job.job_id,
+            request_sha256_value=command.request_sha256,
+            config_sha256=command.config_sha256,
+        )
+        if checkpoints != verified.completed_datasets:
+            raise EodEvidenceConflictError(
+                "terminal failure completed results do not match checkpoints"
+            )
     return verified
+
+
+def verify_eod_terminal_failure(
+    directory: Path,
+    *,
+    artifacts_root: Path,
+    data_root: Path,
+    uow_factory: DataSqliteUnitOfWorkFactory,
+    job: JobRun,
+) -> VerifiedEodFailureEvidence:
+    """Authoritatively verify one terminal failure and its persisted artifact binding."""
+    return _verify_eod_terminal_failure(
+        directory,
+        artifacts_root=artifacts_root,
+        data_root=data_root,
+        uow_factory=uow_factory,
+        job=job,
+        require_artifact_binding=True,
+    )
 
 
 def _raise_completed_type() -> EodDatasetResult:
@@ -670,6 +740,67 @@ class EodEvidenceWriter:
             results.append(result)
         return tuple(results)
 
+    def coordinate_interrupted_failure(
+        self,
+        *,
+        job: JobRun,
+        request: Mapping[str, object],
+        request_sha256_value: str,
+        completed_datasets: Sequence[EodDatasetResult],
+        failed_at: UtcTimestamp,
+        data_root: Path,
+        uow_factory: DataSqliteUnitOfWorkFactory,
+    ) -> Path:
+        """Create stale-recovery evidence once or strictly reuse existing evidence."""
+        safe_id = _safe_job_id(job.job_id)
+        directory = self._root / f"{safe_id}.incomplete"
+        success = self._root / safe_id
+        expected_completed = tuple(completed_datasets)
+        if success.exists():
+            provisional = verify_eod_success_evidence(success, artifacts_root=self._root)
+            _bind_evidence_command_to_job(provisional.frozen_command, job=job)
+            if provisional.parsed_result.datasets != expected_completed:
+                raise EodEvidenceConflictError(
+                    "provisional success and recovery checkpoints do not match"
+                )
+        if directory.exists():
+            verified = _verify_eod_terminal_failure(
+                directory,
+                artifacts_root=self._root,
+                data_root=data_root,
+                uow_factory=uow_factory,
+                job=job,
+                require_artifact_binding=False,
+            )
+            if (
+                verified.failure["error_code"]
+                not in {
+                    "FINAL_SUCCESS_COMMIT_FAILED",
+                    "STALE_AFTER_PROVISIONAL_SUCCESS",
+                    "STALE_WORKER_RECOVERED",
+                }
+                or verified.completed_datasets != expected_completed
+                or (
+                    verified.failure["error_code"] == "FINAL_SUCCESS_COMMIT_FAILED"
+                    and not success.exists()
+                )
+            ):
+                raise EodEvidenceConflictError(
+                    "existing failure evidence is not a valid stale-recovery continuation"
+                )
+            return directory
+        return self.write_failure(
+            job_id=job.job_id,
+            request=request,
+            code="STALE_WORKER_RECOVERED",
+            message="expired Worker lease recovered",
+            terminal_status=JobStatus.INTERRUPTED.value,
+            failed_at=failed_at,
+            request_sha256_value=request_sha256_value,
+            completed_datasets=tuple(item.to_dict() for item in expected_completed),
+            replace_uncommitted_success=True,
+        )
+
     def find_reusable_published(
         self,
         *,
@@ -679,6 +810,8 @@ class EodEvidenceWriter:
         job_lookup: Callable[[str], JobRun],
         recovered_at: UtcTimestamp,
         bind_recovery_artifact: Callable[[str, Path], None],
+        data_root: Path,
+        uow_factory: DataSqliteUnitOfWorkFactory,
     ) -> EodDatasetResult | None:
         """Find one terminal prior job's strictly checkpointed published result."""
         matches: list[EodDatasetResult] = []
@@ -708,6 +841,8 @@ class EodEvidenceWriter:
                 verified_failure = verify_eod_terminal_failure(
                     directory,
                     artifacts_root=self._root,
+                    data_root=data_root,
+                    uow_factory=uow_factory,
                     job=source_job,
                 )
                 request = verified_failure.request
@@ -727,13 +862,10 @@ class EodEvidenceWriter:
                 config_sha256=config_sha256,
             )
             checkpoint_by_dataset = {item.dataset: item for item in checkpoints}
-            published_candidates = {
-                item.dataset: item for item in candidates if item.status == "PUBLISHED_NEW"
-            }
+            candidate_by_dataset = {item.dataset: item for item in candidates}
             if (
-                len(published_candidates)
-                != sum(item.status == "PUBLISHED_NEW" for item in candidates)
-                or checkpoint_by_dataset != published_candidates
+                len(candidate_by_dataset) != len(candidates)
+                or checkpoint_by_dataset != candidate_by_dataset
             ):
                 raise EodEvidenceConflictError(
                     "terminal evidence and published checkpoints are incomplete or conflicting"

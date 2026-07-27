@@ -62,7 +62,7 @@ def test_quality_and_source_matrix_documents_exist() -> None:
 def test_s1_05_is_offline_implemented_but_external_and_later_tasks_remain_unauthorized() -> None:
     tasks = _read("docs/stage1/TASKS.md")
     assert "S1-05" in tasks
-    assert "S1-05-R3 修复已提交、等待主验收" in tasks
+    assert "S1-05-R4 修复已提交、等待主验收" in tasks
     assert "已获离线实施授权" in tasks
     assert "S1-06～S1-08 未开始、未获授权" in tasks
     contracts = _read("docs/stage1/DATA_CONTRACTS.md")
