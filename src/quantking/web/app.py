@@ -18,7 +18,7 @@ from quantking.common.errors import (
     QuantKingError,
 )
 from quantking.common.time import Clock
-from quantking.web.api import InvalidRequestError, create_api_router
+from quantking.web.api import InvalidEodRequestError, InvalidRequestError, create_api_router
 from quantking.web.ports import EodCommandPort, JobCommandPort, JobReadPort
 
 
@@ -58,6 +58,12 @@ def _install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(InvalidRequestError)
     async def invalid_request(_request: Request, _error_value: InvalidRequestError) -> JSONResponse:
         return _error(400, "invalid_request", "事件查询范围无效。")
+
+    @app.exception_handler(InvalidEodRequestError)
+    async def invalid_eod_request(
+        _request: Request, _error_value: InvalidEodRequestError
+    ) -> JSONResponse:
+        return _error(400, "invalid_eod_request", "EOD 请求参数无效。")
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(

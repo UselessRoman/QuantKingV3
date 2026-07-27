@@ -32,6 +32,10 @@ class InvalidRequestError(Exception):
         super().__init__(message)
 
 
+class InvalidEodRequestError(Exception):
+    """Stable EOD command validation failure without internal input echo."""
+
+
 def _now(clock: Clock | None) -> str:
     value = clock() if clock is not None else datetime.now(UTC)
     return value.astimezone(UTC).isoformat().removesuffix("+00:00") + "Z"
@@ -67,16 +71,19 @@ def create_api_router(
             response: Response,
             idempotency_key: str = Header(alias="Idempotency-Key"),
         ) -> EodEnqueueResponse:
-            outcome = eod_command_port.enqueue(
-                EodRunRequest(
-                    start_date=body.start_date,
-                    end_date=body.end_date,
-                    datasets=body.datasets,
-                    publish_intent=body.publish_intent,
-                ),
-                idempotency_key=idempotency_key,
-                requester="web-api",
-            )
+            try:
+                outcome = eod_command_port.enqueue(
+                    EodRunRequest(
+                        start_date=body.start_date,
+                        end_date=body.end_date,
+                        datasets=body.datasets,
+                        publish_intent=body.publish_intent,
+                    ),
+                    idempotency_key=idempotency_key,
+                    requester="web-api",
+                )
+            except (TypeError, ValueError) as error:
+                raise InvalidEodRequestError from error
             response.headers["Location"] = f"/api/jobs/{outcome.job_id}"
             return EodEnqueueResponse(
                 job_id=outcome.job_id,

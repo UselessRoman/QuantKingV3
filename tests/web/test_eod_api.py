@@ -91,6 +91,44 @@ def test_post_rejects_missing_key_unknown_fields_and_conflicting_replay(
     assert "path" not in conflict.text.casefold()
 
 
+def test_post_maps_domain_validation_to_stable_sanitized_400(
+    job_service: JobService,
+) -> None:
+    command = _command(job_service)
+    app = create_app(job_service, eod_command_port=command)
+    with TestClient(app) as client:
+        inverted = client.post(
+            "/api/data/eod-runs",
+            json={
+                **_body(),
+                "start_date": "2026-07-16",
+                "end_date": "2026-07-15",
+            },
+            headers={"Idempotency-Key": "inverted"},
+        )
+        duplicate = client.post(
+            "/api/data/eod-runs",
+            json={**_body(), "datasets": ["exchange_calendar", "exchange_calendar"]},
+            headers={"Idempotency-Key": "duplicate"},
+        )
+        unsafe_key = client.post(
+            "/api/data/eod-runs",
+            json=_body(),
+            headers={"Idempotency-Key": r"password=hunter2 E:\private"},
+        )
+
+    for response in (inverted, duplicate, unsafe_key):
+        assert response.status_code == 400
+        assert response.json() == {
+            "error": {
+                "code": "invalid_eod_request",
+                "message": "EOD 请求参数无效。",
+            }
+        }
+        assert "hunter2" not in response.text
+        assert "E:\\" not in response.text
+
+
 def test_cancel_requires_and_checks_row_version(job_service: JobService) -> None:
     command = _command(job_service)
     created = command.enqueue(
