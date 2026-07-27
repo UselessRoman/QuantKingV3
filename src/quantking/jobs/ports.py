@@ -51,7 +51,7 @@ class JobRepository(Protocol):
         stale_before: UtcTimestamp,
         at: UtcTimestamp,
         reason: str,
-    ) -> int: ...
+    ) -> tuple[str, ...]: ...
 
     def heartbeat(self, job_id: str, *, at: UtcTimestamp, minimum_interval_ms: int) -> bool: ...
 
@@ -77,6 +77,14 @@ class JobRepository(Protocol):
     ) -> JobRun: ...
 
     def add_artifact(self, job_id: str, *, relative_path: str, at: UtcTimestamp) -> JobRun: ...
+
+    def add_recovery_artifact(
+        self,
+        job_id: str,
+        *,
+        relative_path: str,
+        at: UtcTimestamp,
+    ) -> JobRun: ...
 
     def set_non_cancellable_phase(
         self,

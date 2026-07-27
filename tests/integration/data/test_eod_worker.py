@@ -46,6 +46,7 @@ from quantking.data.eod.artifacts import (
     verify_eod_failure_evidence,
     verify_eod_success_evidence,
     verify_eod_success_evidence_deep,
+    verify_eod_terminal_failure,
     verify_eod_terminal_success,
 )
 from quantking.data.eod.contracts import (
@@ -79,6 +80,57 @@ from quantking.jobs.worker import Worker, WorkerRegistry
 from quantking.runtime import build_eod_runtime
 
 _NOW = UtcTimestamp(datetime(2026, 7, 15, 18, 0, tzinfo=UTC))
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+
+
+def _resign_success_directory(
+    directory: Path,
+    *,
+    request: dict[str, object] | None = None,
+    result: dict[str, object] | None = None,
+) -> None:
+    request_value = request or json.loads((directory / "request.json").read_bytes())
+    result_value = result or json.loads((directory / "result.json").read_bytes())
+    request_value["request_sha256"] = hashlib.sha256(
+        _canonical_bytes(request_value["request"])
+    ).hexdigest()
+    request_value["config_sha256"] = hashlib.sha256(
+        _canonical_bytes(request_value["config"])
+    ).hexdigest()
+    request_bytes = _canonical_bytes(request_value)
+    result_bytes = _canonical_bytes(result_value)
+    job_id = result_value["job_id"]
+    unsigned = {
+        "schema_version": "eod-evidence-manifest.v1",
+        "job_id": job_id,
+        "request_sha256": hashlib.sha256(request_bytes).hexdigest(),
+        "result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+        "authority_state": "PROVISIONAL_UNTIL_JOB_SUCCEEDED",
+    }
+    manifest_sha = hashlib.sha256(_canonical_bytes(unsigned)).hexdigest()
+    (directory / "request.json").write_bytes(request_bytes)
+    (directory / "result.json").write_bytes(result_bytes)
+    (directory / "manifest.json").write_bytes(
+        _canonical_bytes({**unsigned, "manifest_sha256": manifest_sha})
+    )
+    (directory / "COMPLETE").write_bytes(
+        _canonical_bytes(
+            {
+                "schema_version": "eod-evidence-complete.v1",
+                "job_id": job_id,
+                "manifest_sha256": manifest_sha,
+            }
+        )
+    )
 
 
 def _settings(tmp_path: Path) -> AppSettings:
@@ -594,6 +646,11 @@ def test_worker_rejects_tampered_persisted_manifest_before_gateway(tmp_path: Pat
     assert len(job.artifacts) == 1
     assert "REQUEST_MANIFEST_INVALID" in (tmp_path / job.artifacts[0] / "failure.json").read_text(
         encoding="utf-8"
+    )
+    verify_eod_terminal_failure(
+        tmp_path / job.artifacts[0],
+        artifacts_root=tmp_path / "artifacts" / "eod",
+        job=job,
     )
 
 
@@ -1280,6 +1337,188 @@ def test_deep_success_verifier_rejects_resigned_frozen_command_attack(
         )
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["adapter_version", "code_version", "rule_version", "references"],
+)
+def test_terminal_success_rejects_self_signed_command_not_matching_job(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    gateway = CalendarGateway()
+    jobs, command, worker = _runtime(tmp_path, gateway)
+    job_id = _enqueue(command, key=f"terminal-binding-{field}")
+    worker.run(job_id)
+    job = jobs.get_job(job_id)
+    directory = tmp_path / job.artifacts[0]
+    request = json.loads((directory / "request.json").read_bytes())
+    if field == "references":
+        request["config"]["datasets"]["exchange_calendar"]["references"] = {
+            "forged": {
+                "dataset": "exchange_calendar",
+                "version_id": "data_version:99999999-9999-4999-8999-999999999999",
+                "content_sha256": "9" * 64,
+            }
+        }
+    elif field in {"code_version", "rule_version"}:
+        request["config"][field] = f"forged-{field}"
+        request["version_manifest"][field] = f"forged-{field}"
+    else:
+        request["config"][field] = f"forged-{field}"
+    _resign_success_directory(directory, request=request)
+
+    if field != "references":
+        with pytest.raises(EodEvidenceConflictError):
+            verify_eod_success_evidence_deep(
+                directory,
+                artifacts_root=tmp_path / "artifacts" / "eod",
+                data_root=tmp_path,
+                uow_factory=DataSqliteUnitOfWorkFactory(
+                    create_data_engine(tmp_path / "metadata.db", busy_timeout_ms=250)
+                ),
+            )
+    with pytest.raises(EodEvidenceConflictError):
+        verify_eod_terminal_success(
+            directory,
+            artifacts_root=tmp_path / "artifacts" / "eod",
+            data_root=tmp_path,
+            uow_factory=DataSqliteUnitOfWorkFactory(
+                create_data_engine(tmp_path / "metadata.db", busy_timeout_ms=250)
+            ),
+            job=job,
+        )
+
+
+@pytest.mark.parametrize("field", ["code_version", "rule_version", "references"])
+def test_terminal_failure_rejects_self_signed_command_not_matching_job(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    gateway = CalendarGateway(complete=False)
+    jobs, command, worker = _runtime(tmp_path, gateway)
+    job_id = _enqueue(command, key=f"terminal-failure-binding-{field}")
+    with pytest.raises(EodExecutionError):
+        worker.run(job_id)
+    job = jobs.get_job(job_id)
+    directory = tmp_path / job.artifacts[0]
+    request = json.loads((directory / "request.json").read_bytes())
+    if field == "references":
+        request["config"]["datasets"]["exchange_calendar"]["references"] = {
+            "forged": {
+                "dataset": "exchange_calendar",
+                "version_id": "data_version:99999999-9999-4999-8999-999999999999",
+                "content_sha256": "9" * 64,
+            }
+        }
+    else:
+        request["config"][field] = f"forged-{field}"
+        request["version_manifest"][field] = f"forged-{field}"
+    request["config_sha256"] = hashlib.sha256(_canonical_bytes(request["config"])).hexdigest()
+    (directory / "request.json").write_bytes(_canonical_bytes(request))
+    verify_eod_failure_evidence(
+        directory,
+        artifacts_root=tmp_path / "artifacts" / "eod",
+    )
+
+    with pytest.raises(EodEvidenceConflictError):
+        verify_eod_terminal_failure(
+            directory,
+            artifacts_root=tmp_path / "artifacts" / "eod",
+            job=job,
+        )
+
+
+def test_final_succeeded_commit_failure_is_recovered_without_republish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = CalendarGateway()
+    jobs, command, worker = _runtime(tmp_path, gateway)
+    job_id = _enqueue(command, key="final-commit-first")
+    original_transition = jobs.transition
+    armed = True
+
+    def fail_final_transition(job_id_value, target, **kwargs):
+        nonlocal armed
+        if armed and target is JobStatus.SUCCEEDED:
+            armed = False
+            raise RuntimeError("synthetic final commit failure")
+        return original_transition(job_id_value, target, **kwargs)
+
+    monkeypatch.setattr(jobs, "transition", fail_final_transition)
+    with pytest.raises(RuntimeError, match="final commit"):
+        worker.run(job_id)
+
+    first = jobs.get_job(job_id)
+    assert first.status is JobStatus.RUNNING
+    assert (tmp_path / "artifacts" / "eod" / f"{job_id.replace(':', '_')}.incomplete").is_dir()
+    monkeypatch.setattr(jobs, "transition", original_transition)
+    assert (
+        jobs.recover_stale_running_jobs(
+            reason="expired after final commit failure",
+            stale_before=UtcTimestamp(_NOW.value + timedelta(minutes=2)),
+            at=UtcTimestamp(_NOW.value + timedelta(minutes=3)),
+        )
+        == 1
+    )
+
+    retry_id = _enqueue(command, key="final-commit-retry")
+    worker.run(retry_id)
+    with sqlite3.connect(tmp_path / "metadata.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ingestion_batches").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM dataset_versions").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM quality_runs").fetchone() == (1,)
+    assert gateway.calls == 1
+
+
+def test_recovered_provisional_success_without_failure_is_strictly_reused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway = CalendarGateway()
+    jobs, command, worker = _runtime(tmp_path, gateway)
+    job_id = _enqueue(command, key="hard-exit-first")
+    handler = worker._registry.resolve("data.eod.v1")  # type: ignore[attr-defined]
+    wrapper_registry = WorkerRegistry()
+    wrapper_registry.register("data.eod.v1", lambda context: handler(context))
+    wrapper_worker = Worker(jobs, wrapper_registry, worker_id="hard-exit-worker")
+    original_transition = jobs.transition
+
+    def fail_final_transition(job_id_value, target, **kwargs):
+        if target is JobStatus.SUCCEEDED:
+            raise RuntimeError("synthetic process exit at final commit")
+        return original_transition(job_id_value, target, **kwargs)
+
+    monkeypatch.setattr(jobs, "transition", fail_final_transition)
+    with pytest.raises(RuntimeError, match="process exit"):
+        wrapper_worker.run(job_id)
+    assert not (tmp_path / "artifacts" / "eod" / f"{job_id.replace(':', '_')}.incomplete").exists()
+    monkeypatch.setattr(jobs, "transition", original_transition)
+    recovered_job_ids = jobs.recover_stale_running_job_ids(
+        reason="hard-exit lease expired",
+        stale_before=UtcTimestamp(_NOW.value + timedelta(minutes=2)),
+        at=UtcTimestamp(_NOW.value + timedelta(minutes=3)),
+    )
+    assert recovered_job_ids == (job_id,)
+    assert isinstance(handler, EodWorkerHandler)
+    handler.recover_interrupted(jobs, job_id)
+    recovered_before_retry = jobs.get_job(job_id)
+    assert f"artifacts/eod/{job_id.replace(':', '_')}.incomplete" in (
+        recovered_before_retry.artifacts
+    )
+
+    retry_id = _enqueue(command, key="hard-exit-retry")
+    worker.run(retry_id)
+    recovered = jobs.get_job(job_id)
+    assert recovered.status is JobStatus.INTERRUPTED
+    assert f"artifacts/eod/{job_id.replace(':', '_')}.incomplete" in recovered.artifacts
+    with sqlite3.connect(tmp_path / "metadata.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM ingestion_batches").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM dataset_versions").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM quality_runs").fetchone() == (1,)
+    assert gateway.calls == 1
+
+
 def test_cancelled_eod_records_cancelled_failure_evidence(tmp_path: Path) -> None:
     gateway = CalendarGateway()
     jobs, command, worker = _runtime(tmp_path, gateway)
@@ -1304,3 +1543,8 @@ def test_cancelled_eod_records_cancelled_failure_evidence(tmp_path: Path) -> Non
     assert job.status is JobStatus.CANCELLED
     assert verified.failure["terminal_status"] == "CANCELLED"
     assert verified.failure["error_code"] == "CANCELLED"
+    verify_eod_terminal_failure(
+        tmp_path / job.artifacts[0],
+        artifacts_root=tmp_path / "artifacts" / "eod",
+        job=job,
+    )

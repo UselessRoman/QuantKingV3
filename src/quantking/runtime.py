@@ -49,7 +49,7 @@ from quantking.web.app import create_app
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = _REPOSITORY_ROOT / "configs" / "default.toml"
-EOD_CODE_VERSION = "s1-05-r2"
+EOD_CODE_VERSION = "s1-05-r3"
 EXPECTED_DATABASE_REVISION = "20260722_0009"
 WORKER_LEASE_TIMEOUT = timedelta(minutes=2)
 
@@ -63,6 +63,7 @@ class EodRuntime:
     eod_commands: EodCommandService
     registry: WorkerRegistry
     worker: Worker
+    eod_handler: EodWorkerHandler
     web_app: object
     data_uow_factory: DataSqliteUnitOfWorkFactory
 
@@ -172,6 +173,7 @@ def build_eod_runtime(
         eod_commands=commands,
         registry=registry,
         worker=worker,
+        eod_handler=handler,
         web_app=web_app,
         data_uow_factory=data_uow,
     )

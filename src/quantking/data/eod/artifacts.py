@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -29,6 +29,7 @@ from quantking.data.eod.frozen import (
     FrozenEodCommand,
     FrozenEodCommandError,
     parse_evidence_command,
+    parse_frozen_eod_command,
 )
 from quantking.data.incremental import IncrementalPlanRequest, build_incremental_plan
 from quantking.data.models import (
@@ -126,6 +127,28 @@ def _command_from_evidence(value: Mapping[str, object]) -> FrozenEodCommand:
 
 def _request_from_evidence(value: Mapping[str, object]) -> EodRunRequest:
     return _command_from_evidence(value).request
+
+
+def _command_from_job(job: JobRun) -> FrozenEodCommand:
+    try:
+        return parse_frozen_eod_command(
+            job_type=job.job_type,
+            input_manifest=job.input_manifest,
+            config_manifest=job.config_manifest,
+            version_manifest=job.version_manifest,
+        )
+    except FrozenEodCommandError as error:
+        raise EodEvidenceConflictError("persisted JobRun command is invalid") from error
+
+
+def _bind_evidence_command_to_job(
+    evidence_command: FrozenEodCommand,
+    *,
+    job: JobRun,
+) -> None:
+    job_command = _command_from_job(job)
+    if _json_bytes(evidence_command.evidence_request) != _json_bytes(job_command.evidence_request):
+        raise EodEvidenceConflictError("EOD evidence command does not match persisted JobRun")
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,11 +251,18 @@ def verify_eod_success_evidence_deep(
         if (
             version.status is not DatasetVersionStatus.PUBLISHED
             or version.dataset.value != result.dataset
+            or version.schema_version != plan.schema_version
+            or version.code_version != command.code_version
+            or version.rule_version != command.rule_version
             or (str(version.parent_version_id) if version.parent_version_id is not None else None)
             != result.parent_version_id
             or version.content_sha256 != result.content_sha256
             or version.manifest_sha256 != result.manifest_sha256
             or str(version.quality_run_id) != result.quality_run_id
+            or (
+                result.status == "PUBLISHED_NEW"
+                and tuple(str(item) for item in version.input_batch_ids) != (result.batch_id,)
+            )
             or (result.status == "PUBLISHED_NEW" and result.parent_version_id != frozen_parent)
         ):
             raise EodEvidenceConflictError("EOD result version credentials do not match")
@@ -289,6 +319,12 @@ def verify_eod_success_evidence_deep(
             verified_directory.manifest_sha != result.manifest_sha256
             or verified_directory.manifest.get("content_sha256") != result.content_sha256
             or verified_directory.manifest.get("version_id") != result.version_id
+            or verified_directory.manifest.get("schema_version") != plan.schema_version
+            or verified_directory.manifest.get("code_version") != command.code_version
+            or verified_directory.manifest.get("rule_version") != command.rule_version
+            or verified_directory.manifest.get("parent_version_id") != result.parent_version_id
+            or verified_directory.manifest.get("input_batch_ids")
+            != [str(item) for item in version.input_batch_ids]
         ):
             raise EodEvidenceConflictError("EOD Warehouse credentials do not match")
         table = query.query_by_id(
@@ -333,6 +369,8 @@ def verify_eod_terminal_success(
     job: JobRun,
 ) -> VerifiedEodEvidence:
     """Accept success as authoritative only after the durable Job commits it."""
+    shallow = verify_eod_success_evidence(directory, artifacts_root=artifacts_root)
+    _bind_evidence_command_to_job(shallow.frozen_command, job=job)
     verified = verify_eod_success_evidence_deep(
         directory,
         artifacts_root=artifacts_root,
@@ -359,6 +397,14 @@ class VerifiedEodFailureEvidence:
     request: Mapping[str, object]
     failure: Mapping[str, object]
     completed_datasets: tuple[EodDatasetResult, ...]
+
+
+def _manifest_fingerprints(job: JobRun) -> dict[str, str]:
+    return {
+        "input_manifest_sha256": _sha(_json_bytes(job.input_manifest)),
+        "config_manifest_sha256": _sha(_json_bytes(job.config_manifest)),
+        "version_manifest_sha256": _sha(_json_bytes(job.version_manifest)),
+    }
 
 
 def verify_eod_failure_evidence(
@@ -420,7 +466,28 @@ def verify_eod_failure_evidence(
     try:
         parsed = _request_from_evidence(request)
     except EodEvidenceConflictError:
-        if request.get("schema_version") != "eod-invalid-request-evidence.v1":
+        raw_fingerprints = request.get("manifest_fingerprints")
+        if (
+            set(request)
+            != {
+                "schema_version",
+                "job_id",
+                "request_manifest_valid",
+                "manifest_fingerprints",
+            }
+            or request.get("schema_version") != "eod-invalid-request-evidence.v1"
+            or request.get("request_manifest_valid") is not False
+            or not isinstance(raw_fingerprints, Mapping)
+        ):
+            raise
+        if set(raw_fingerprints) != {
+            "input_manifest_sha256",
+            "config_manifest_sha256",
+            "version_manifest_sha256",
+        } or any(
+            not isinstance(item, str) or _SHA256.fullmatch(item) is None
+            for item in raw_fingerprints.values()
+        ):
             raise
     else:
         if request_sha != request_sha256(parsed):
@@ -436,6 +503,35 @@ def verify_eod_failure_evidence(
         failure=failure,
         completed_datasets=completed,
     )
+
+
+def verify_eod_terminal_failure(
+    directory: Path,
+    *,
+    artifacts_root: Path,
+    job: JobRun,
+) -> VerifiedEodFailureEvidence:
+    """Bind failure evidence to the exact persisted command and terminal JobRun."""
+    verified = verify_eod_failure_evidence(directory, artifacts_root=artifacts_root)
+    expected_artifact = f"artifacts/eod/{directory.name}"
+    if (
+        verified.failure["job_id"] != job.job_id
+        or verified.failure["terminal_status"] != job.status.value
+        or job.status not in {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.INTERRUPTED}
+        or expected_artifact not in job.artifacts
+    ):
+        raise EodEvidenceConflictError("failure evidence is not bound to terminal JobRun")
+    if verified.request.get("schema_version") == "eod-invalid-request-evidence.v1":
+        raw_fingerprints = verified.request.get("manifest_fingerprints")
+        if (
+            verified.request.get("job_id") != job.job_id
+            or not isinstance(raw_fingerprints, Mapping)
+            or dict(raw_fingerprints) != _manifest_fingerprints(job)
+        ):
+            raise EodEvidenceConflictError("invalid-command fingerprints do not match JobRun")
+    else:
+        _bind_evidence_command_to_job(_command_from_evidence(verified.request), job=job)
+    return verified
 
 
 def _raise_completed_type() -> EodDatasetResult:
@@ -580,28 +676,87 @@ class EodEvidenceWriter:
         request_sha256_value: str,
         config_sha256: str,
         dataset: str,
+        job_lookup: Callable[[str], JobRun],
+        recovered_at: UtcTimestamp,
+        bind_recovery_artifact: Callable[[str, Path], None],
     ) -> EodDatasetResult | None:
-        """Find one prior failed job's checkpointed published result by frozen command."""
+        """Find one terminal prior job's strictly checkpointed published result."""
         matches: list[EodDatasetResult] = []
         for directory in sorted(self._root.iterdir(), key=lambda item: item.name):
-            if not directory.name.endswith(".incomplete"):
+            if directory.name.startswith(".") or directory.name.endswith(".writing"):
                 continue
             if is_reparse_point(directory):
-                raise EodEvidenceConflictError("failure evidence directory is unsafe")
-            verified = verify_eod_failure_evidence(
-                directory,
-                artifacts_root=self._root,
-            )
+                raise EodEvidenceConflictError("terminal evidence directory is unsafe")
+            if directory.name.endswith(".incomplete"):
+                verified_failure = verify_eod_failure_evidence(
+                    directory,
+                    artifacts_root=self._root,
+                )
+                source_job_id = str(verified_failure.failure["job_id"])
+            elif directory.is_dir():
+                verified_success = verify_eod_success_evidence(
+                    directory,
+                    artifacts_root=self._root,
+                )
+                source_job_id = verified_success.parsed_result.job_id
+            else:
+                continue
+            source_job = job_lookup(source_job_id)
+            if source_job.status not in {JobStatus.FAILED, JobStatus.INTERRUPTED}:
+                continue
+            if directory.name.endswith(".incomplete"):
+                verified_failure = verify_eod_terminal_failure(
+                    directory,
+                    artifacts_root=self._root,
+                    job=source_job,
+                )
+                request = verified_failure.request
+                candidates = verified_failure.completed_datasets
+            else:
+                _bind_evidence_command_to_job(verified_success.frozen_command, job=source_job)
+                request = verified_success.request
+                candidates = verified_success.parsed_result.datasets
             if (
-                verified.failure.get("request_sha256") != request_sha256_value
-                or verified.request.get("config_sha256") != config_sha256
+                request.get("request_sha256") != request_sha256_value
+                or request.get("config_sha256") != config_sha256
             ):
                 continue
-            matches.extend(
-                item
-                for item in verified.completed_datasets
-                if item.dataset == dataset and item.status == "PUBLISHED_NEW"
+            checkpoints = self.load_checkpoints(
+                job_id=source_job_id,
+                request_sha256_value=request_sha256_value,
+                config_sha256=config_sha256,
             )
+            checkpoint_by_dataset = {item.dataset: item for item in checkpoints}
+            published_candidates = {
+                item.dataset: item for item in candidates if item.status == "PUBLISHED_NEW"
+            }
+            if (
+                len(published_candidates)
+                != sum(item.status == "PUBLISHED_NEW" for item in candidates)
+                or checkpoint_by_dataset != published_candidates
+            ):
+                raise EodEvidenceConflictError(
+                    "terminal evidence and published checkpoints are incomplete or conflicting"
+                )
+            if not directory.name.endswith(".incomplete"):
+                failure_directory = self._root / f"{directory.name}.incomplete"
+                if not failure_directory.exists():
+                    failure_directory = self.write_failure(
+                        job_id=source_job_id,
+                        request=request,
+                        code="STALE_AFTER_PROVISIONAL_SUCCESS",
+                        message="stale Worker recovered after provisional success",
+                        terminal_status=source_job.status.value,
+                        failed_at=recovered_at,
+                        request_sha256_value=request_sha256_value,
+                        completed_datasets=tuple(item.to_dict() for item in candidates),
+                        replace_uncommitted_success=True,
+                    )
+                    bind_recovery_artifact(source_job_id, failure_directory)
+            for item in candidates:
+                if item.dataset != dataset or item.status != "PUBLISHED_NEW":
+                    continue
+                matches.append(item)
         unique = {item.version_id: item for item in matches}
         if len(unique) > 1:
             raise EodEvidenceConflictError(
@@ -669,5 +824,6 @@ __all__ = [
     "verify_eod_failure_evidence",
     "verify_eod_success_evidence",
     "verify_eod_success_evidence_deep",
+    "verify_eod_terminal_failure",
     "verify_eod_terminal_success",
 ]

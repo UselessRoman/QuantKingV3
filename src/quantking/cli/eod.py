@@ -258,11 +258,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         runtime = build_eod_runtime(load_runtime_settings())
         if arguments and arguments[0] == "worker-run":
             now = utc_now()
-            runtime.jobs.recover_stale_running_jobs(
+            recovered_job_ids = runtime.jobs.recover_stale_running_job_ids(
                 reason="expired Worker lease recovered at explicit Worker startup",
                 stale_before=UtcTimestamp(now.value - WORKER_LEASE_TIMEOUT),
                 at=now,
             )
+            for job_id in recovered_job_ids:
+                runtime.eod_handler.recover_interrupted(runtime.jobs, job_id)
     except Exception:
         _write(
             sys.stdout,

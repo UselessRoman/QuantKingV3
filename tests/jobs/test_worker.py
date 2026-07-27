@@ -3,11 +3,14 @@ from __future__ import annotations
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from quantking.common.errors import InvalidJobTransitionError, UpstreamJobNotReadyError
+from quantking.common.time import UtcTimestamp
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     create_sqlite_engine,
@@ -178,3 +181,54 @@ def test_two_workers_competing_for_one_job_execute_handler_once(tmp_path: Path) 
     assert calls == 1
     assert service.get_job(job_id).status is JobStatus.SUCCEEDED
     assert sum(isinstance(item, InvalidJobTransitionError) for item in outcomes) == 1
+
+
+def test_active_long_handler_renews_lease_across_stale_threshold(tmp_path: Path) -> None:
+    database = tmp_path / "long-lease.db"
+    initialize_database(database)
+    now = datetime(2026, 7, 15, 1, 0, tzinfo=UTC)
+    service = JobService(
+        SqliteUnitOfWorkFactory(create_sqlite_engine(database, busy_timeout_ms=250)),
+        clock=lambda: now,
+    )
+    job_id = _create(service, "long-lease")
+    registry = WorkerRegistry()
+
+    class ManualLeaseRenewer:
+        callback = None
+
+        @contextmanager
+        def maintain(self, callback):
+            self.callback = callback
+            callback()
+            yield
+
+        def tick(self) -> None:
+            assert self.callback is not None
+            self.callback()
+
+    renewer = ManualLeaseRenewer()
+
+    def handler(context: WorkerContext) -> None:
+        del context
+        nonlocal now
+        now += timedelta(minutes=3)
+        renewer.tick()
+        assert (
+            service.recover_stale_running_jobs(
+                reason="must not recover active lease",
+                stale_before=UtcTimestamp(now - timedelta(minutes=2)),
+                at=UtcTimestamp(now),
+            )
+            == 0
+        )
+
+    registry.register("synthetic", handler)
+    Worker(
+        service,
+        registry,
+        worker_id="worker-lease",
+        lease_renewer=renewer,
+    ).run(job_id)
+
+    assert service.get_job(job_id).status is JobStatus.SUCCEEDED

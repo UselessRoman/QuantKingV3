@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
+from typing import Protocol
 
 from quantking.common.errors import UnknownJobTypeError
 from quantking.jobs.models import FailureInfo, JobStatus
@@ -73,6 +75,44 @@ class WorkerContext:
 JobHandler = Callable[[WorkerContext], object]
 
 
+class LeaseRenewer(Protocol):
+    """Maintain a persisted Worker lease for the complete handler lifecycle."""
+
+    def maintain(self, heartbeat: Callable[[], bool]) -> AbstractContextManager[None]: ...
+
+
+class ThreadLeaseRenewer:
+    """Low-frequency daemon renewer; interval must remain below the recovery lease."""
+
+    def __init__(self, *, interval_seconds: float = 30.0) -> None:
+        if not isinstance(interval_seconds, (int, float)) or not 0 < interval_seconds < 120:
+            raise ValueError("heartbeat interval must be positive and below the Worker lease")
+        self._interval = float(interval_seconds)
+
+    @contextmanager
+    def maintain(self, heartbeat: Callable[[], bool]) -> Iterator[None]:
+        stop = threading.Event()
+        failure: list[BaseException] = []
+
+        def renew() -> None:
+            while not stop.wait(self._interval):
+                try:
+                    heartbeat()
+                except BaseException as error:
+                    failure.append(error)
+                    stop.set()
+
+        thread = threading.Thread(target=renew, name="quantking-worker-lease", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=self._interval + 1.0)
+        if failure:
+            raise RuntimeError("Worker heartbeat lease renewal failed") from failure[0]
+
+
 class WorkerRegistry:
     """Explicit job-type-to-handler map; discovery and schedulers are out of scope."""
 
@@ -99,12 +139,20 @@ class WorkerRegistry:
 class Worker:
     """Claim atomically, run the handler outside transactions, then persist outcome."""
 
-    def __init__(self, service: JobService, registry: WorkerRegistry, *, worker_id: str) -> None:
+    def __init__(
+        self,
+        service: JobService,
+        registry: WorkerRegistry,
+        *,
+        worker_id: str,
+        lease_renewer: LeaseRenewer | None = None,
+    ) -> None:
         if not isinstance(worker_id, str) or not worker_id.strip():
             raise ValueError("worker_id must be non-empty text")
         self._service = service
         self._registry = registry
         self._worker_id = worker_id
+        self._lease_renewer = lease_renewer or ThreadLeaseRenewer()
 
     def run(self, job_id: str) -> None:
         job = self._service.get_job(job_id)
@@ -117,28 +165,39 @@ class Worker:
             summary="worker claimed job",
         )
         context = WorkerContext(self._service, job_id)
-        try:
-            result = handler(context)
-            if result is not None:
-                raise TypeError("registered job handlers must return None")
-        except JobCancelledAtCheckpoint:
-            self._service.transition(
-                job_id,
-                JobStatus.CANCELLED,
-                cancel_result="cancelled at safe checkpoint",
-                summary="job cancelled at safe checkpoint",
-            )
-            raise
-        except BaseException as error:
-            self._service.transition(
-                job_id,
-                JobStatus.FAILED,
-                failure=FailureInfo(
-                    error_type=type(error).__name__,
-                    message="registered job handler failed; inspect the managed JSONL log",
-                    retryable=False,
-                ),
-                summary="job handler failed",
-            )
-            raise
-        self._service.transition(job_id, JobStatus.SUCCEEDED, summary="job handler succeeded")
+        with self._lease_renewer.maintain(context.heartbeat):
+            try:
+                result = handler(context)
+                if result is not None:
+                    raise TypeError("registered job handlers must return None")
+            except JobCancelledAtCheckpoint:
+                self._service.transition(
+                    job_id,
+                    JobStatus.CANCELLED,
+                    cancel_result="cancelled at safe checkpoint",
+                    summary="job cancelled at safe checkpoint",
+                )
+                raise
+            except BaseException as error:
+                self._service.transition(
+                    job_id,
+                    JobStatus.FAILED,
+                    failure=FailureInfo(
+                        error_type=type(error).__name__,
+                        message="registered job handler failed; inspect the managed JSONL log",
+                        retryable=False,
+                    ),
+                    summary="job handler failed",
+                )
+                raise
+            try:
+                self._service.transition(
+                    job_id,
+                    JobStatus.SUCCEEDED,
+                    summary="job handler succeeded",
+                )
+            except BaseException as error:
+                observer = getattr(handler, "on_success_commit_failure", None)
+                if callable(observer):
+                    observer(context, error)
+                raise

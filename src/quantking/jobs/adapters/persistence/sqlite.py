@@ -491,7 +491,7 @@ class SQLiteJobRepository:
         stale_before: UtcTimestamp,
         at: UtcTimestamp,
         reason: str,
-    ) -> int:
+    ) -> tuple[str, ...]:
         rows = list(
             self._session.scalars(
                 select(JobRunRow).where(
@@ -500,7 +500,7 @@ class SQLiteJobRepository:
                 )
             )
         )
-        recovered = 0
+        recovered: list[str] = []
         for row in rows:
             failure = FailureInfo(
                 error_type="WorkerInterrupted",
@@ -523,7 +523,7 @@ class SQLiteJobRepository:
             )
             if getattr(outcome, "rowcount", 0) != 1:
                 continue
-            recovered += 1
+            recovered.append(row.job_id)
             self._event(
                 job_id=row.job_id,
                 event_type="job_interrupted",
@@ -532,7 +532,7 @@ class SQLiteJobRepository:
                 summary=reason,
                 at=at,
             )
-        return recovered
+        return tuple(recovered)
 
     def heartbeat(self, job_id: str, *, at: UtcTimestamp, minimum_interval_ms: int) -> bool:
         row = self._row(job_id)
@@ -543,8 +543,22 @@ class SQLiteJobRepository:
             elapsed_ms = (at.value - previous.value).total_seconds() * 1000
             if elapsed_ms < minimum_interval_ms:
                 return False
-        row.heartbeat_at = at.to_iso()
-        row.row_version += 1
+        updated_job_id = self._session.scalar(
+            update(JobRunRow)
+            .where(
+                JobRunRow.job_id == job_id,
+                JobRunRow.status == JobStatus.RUNNING.value,
+                JobRunRow.row_version == row.row_version,
+                JobRunRow.heartbeat_at == row.heartbeat_at,
+            )
+            .values(
+                heartbeat_at=at.to_iso(),
+                row_version=row.row_version + 1,
+            )
+            .returning(JobRunRow.job_id)
+        )
+        if updated_job_id is None:
+            return False
         self._event(
             job_id=job_id,
             event_type="job_heartbeat",
@@ -687,6 +701,38 @@ class SQLiteJobRepository:
             stage=row.stage,
             progress=row.progress,
             summary="managed artifact recorded",
+            at=at,
+        )
+        return self._domain(row)
+
+    def add_recovery_artifact(
+        self,
+        job_id: str,
+        *,
+        relative_path: str,
+        at: UtcTimestamp,
+    ) -> JobRun:
+        row = self._row(job_id)
+        domain = self._domain(row)
+        if domain.status not in {JobStatus.FAILED, JobStatus.INTERRUPTED}:
+            raise JobConflictError("recovery artifacts require a failed or interrupted job")
+        if (
+            not relative_path.startswith("artifacts/eod/")
+            or not relative_path.endswith(".incomplete")
+            or "\\" in relative_path
+            or ".." in relative_path.split("/")
+        ):
+            raise ValueError("recovery artifact path is invalid")
+        if relative_path in domain.artifacts:
+            return domain
+        row.artifacts_json = _json_sequence((*domain.artifacts, relative_path))
+        row.row_version += 1
+        self._event(
+            job_id=job_id,
+            event_type="job_recovery_artifact",
+            stage=row.stage,
+            progress=row.progress,
+            summary="interrupted EOD failure evidence attached",
             at=at,
         )
         return self._domain(row)

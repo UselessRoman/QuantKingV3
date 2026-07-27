@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -193,6 +195,47 @@ def test_stale_recovery_preserves_fresh_heartbeat(tmp_path: Path) -> None:
 
     assert recovered == 0
     assert service.get_job(job_id).status is JobStatus.RUNNING
+
+
+def test_heartbeat_and_stale_recovery_race_has_one_legal_winner(tmp_path: Path) -> None:
+    database = tmp_path / "lease-race.db"
+    initialize_database(database)
+    heartbeat_service = _service(database)
+    recovery_service = _service(database)
+    job_id = _create(heartbeat_service)
+    started = UtcTimestamp(datetime(2026, 7, 15, 1, 0, tzinfo=UTC))
+    heartbeat_service.transition(
+        job_id,
+        JobStatus.RUNNING,
+        worker_id="racing-worker",
+        at=started,
+    )
+    barrier = threading.Barrier(2)
+    current = UtcTimestamp(started.value + timedelta(minutes=3))
+
+    def heartbeat() -> bool:
+        barrier.wait(timeout=5)
+        return heartbeat_service.heartbeat(job_id, at=current)
+
+    def recover() -> int:
+        barrier.wait(timeout=5)
+        return recovery_service.recover_stale_running_jobs(
+            reason="racing stale recovery",
+            stale_before=UtcTimestamp(started.value + timedelta(minutes=2)),
+            at=current,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        heartbeat_result = pool.submit(heartbeat)
+        recovery_result = pool.submit(recover)
+        renewed = heartbeat_result.result(timeout=10)
+        recovered = recovery_result.result(timeout=10)
+
+    job = heartbeat_service.get_job(job_id)
+    assert (renewed, recovered, job.status) in {
+        (True, 0, JobStatus.RUNNING),
+        (False, 1, JobStatus.INTERRUPTED),
+    }
 
 
 def test_heartbeat_and_duplicate_progress_are_rate_limited(tmp_path: Path) -> None:

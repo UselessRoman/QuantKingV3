@@ -7,7 +7,7 @@ S1-02 已于 2026-07-18 在提交 `79f9fa3e682e212cf74e7886a04c6fb52158f302`
 完成主验收，证据见 [S1-02 主验收证据](S1-02_ACCEPTANCE.md)。S1-03-R1 修复中/待主验收。
 S1-04 已于 2026-07-22 在提交 `2f99491e9dc410acf85ca81c131a77cae08d0cc3`
 完成主验收，证据见 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。
-S1-05-R2 修复已提交，等待主验收；S1-06～S1-08 未开始、未获授权。
+S1-05-R3 修复已提交、等待主验收；S1-06～S1-08 未开始、未获授权。
 
 真实 XTQuant 和备用源验证仍延期并阻断 Stage 1 最终验收。
 
@@ -61,7 +61,7 @@ S1-05-R2 修复已提交，等待主验收；S1-06～S1-08 未开始、未获授
 
 ## S1-05：EOD、Worker、CLI 与 API
 
-- **状态**：S1-05-R2 修复已提交，等待主验收；真实网络、QMT 和正式数据根仍未授权。
+- **状态**：S1-05-R3 修复已提交、等待主验收；真实网络、QMT 和正式数据根仍未授权。
 - **授权**：本实现仅使用已获离线实施授权的范围；该授权不包含任何真实外部访问。
 - **范围**：Web/CLI 手动触发的同一 EOD 应用服务、持久 Worker handler、幂等命令和 API；
   串联已完成的 Warehouse、XTQuant 与质量能力。
@@ -73,6 +73,11 @@ S1-05-R2 修复已提交，等待主验收；S1-06～S1-08 未开始、未获授
   按过期 heartbeat 租约条件恢复。Worker 与 evidence 共用严格 frozen-command parser，
   lookback 按实际 FetchChunk 权威切片替换，post-success 故障同时保留 forensic success
   与权威 failure evidence。
+- **R3 闭环**：权威终态 verifier 以共享 frozen-command parser 将 success/failure
+  证据精确绑定 JobRun 的 input/config/version manifests，并反查 DatasetVersion、
+  QualityRun 和 Warehouse 凭证。Worker 在完整 handler 生命周期持续续租；最终成功提交
+  故障或进程退出经显式 stale recovery 生成 INTERRUPTED 证据，新幂等键重试严格复用
+  checkpoint 对应的唯一已发布版本，不重复抓取、质量运行或发布。
 - **R1 完整性**：增量配置冻结并严格复验显式 base version；新候选按 Canonical 主键合并
   完整基表后执行全表质量和发布，直接父版本固定为 base。全覆盖请求返回
   `REUSED_UNCHANGED`，不会创建空 batch/version；新快照返回 `PUBLISHED_NEW`。

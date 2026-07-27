@@ -189,6 +189,29 @@ class JobService:
         occurred_at = at or self._now()
         if stale_before.value > occurred_at.value:
             raise ValueError("stale_before must not follow recovery time")
+        return len(
+            self._execute(
+                lambda repository: repository.recover_stale_running(
+                    stale_before=stale_before,
+                    at=occurred_at,
+                    reason=reason,
+                )
+            )
+        )
+
+    def recover_stale_running_job_ids(
+        self,
+        *,
+        reason: str,
+        stale_before: UtcTimestamp,
+        at: UtcTimestamp | None = None,
+    ) -> tuple[str, ...]:
+        _required_text(reason, field="reason")
+        if not isinstance(stale_before, UtcTimestamp):
+            raise TypeError("stale_before must be a UtcTimestamp")
+        occurred_at = at or self._now()
+        if stale_before.value > occurred_at.value:
+            raise ValueError("stale_before must not follow recovery time")
         return self._execute(
             lambda repository: repository.recover_stale_running(
                 stale_before=stale_before,
@@ -268,6 +291,23 @@ class JobService:
         occurred_at = at or self._now()
         return self._execute(
             lambda repository: repository.add_artifact(
+                job_id,
+                relative_path=relative_path,
+                at=occurred_at,
+            )
+        )
+
+    def add_recovery_artifact(
+        self,
+        job_id: str,
+        *,
+        relative_path: str,
+        at: UtcTimestamp | None = None,
+    ) -> JobRun:
+        _required_text(relative_path, field="relative_path")
+        occurred_at = at or self._now()
+        return self._execute(
+            lambda repository: repository.add_recovery_artifact(
                 job_id,
                 relative_path=relative_path,
                 at=occurred_at,

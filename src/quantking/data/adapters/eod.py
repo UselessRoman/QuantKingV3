@@ -36,6 +36,8 @@ from quantking.data.eod.contracts import (
     EOD_JOB_TYPE,
     EodDatasetResult,
     EodRunResult,
+    canonical_json,
+    sha256_text,
 )
 from quantking.data.eod.frozen import (
     FrozenEodCommand as _FrozenCommand,
@@ -74,7 +76,8 @@ from quantking.data.quality.models import (
 from quantking.data.quality.runner import QualityRunner
 from quantking.data.schemas import descriptor_for
 from quantking.jobs.jsonl import JsonLinesHandler
-from quantking.jobs.models import JobRun
+from quantking.jobs.models import JobRun, JobStatus
+from quantking.jobs.services import JobService
 from quantking.jobs.worker import JobCancelledAtCheckpoint, WorkerContext, WorkerRegistry
 
 
@@ -113,6 +116,19 @@ def _reconstruct(job: JobRun) -> _FrozenCommand:
     except FrozenEodCommandError as error:
         code = "REQUEST_MANIFEST_INVALID" if "request" in str(error) else "CONFIG_MANIFEST_INVALID"
         raise EodExecutionError(code, "request and config reconstruction failed") from error
+
+
+def _invalid_evidence_request(job: JobRun) -> Mapping[str, object]:
+    return {
+        "schema_version": "eod-invalid-request-evidence.v1",
+        "job_id": job.job_id,
+        "request_manifest_valid": False,
+        "manifest_fingerprints": {
+            "input_manifest_sha256": sha256_text(canonical_json(dict(job.input_manifest))),
+            "config_manifest_sha256": sha256_text(canonical_json(dict(job.config_manifest))),
+            "version_manifest_sha256": sha256_text(canonical_json(dict(job.version_manifest))),
+        },
+    }
 
 
 class EodWorkerHandler:
@@ -155,6 +171,87 @@ class EodWorkerHandler:
     def _fault(self, point: str) -> None:
         if self._fault_injector is not None:
             self._fault_injector(point)
+
+    def on_success_commit_failure(
+        self,
+        context: WorkerContext,
+        error: BaseException,
+    ) -> None:
+        """Preserve an auditable INTERRUPTED outcome after final Job commit failure."""
+        del error
+        job = context.service.get_job(context.job_id)
+        if job.status is JobStatus.SUCCEEDED:
+            return
+        if job.status not in {JobStatus.RUNNING, JobStatus.FAILED, JobStatus.INTERRUPTED}:
+            raise EodExecutionError(
+                "FINAL_SUCCESS_COMMIT_CONFLICT",
+                "final Job state conflicts with published evidence",
+            )
+        command = _reconstruct(job)
+        completed = list(
+            self._evidence.load_checkpoints(
+                job_id=context.job_id,
+                request_sha256_value=command.request_sha256,
+                config_sha256=command.config_sha256,
+            )
+        )
+        for result in completed:
+            self._verify_completed_result(result, command=command)
+        directory = self._evidence.write_failure(
+            job_id=context.job_id,
+            request=command.evidence_request,
+            code="FINAL_SUCCESS_COMMIT_FAILED",
+            message="final Job success commit failed",
+            terminal_status=(
+                JobStatus.INTERRUPTED.value if job.status is JobStatus.RUNNING else job.status.value
+            ),
+            failed_at=self._clock(),
+            request_sha256_value=command.request_sha256,
+            completed_datasets=tuple(item.to_dict() for item in completed),
+            replace_uncommitted_success=True,
+        )
+        relative_path = directory.relative_to(self._data_root).as_posix()
+        if job.status is JobStatus.RUNNING:
+            context.service.add_artifact(context.job_id, relative_path=relative_path)
+        else:
+            context.service.add_recovery_artifact(context.job_id, relative_path=relative_path)
+
+    def recover_interrupted(self, service: JobService, job_id: str) -> None:
+        """Materialize authoritative failure evidence after explicit stale recovery."""
+        job = service.get_job(job_id)
+        if job.job_type != EOD_JOB_TYPE or job.status is not JobStatus.INTERRUPTED:
+            return
+        try:
+            command = _reconstruct(job)
+        except EodExecutionError:
+            request = _invalid_evidence_request(job)
+            request_sha = "0" * 64
+            completed: tuple[EodDatasetResult, ...] = ()
+        else:
+            request = command.evidence_request
+            request_sha = command.request_sha256
+            completed = self._evidence.load_checkpoints(
+                job_id=job_id,
+                request_sha256_value=command.request_sha256,
+                config_sha256=command.config_sha256,
+            )
+            for result in completed:
+                self._verify_completed_result(result, command=command)
+        directory = self._evidence.write_failure(
+            job_id=job_id,
+            request=request,
+            code="STALE_WORKER_RECOVERED",
+            message="expired Worker lease recovered",
+            terminal_status=JobStatus.INTERRUPTED.value,
+            failed_at=job.ended_at or self._clock(),
+            request_sha256_value=request_sha,
+            completed_datasets=tuple(item.to_dict() for item in completed),
+            replace_uncommitted_success=True,
+        )
+        service.add_recovery_artifact(
+            job_id,
+            relative_path=directory.relative_to(self._data_root).as_posix(),
+        )
 
     def __call__(self, context: WorkerContext) -> None:
         job = context.service.get_job(context.job_id)
@@ -248,7 +345,7 @@ class EodWorkerHandler:
                     config_sha256=command.config_sha256,
                 ):
                     if all(item.dataset != recovered.dataset for item in completed):
-                        self._verify_completed_result(recovered)
+                        self._verify_completed_result(recovered, command=command)
                         completed.append(recovered)
                 order = {name: index for index, name in enumerate(command.request.datasets)}
                 completed.sort(key=lambda item: order[item.dataset])
@@ -258,13 +355,7 @@ class EodWorkerHandler:
                 else ("CANCELLED" if isinstance(error, JobCancelledAtCheckpoint) else "EOD_FAILED")
             )
             evidence_request = (
-                command.evidence_request
-                if command is not None
-                else {
-                    "schema_version": "eod-invalid-request-evidence.v1",
-                    "job_id": context.job_id,
-                    "request_manifest_valid": False,
-                }
+                command.evidence_request if command is not None else _invalid_evidence_request(job)
             )
             terminal_status = (
                 "CANCELLED" if isinstance(error, JobCancelledAtCheckpoint) else "FAILED"
@@ -340,10 +431,19 @@ class EodWorkerHandler:
         verified_base: _VerifiedBase | None,
         published_by_dataset: Mapping[DatasetKind, EodDatasetResult],
     ) -> EodDatasetResult:
+        def bind_recovery_artifact(job_id: str, path: Path) -> None:
+            context.service.add_recovery_artifact(
+                job_id,
+                relative_path=path.relative_to(self._data_root).as_posix(),
+            )
+
         reusable = self._evidence.find_reusable_published(
             request_sha256_value=command.request_sha256,
             config_sha256=command.config_sha256,
             dataset=plan.dataset.value,
+            job_lookup=context.service.get_job,
+            recovered_at=self._clock(),
+            bind_recovery_artifact=bind_recovery_artifact,
         )
         if reusable is not None:
             expected_parent = (
@@ -354,7 +454,7 @@ class EodWorkerHandler:
                     "RETRY_RESULT_CONFLICT",
                     "reusable published result has different lineage",
                 )
-            self._verify_completed_result(reusable)
+            self._verify_completed_result(reusable, command=command)
             self._evidence.write_checkpoint(
                 job_id=context.job_id,
                 request_sha256_value=command.request_sha256,
@@ -802,7 +902,12 @@ class EodWorkerHandler:
         self._verify_completed_result(result)
         return result
 
-    def _verify_completed_result(self, result: EodDatasetResult) -> None:
+    def _verify_completed_result(
+        self,
+        result: EodDatasetResult,
+        *,
+        command: _FrozenCommand | None = None,
+    ) -> None:
         with self._data_uow() as uow:
             version = uow.data.get_version(result.version_id)
             quality = uow.data.get_quality_run(result.quality_run_id)
@@ -813,6 +918,7 @@ class EodWorkerHandler:
         )
         if (
             version.status is not DatasetVersionStatus.PUBLISHED
+            or version.dataset.value != result.dataset
             or version.content_sha256 != result.content_sha256
             or version.manifest_sha256 != result.manifest_sha256
             or (None if version.parent_version_id is None else str(version.parent_version_id))
@@ -827,6 +933,42 @@ class EodWorkerHandler:
             raise EodExecutionError(
                 "PUBLISH_CREDENTIAL_MISMATCH",
                 "completed result credentials do not match",
+            )
+        if command is None:
+            return
+        plans = {item.dataset.value: item for item in command.datasets}
+        plan = plans.get(result.dataset)
+        expected_parent = (
+            None if plan is None or plan.base_version is None else plan.base_version.version_id
+        )
+        if (
+            plan is None
+            or version.schema_version != plan.schema_version
+            or version.code_version != command.code_version
+            or version.rule_version != command.rule_version
+            or result.parent_version_id != expected_parent
+            or verified.manifest.get("schema_version") != plan.schema_version
+            or verified.manifest.get("code_version") != command.code_version
+            or verified.manifest.get("rule_version") != command.rule_version
+            or verified.manifest.get("parent_version_id") != expected_parent
+            or verified.manifest.get("input_batch_ids")
+            != [str(item) for item in version.input_batch_ids]
+            or (
+                result.status == "PUBLISHED_NEW"
+                and tuple(str(item) for item in version.input_batch_ids) != (result.batch_id,)
+            )
+            or (
+                result.status == "REUSED_UNCHANGED"
+                and (
+                    plan.base_version is None
+                    or result.version_id != plan.base_version.version_id
+                    or result.batch_id is not None
+                )
+            )
+        ):
+            raise EodExecutionError(
+                "PUBLISH_CREDENTIAL_MISMATCH",
+                "completed result does not match the frozen command",
             )
 
     def _references(
