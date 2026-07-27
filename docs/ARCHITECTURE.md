@@ -189,7 +189,8 @@ S1-02 已于 2026-07-18 在提交 `79f9fa3e682e212cf74e7886a04c6fb52158f302`
 该适配器只产生经验证的 Canonical 候选表，五类未获源码证据支持的供应商能力会安全失败，
 不会发布 DatasetVersion。S1-04 已于 2026-07-22 在提交
 `2f99491e9dc410acf85ca81c131a77cae08d0cc3` 完成主验收；真实备用源验证仍须逐项授权。
-S1-05-R5 修复已提交、等待主验收。CLI 和 Web API 共用同一个 EOD Command Service，
+S1-05 已于 2026-07-27 在提交 `e580d6963e01b1301dc26f29ed57a0b5b4770a0f`
+完成主验收。CLI 和 Web API 共用同一个 EOD Command Service，
 只创建持久 `data.eod.v1` Job；显式 Worker 按 `job_id` claim 后在事务外串联现有
 ingestion、QualityRunner 和 CanonicalPublishCoordinator，并生成 SHA/COMPLETE 绑定的
 不可覆盖 EOD 证据。没有后台轮询器、Windows 计划任务、自动切源或隐式发布。
@@ -211,6 +212,6 @@ R4 使已有 failure evidence 的 stale recovery 成为严格幂等协调：证�
 R5 将 handler 的发布后观察与终态 evidence 收敛到同一套状态感知 completed-result
 验证：新发布版本直接绑定冻结 base 和本次 batch；未变化结果则指向冻结 base 本身，
 同时保持该 base 的真实历史 parent 与原始 input batches，禁止自指或伪造父血缘。
-S1-06～S1-08 尚未实现且未获授权。各模块状态以
+S1-06 已获离线实施授权但尚未实现；S1-07～S1-08 尚未实现且未获授权。各模块状态以
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)、[路线图](ROADMAP.md) 和 Stage 1
 任务卡为准。

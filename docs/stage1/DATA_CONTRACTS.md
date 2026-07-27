@@ -6,7 +6,10 @@
 进行中，但尚未完成；S1-03-R1 修复中/待主验收。S1-04 已于 2026-07-22 在提交
 `2f99491e9dc410acf85ca81c131a77cae08d0cc3` 完成主验收，证据见
 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。真实 XTQuant 样本验证仍须逐项授权，合成数据不能
-标生产可用。S1-05-R5 修复已提交、等待主验收；S1-06～S1-08 未开始、未获授权。
+标生产可用。S1-05 已于 2026-07-27 在提交
+`e580d6963e01b1301dc26f29ed57a0b5b4770a0f` 完成主验收，证据见
+[S1-05 主验收证据](S1-05_ACCEPTANCE.md)。S1-06 已获离线实施授权、尚未开始；
+S1-07～S1-08 未开始、未获授权。
 
 本文件固化 Stage 1 六类 Canonical 数据集的可执行合同。权威来源是 `src/quantking/data/schemas.py`（框架无关描述符）和 `src/quantking/data/adapters/canonical_schema.py`（PyArrow 映射与验证）。文档不得替代 schema 与契约测试。
 

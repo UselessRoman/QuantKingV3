@@ -20,6 +20,7 @@ _REQUIRED_STAGE1_DOCS = (
     "ACCEPTANCE.md",
     "DATA_CONTRACTS.md",
     "S1-02_ACCEPTANCE.md",
+    "S1-05_ACCEPTANCE.md",
 )
 
 # The canonical status phrase required across updated documents.
@@ -62,10 +63,18 @@ class TestStage1DocsExist:
             _REPO_ROOT / "docs" / "ROADMAP.md",
         ),
     )
-    def test_s1_05_r4_status_is_pending_main_acceptance(self, path: Path) -> None:
+    def test_s1_05_is_main_accepted_and_s1_06_is_authorized(self, path: Path) -> None:
         text = _read(path)
-        assert "S1-05-R5 修复已提交、等待主验收" in text
-        assert "S1-05 已主验收" not in text
+        assert "e580d6963e01b1301dc26f29ed57a0b5b4770a0f" in text
+        assert "S1-05" in text and "完成主验收" in text
+        assert "S1-06" in text and "已获离线实施授权" in text
+
+    def test_s1_05_acceptance_evidence_is_complete(self) -> None:
+        evidence = _read(_STAGE1_DIR / "S1-05_ACCEPTANCE.md")
+        assert "e580d6963e01b1301dc26f29ed57a0b5b4770a0f" in evidence
+        assert "918 passed, 2 skipped, 3 deselected" in evidence
+        assert "20260722_0009" in evidence
+        assert "Stage 1 尚未完成" in evidence
 
     def test_stage1_tasks_lists_s1_01_through_s1_08(self) -> None:
         text = _read(_STAGE1_DIR / "TASKS.md")
