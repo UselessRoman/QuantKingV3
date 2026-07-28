@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from fastapi import APIRouter, Header, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from quantking.common.time import Clock
+from quantking.data.center import DataCenterPage, validate_cursor
 from quantking.data.eod.contracts import EodRunRequest
+from quantking.data.models import (
+    DatasetKind,
+    DatasetVersionStatus,
+    DataSource,
+    IngestionBatchStatus,
+    QualityRunStatus,
+    SourceOverrideStatus,
+)
+from quantking.jobs.models import JobStatus
+from quantking.web.data_center import DataCenterReadPort
 from quantking.web.ports import EodCommandPort, JobCommandPort, JobReadPort
 from quantking.web.schemas import (
     CancelJobBody,
@@ -47,6 +58,7 @@ def create_api_router(
     eod_command_port: EodCommandPort | None = None,
     job_command_port: JobCommandPort | None = None,
     clock: Clock | None = None,
+    data_center_port: DataCenterReadPort | None = None,
 ) -> APIRouter:
     """Create routes without opening a database or resolving a filesystem path."""
     router = APIRouter(prefix="/api")
@@ -58,6 +70,186 @@ def create_api_router(
     @router.get("/jobs/{job_id}", response_model=JobResponse)
     def get_job(job_id: str) -> JobResponse:
         return map_job(job_port.get_job(job_id))
+
+    if data_center_port is not None:
+
+        def page(value: DataCenterPage) -> dict[str, object]:
+            return {
+                "items": list(value.items),
+                "next_cursor": value.next_cursor,
+            }
+
+        @router.get("/data/summary")
+        def data_summary() -> object:
+            return data_center_port.summary()
+
+        @router.get("/data/sources")
+        def data_sources() -> object:
+            return data_center_port.sources()
+
+        @router.get("/data/batches")
+        def data_batches(
+            dataset: DatasetKind | None = None,
+            source: DataSource | None = None,
+            status: IngestionBatchStatus | None = None,
+            started_from: datetime | None = None,
+            started_to: datetime | None = None,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=100),
+        ) -> object:
+            validate_cursor(cursor, "batches")
+            return page(
+                data_center_port.list_batches(
+                    dataset=dataset.value if dataset else None,
+                    source=source.value if source else None,
+                    status=status.value if status else None,
+                    started_from=started_from.isoformat() if started_from else None,
+                    started_to=started_to.isoformat() if started_to else None,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
+
+        @router.get("/data/versions")
+        def data_versions(
+            dataset: DatasetKind | None = None,
+            status: DatasetVersionStatus | None = None,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=100),
+        ) -> object:
+            validate_cursor(cursor, "versions")
+            return page(
+                data_center_port.list_versions(
+                    dataset=dataset.value if dataset else None,
+                    status=status.value if status else None,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
+
+        @router.get("/data/versions/{version_id}")
+        def data_version(version_id: str) -> object:
+            return data_center_port.get_version(version_id)
+
+        @router.get("/data/versions/{version_id}/preview")
+        def data_preview(
+            version_id: str,
+            fields: list[str] | None = None,
+            codes: list[str] | None = None,
+            start_date: date | None = None,
+            end_date: date | None = None,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=200),
+        ) -> object:
+            validate_cursor(cursor, f"preview:{version_id}")
+            return page(
+                data_center_port.preview(
+                    version_id=version_id,
+                    fields=fields,
+                    codes=codes,
+                    start_date=start_date.isoformat() if start_date else None,
+                    end_date=end_date.isoformat() if end_date else None,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
+
+        @router.get("/data/quality-runs")
+        def quality_runs(
+            version_id: str | None = None,
+            status: QualityRunStatus | None = None,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=100),
+        ) -> object:
+            validate_cursor(cursor, "quality")
+            return page(
+                data_center_port.list_quality_runs(
+                    version_id=version_id,
+                    status=status.value if status else None,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
+
+        @router.get("/data/quality-runs/{run_id}")
+        def quality_run(run_id: str) -> object:
+            return data_center_port.get_quality_run(run_id)
+
+        @router.get("/data/difference-reports")
+        def difference_reports(
+            version_id: str | None = None,
+            primary_source: DataSource | None = None,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=100),
+        ) -> object:
+            validate_cursor(cursor, "differences")
+            return page(
+                data_center_port.list_difference_reports(
+                    version_id=version_id,
+                    primary_source=primary_source.value if primary_source else None,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
+
+        @router.get("/data/difference-reports/{report_id}")
+        def difference_report(report_id: str) -> object:
+            return data_center_port.get_difference_report(report_id)
+
+        @router.get("/data/difference-reports/{report_id}/rows")
+        def difference_report_rows(
+            report_id: str,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=100),
+        ) -> object:
+            validate_cursor(cursor, f"difference-rows:{report_id}")
+            return page(
+                data_center_port.difference_rows(report_id=report_id, cursor=cursor, limit=limit)
+            )
+
+        @router.get("/data/source-overrides")
+        def source_overrides(
+            dataset: DatasetKind | None = None,
+            status: SourceOverrideStatus | None = None,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=100),
+        ) -> object:
+            validate_cursor(cursor, "overrides")
+            return page(
+                data_center_port.list_source_overrides(
+                    dataset=dataset.value if dataset else None,
+                    status=status.value if status else None,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
+
+        @router.get("/data/source-overrides/{override_id}")
+        def source_override(override_id: str) -> object:
+            return data_center_port.get_source_override(override_id)
+
+        @router.get("/data/failures")
+        def data_failures(
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=100),
+        ) -> object:
+            validate_cursor(cursor, "failures")
+            return page(data_center_port.list_failures(cursor=cursor, limit=limit))
+
+        @router.get("/data/eod-runs")
+        def eod_runs(
+            status: JobStatus | None = None,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=100),
+        ) -> object:
+            validate_cursor(cursor, "eod")
+            return page(
+                data_center_port.list_eod_runs(
+                    status=status.value if status else None,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
 
     if eod_command_port is not None:
 

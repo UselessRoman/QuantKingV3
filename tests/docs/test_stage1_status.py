@@ -63,11 +63,11 @@ class TestStage1DocsExist:
             _REPO_ROOT / "docs" / "ROADMAP.md",
         ),
     )
-    def test_s1_05_is_main_accepted_and_s1_06_is_authorized(self, path: Path) -> None:
+    def test_s1_05_is_main_accepted_and_s1_06_is_submitted(self, path: Path) -> None:
         text = _read(path)
         assert "e580d6963e01b1301dc26f29ed57a0b5b4770a0f" in text
         assert "S1-05" in text and "完成主验收" in text
-        assert "S1-06" in text and "已获离线实施授权" in text
+        assert "S1-06" in text and "离线实现已提交" in text
 
     def test_s1_05_acceptance_evidence_is_complete(self) -> None:
         evidence = _read(_STAGE1_DIR / "S1-05_ACCEPTANCE.md")

@@ -65,7 +65,7 @@ def test_s1_05_is_main_accepted_but_external_and_later_tasks_remain_unauthorized
     assert "e580d6963e01b1301dc26f29ed57a0b5b4770a0f" in tasks
     assert "完成主验收" in tasks
     assert "已获离线实施授权" in tasks
-    assert "S1-06 已获离线实施授权、尚未开始" in tasks
+    assert "S1-06 离线实现已提交、等待主验收" in tasks
     assert "S1-07～S1-08 未开始、未获授权" in tasks
     contracts = _read("docs/stage1/DATA_CONTRACTS.md")
     # 真实 XTQuant 样本验证仍须逐项授权

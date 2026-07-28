@@ -40,8 +40,31 @@ export interface EventPage {
   next_cursor: number;
 }
 
+export interface CursorPage<T = Record<string, unknown>> {
+  items: T[];
+  next_cursor: string | null;
+}
+
+export interface EodRequest {
+  start_date: string;
+  end_date: string;
+  datasets: string[];
+  publish_intent: "PUBLISH_AFTER_QUALITY";
+  base_versions: Record<string, string>;
+}
+
+export interface EodEnqueueResponse {
+  job_id: string;
+  status: string;
+  row_version: number;
+  created: boolean;
+}
+
 export interface WebApi {
   getHealth(): Promise<HealthResponse>;
   getJob(jobId: string): Promise<JobResponse>;
   getEvents(afterEventId: number): Promise<EventPage>;
+  getData?(path: string): Promise<unknown>;
+  enqueueEod?(request: EodRequest, idempotencyKey: string): Promise<EodEnqueueResponse>;
+  cancelJob?(jobId: string, rowVersion: number, reason: string): Promise<JobResponse>;
 }

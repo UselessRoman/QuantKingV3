@@ -18,6 +18,15 @@ class JobRepository(Protocol):
 
     def get(self, job_id: str) -> JobRun: ...
 
+    def list_page(
+        self,
+        *,
+        job_type: str | None,
+        status: JobStatus | None,
+        before: tuple[str, str] | None,
+        limit: int,
+    ) -> list[JobRun]: ...
+
     def transition(
         self,
         job_id: str,

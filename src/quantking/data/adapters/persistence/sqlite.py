@@ -24,7 +24,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Self
 
-from sqlalchemy import Engine, delete, select
+from sqlalchemy import Engine, and_, delete, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from quantking.common.errors import (
@@ -695,6 +695,45 @@ class DataRepository:
             raise InvalidIdError("ingestion batch does not exist", context={"batch_id": batch_id})
         return _batch_domain(row)
 
+    def list_batches_page(
+        self,
+        *,
+        dataset: DatasetKind | None,
+        source: DataSource | None,
+        status: IngestionBatchStatus | None,
+        started_from: str | None,
+        started_to: str | None,
+        before: tuple[str, str] | None,
+        limit: int,
+    ) -> list[IngestionBatch]:
+        """Return one newest-first keyset page without materialising the table."""
+        statement = select(IngestionBatchRow)
+        if dataset is not None:
+            statement = statement.where(IngestionBatchRow.dataset == dataset.value)
+        if source is not None:
+            statement = statement.where(IngestionBatchRow.source == source.value)
+        if status is not None:
+            statement = statement.where(IngestionBatchRow.status == status.value)
+        if started_from is not None:
+            statement = statement.where(IngestionBatchRow.started_at >= started_from)
+        if started_to is not None:
+            statement = statement.where(IngestionBatchRow.started_at <= started_to)
+        if before is not None:
+            timestamp, stable_id = before
+            statement = statement.where(
+                or_(
+                    IngestionBatchRow.started_at < timestamp,
+                    and_(
+                        IngestionBatchRow.started_at == timestamp,
+                        IngestionBatchRow.batch_id < stable_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(
+            IngestionBatchRow.started_at.desc(), IngestionBatchRow.batch_id.desc()
+        ).limit(limit)
+        return [_batch_domain(row) for row in self._session.scalars(statement)]
+
     # -- versions ----------------------------------------------------------
 
     def save_version(self, version: DatasetVersion) -> DatasetVersion:
@@ -799,6 +838,35 @@ class DataRepository:
             statement = statement.where(DatasetVersionRow.status == status.value)
         return [_version_domain(self._session, row) for row in self._session.scalars(statement)]
 
+    def list_versions_page(
+        self,
+        *,
+        dataset: DatasetKind | None,
+        status: DatasetVersionStatus | None,
+        before: tuple[str, str] | None,
+        limit: int,
+    ) -> list[DatasetVersion]:
+        statement = select(DatasetVersionRow)
+        if dataset is not None:
+            statement = statement.where(DatasetVersionRow.dataset == dataset.value)
+        if status is not None:
+            statement = statement.where(DatasetVersionRow.status == status.value)
+        if before is not None:
+            timestamp, stable_id = before
+            statement = statement.where(
+                or_(
+                    DatasetVersionRow.created_at < timestamp,
+                    and_(
+                        DatasetVersionRow.created_at == timestamp,
+                        DatasetVersionRow.version_id < stable_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(
+            DatasetVersionRow.created_at.desc(), DatasetVersionRow.version_id.desc()
+        ).limit(limit)
+        return [_version_domain(self._session, row) for row in self._session.scalars(statement)]
+
     # -- quality runs ------------------------------------------------------
 
     def save_quality_run(self, run: QualityRun) -> QualityRun:
@@ -856,6 +924,35 @@ class DataRepository:
             statement = statement.where(QualityRunRow.version_id == version_id)
         if status is not None:
             statement = statement.where(QualityRunRow.status == status.value)
+        return [_quality_run_domain(self._session, row) for row in self._session.scalars(statement)]
+
+    def list_quality_runs_page(
+        self,
+        *,
+        version_id: str | None,
+        status: QualityRunStatus | None,
+        before: tuple[str, str] | None,
+        limit: int,
+    ) -> list[QualityRun]:
+        statement = select(QualityRunRow)
+        if version_id is not None:
+            statement = statement.where(QualityRunRow.version_id == version_id)
+        if status is not None:
+            statement = statement.where(QualityRunRow.status == status.value)
+        if before is not None:
+            timestamp, stable_id = before
+            statement = statement.where(
+                or_(
+                    QualityRunRow.started_at < timestamp,
+                    and_(
+                        QualityRunRow.started_at == timestamp,
+                        QualityRunRow.run_id < stable_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(
+            QualityRunRow.started_at.desc(), QualityRunRow.run_id.desc()
+        ).limit(limit)
         return [_quality_run_domain(self._session, row) for row in self._session.scalars(statement)]
 
     # -- difference reports ----------------------------------------------
@@ -1044,6 +1141,35 @@ class DataRepository:
             statement = statement.where(DifferenceReportRow.primary_source == primary_source.value)
         return [_difference_domain(row) for row in self._session.scalars(statement)]
 
+    def list_difference_reports_page(
+        self,
+        *,
+        version_id: str | None,
+        primary_source: DataSource | None,
+        before: tuple[str, str] | None,
+        limit: int,
+    ) -> list[DifferenceReport]:
+        statement = select(DifferenceReportRow)
+        if version_id is not None:
+            statement = statement.where(DifferenceReportRow.version_id == version_id)
+        if primary_source is not None:
+            statement = statement.where(DifferenceReportRow.primary_source == primary_source.value)
+        if before is not None:
+            timestamp, stable_id = before
+            statement = statement.where(
+                or_(
+                    DifferenceReportRow.created_at < timestamp,
+                    and_(
+                        DifferenceReportRow.created_at == timestamp,
+                        DifferenceReportRow.report_id < stable_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(
+            DifferenceReportRow.created_at.desc(), DifferenceReportRow.report_id.desc()
+        ).limit(limit)
+        return [_difference_domain(row) for row in self._session.scalars(statement)]
+
     # -- overrides ---------------------------------------------------------
 
     def save_override(self, override: SourceOverride) -> SourceOverride:
@@ -1228,6 +1354,35 @@ class DataRepository:
                 "source override does not exist", context={"override_id": override_id}
             )
         return _override_domain(row)
+
+    def list_overrides_page(
+        self,
+        *,
+        dataset: DatasetKind | None,
+        status: SourceOverrideStatus | None,
+        before: tuple[str, str] | None,
+        limit: int,
+    ) -> list[SourceOverride]:
+        statement = select(SourceOverrideRow)
+        if dataset is not None:
+            statement = statement.where(SourceOverrideRow.dataset == dataset.value)
+        if status is not None:
+            statement = statement.where(SourceOverrideRow.status == status.value)
+        if before is not None:
+            timestamp, stable_id = before
+            statement = statement.where(
+                or_(
+                    SourceOverrideRow.created_at < timestamp,
+                    and_(
+                        SourceOverrideRow.created_at == timestamp,
+                        SourceOverrideRow.override_id < stable_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(
+            SourceOverrideRow.created_at.desc(), SourceOverrideRow.override_id.desc()
+        ).limit(limit)
+        return [_override_domain(row) for row in self._session.scalars(statement)]
 
     # -- override application attempts -------------------------------------
 

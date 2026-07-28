@@ -29,6 +29,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 import duckdb
@@ -74,6 +75,8 @@ class CanonicalQueryRequest:
     codes: tuple[str, ...] | None = None
     start_date: TradingDate | None = None
     end_date: TradingDate | None = None
+    after_sort_key: tuple[str, ...] | None = None
+    limit: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.version_id, str) or not self.version_id.strip():
@@ -119,6 +122,19 @@ class CanonicalQueryRequest:
             and self.end_date.value < self.start_date.value
         ):
             raise QueryContractError("end_date must not precede start_date")
+        if self.after_sort_key is not None:
+            if not isinstance(self.after_sort_key, tuple):
+                object.__setattr__(self, "after_sort_key", tuple(self.after_sort_key))
+            if len(self.after_sort_key) != len(sort_key(self.dataset)):
+                raise QueryContractError("preview cursor does not match the canonical sort key")
+            if any(not isinstance(value, str) or not value for value in self.after_sort_key):
+                raise QueryContractError("preview cursor values must be non-empty strings")
+        if self.limit is not None and (
+            isinstance(self.limit, bool)
+            or not isinstance(self.limit, int)
+            or not 1 <= self.limit <= 201
+        ):
+            raise QueryContractError("query limit must be between 1 and 201")
 
 
 def _looks_like_path(value: str) -> bool:
@@ -167,6 +183,8 @@ class CanonicalQueryAdapter:
         codes: Sequence[str] | None = None,
         start_date: TradingDate | None = None,
         end_date: TradingDate | None = None,
+        after_sort_key: Sequence[str] | None = None,
+        limit: int | None = None,
     ) -> pa.Table:
         """Convenience wrapper that builds a :class:`CanonicalQueryRequest`."""
         request = CanonicalQueryRequest(
@@ -176,6 +194,8 @@ class CanonicalQueryAdapter:
             codes=tuple(codes) if codes is not None else None,
             start_date=start_date,
             end_date=end_date,
+            after_sort_key=tuple(after_sort_key) if after_sort_key is not None else None,
+            limit=limit,
         )
         return self._query(request)
 
@@ -490,6 +510,24 @@ class CanonicalQueryAdapter:
                 if date_field is not None and request.end_date is not None:
                     where_clauses.append(f"{date_field} <= ?")
                     parameters.append(request.end_date.value)
+                if request.after_sort_key is not None:
+                    sort_columns = list(sort_key(dataset))
+                    cursor_values: list[object] = []
+                    schema = canonical_schema(dataset)
+                    for name, value in zip(sort_columns, request.after_sort_key, strict=True):
+                        if pa.types.is_date(schema.field(name).type):
+                            try:
+                                cursor_values.append(date.fromisoformat(value))
+                            except ValueError as error:
+                                raise QueryContractError(
+                                    "preview cursor contains an invalid date"
+                                ) from error
+                        else:
+                            cursor_values.append(value)
+                    where_clauses.append(
+                        f"({', '.join(sort_columns)}) > ({', '.join(['?'] * len(sort_columns))})"
+                    )
+                    parameters.extend(cursor_values)
                 fields_csv = ", ".join(selected_fields)
                 where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
                 # The SQL ORDER BY uses the canonical sort key. If
@@ -510,7 +548,10 @@ class CanonicalQueryAdapter:
                 missing_sort_columns = [c for c in sort_columns if c not in selected_fields]
                 if not missing_sort_columns:
                     order_sql = f" ORDER BY {', '.join(sort_columns)}"
-                    sql = f"SELECT {fields_csv} FROM _warehouse{where_sql}{order_sql}"
+                    limit_sql = " LIMIT ?" if request.limit is not None else ""
+                    sql = f"SELECT {fields_csv} FROM _warehouse{where_sql}{order_sql}{limit_sql}"
+                    if request.limit is not None:
+                        parameters.append(request.limit)
                     if parameters:
                         result = connection.execute(sql, parameters).to_arrow_table()
                     else:
@@ -521,11 +562,15 @@ class CanonicalQueryAdapter:
                     # in the outer SELECT.
                     inner_fields_csv = ", ".join(sorted(set(selected_fields) | set(sort_columns)))
                     order_sql = f" ORDER BY {', '.join(sort_columns)}"
+                    limit_sql = " LIMIT ?" if request.limit is not None else ""
                     sql = (
                         f"SELECT {fields_csv} FROM ("
-                        f"SELECT {inner_fields_csv} FROM _warehouse{where_sql}{order_sql}"
+                        f"SELECT {inner_fields_csv} FROM _warehouse"
+                        f"{where_sql}{order_sql}{limit_sql}"
                         f")"
                     )
+                    if request.limit is not None:
+                        parameters.append(request.limit)
                     if parameters:
                         result = connection.execute(sql, parameters).to_arrow_table()
                     else:

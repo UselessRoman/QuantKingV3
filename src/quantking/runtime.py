@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
 
 from quantking.common.config import AppSettings, load_settings
 from quantking.common.errors import ConfigurationError
@@ -29,7 +30,14 @@ from quantking.data.adapters.warehouse.canonical_warehouse import CanonicalWareh
 from quantking.data.adapters.warehouse.publish_coordinator import (
     CanonicalPublishCoordinator,
 )
+from quantking.data.adapters.warehouse.query import CanonicalQueryAdapter
 from quantking.data.adapters.warehouse.raw_store import RawBatchPublisher
+from quantking.data.center import (
+    DataCenterQueryService,
+    DataUnitOfWorkFactory,
+    DifferenceVerifierPort,
+)
+from quantking.data.comparison.verifier import DifferenceReportVerifier
 from quantking.data.eod.artifacts import EodEvidenceWriter
 from quantking.data.eod.service import EodCommandService, EodExecutionConfig
 from quantking.data.quality.artifacts import QualityArtifactWriter
@@ -166,6 +174,15 @@ def build_eod_runtime(
         jobs,
         eod_command_port=commands,
         job_command_port=jobs,
+        data_center_port=DataCenterQueryService(
+            data_uow_factory=cast(DataUnitOfWorkFactory, data_uow),
+            preview=CanonicalQueryAdapter(data_root=data_root, uow_factory=data_uow),
+            difference_verifier=cast(
+                DifferenceVerifierPort,
+                DifferenceReportVerifier(artifacts_root=data_root / "artifacts"),
+            ),
+            jobs=jobs,
+        ),
     )
     return EodRuntime(
         settings=settings,

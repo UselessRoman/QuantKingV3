@@ -9,7 +9,7 @@ S1-04 已于 2026-07-22 在提交 `2f99491e9dc410acf85ca81c131a77cae08d0cc3`
 完成主验收，证据见 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。
 S1-05 已于 2026-07-27 在提交 `e580d6963e01b1301dc26f29ed57a0b5b4770a0f`
 完成主验收，证据见 [S1-05 主验收证据](S1-05_ACCEPTANCE.md)。
-S1-06 已获离线实施授权、尚未开始；S1-07～S1-08 未开始、未获授权。
+S1-06 离线实现已提交、等待主验收；S1-07～S1-08 未开始、未获授权。
 
 真实 XTQuant 和备用源验证仍延期并阻断 Stage 1 最终验收。
 
@@ -107,9 +107,14 @@ S1-06 已获离线实施授权、尚未开始；S1-07～S1-08 未开始、未获
 
 ## S1-06：数据中心 Web
 
-- **状态**：已获离线实施授权，尚未开始；真实网络、QMT、真实供应商和正式数据根未授权。
+- **状态**：离线实现已提交、等待主验收；真实网络、QMT、真实供应商和正式数据根未授权。
 - **范围**：展示来源、批次、版本、覆盖、质量、失败、差异、override 和 EOD 任务状态的数据中心
   页面及关键端到端测试。
+- **实现**：应用层查询服务通过窄 port 组合数据库级 keyset 仓储、严格 Warehouse 与
+  DifferenceReport verifier、来源矩阵和既有 Job/EOD 服务；FastAPI 只做校验、映射和
+  稳定错误转换。React 使用显式 version ID，EOD 冻结空 root mapping 或完整精确 mapping。
+- **验证**：仅使用临时 SQLite/Warehouse、合成证据、Fake Gateway 和 loopback；
+  Playwright 不启动 Worker，也不加载 XTQuant 或访问外部网络。
 - **依赖**：S1-05 完成。
 - **禁止项**：页面不得绕过应用服务、审计或版本选择合同；不得接受任意 SQL、路径或
   `latest` 别名，不得同步运行 Worker，也不得直接读取 SQLite、Parquet 或日志文件。

@@ -101,6 +101,25 @@ class JobService:
     def get_job(self, job_id: str) -> JobRun:
         return self._execute(lambda repository: repository.get(job_id))
 
+    def list_jobs_page(
+        self,
+        *,
+        job_type: str | None,
+        status: JobStatus | None,
+        before: tuple[str, str] | None,
+        limit: int,
+    ) -> list[JobRun]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 101:
+            raise ValueError("limit must be between 1 and 101")
+        return self._execute(
+            lambda repository: repository.list_page(
+                job_type=job_type,
+                status=status,
+                before=before,
+                limit=limit,
+            )
+        )
+
     def transition(
         self,
         job_id: str,

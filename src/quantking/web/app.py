@@ -18,7 +18,14 @@ from quantking.common.errors import (
     QuantKingError,
 )
 from quantking.common.time import Clock
+from quantking.data.adapters.warehouse.errors import (
+    DatasetVersionNotQueryableError,
+    QueryContractError,
+)
+from quantking.data.center import InvalidDataCenterQueryError
+from quantking.data.comparison.verifier import DifferenceReportVerificationError
 from quantking.web.api import InvalidEodRequestError, InvalidRequestError, create_api_router
+from quantking.web.data_center import DataCenterReadPort
 from quantking.web.ports import EodCommandPort, JobCommandPort, JobReadPort
 
 
@@ -65,6 +72,28 @@ def _install_error_handlers(app: FastAPI) -> None:
     ) -> JSONResponse:
         return _error(400, "invalid_eod_request", "EOD 请求参数无效。")
 
+    @app.exception_handler(InvalidDataCenterQueryError)
+    async def invalid_data_query(
+        _request: Request, _error_value: InvalidDataCenterQueryError
+    ) -> JSONResponse:
+        return _error(400, "invalid_data_query", "数据查询参数无效。")
+
+    @app.exception_handler(QueryContractError)
+    async def query_contract(_request: Request, _error_value: QueryContractError) -> JSONResponse:
+        return _error(400, "invalid_data_query", "数据查询参数无效。")
+
+    @app.exception_handler(DatasetVersionNotQueryableError)
+    async def version_not_queryable(
+        _request: Request, _error_value: DatasetVersionNotQueryableError
+    ) -> JSONResponse:
+        return _error(409, "version_not_queryable", "数据版本当前不可查询。")
+
+    @app.exception_handler(DifferenceReportVerificationError)
+    async def difference_not_verifiable(
+        _request: Request, _error_value: DifferenceReportVerificationError
+    ) -> JSONResponse:
+        return _error(409, "difference_report_invalid", "差异报告验证失败。")
+
     @app.exception_handler(RequestValidationError)
     async def validation_error(
         _request: Request,
@@ -105,6 +134,7 @@ def create_app(
     job_command_port: JobCommandPort | None = None,
     static_root: Path | None = None,
     clock: Clock | None = None,
+    data_center_port: DataCenterReadPort | None = None,
 ) -> FastAPI:
     """Build an app from injected ports; construction has no persistence side effects."""
     resolved_static = _validate_static_root(static_root)
@@ -116,6 +146,7 @@ def create_app(
             eod_command_port=eod_command_port,
             job_command_port=job_command_port,
             clock=clock,
+            data_center_port=data_center_port,
         )
     )
 

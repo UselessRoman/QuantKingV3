@@ -13,7 +13,7 @@ from typing import Self, TypeVar
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine, create_engine, event, func, select, update
+from sqlalchemy import Engine, and_, create_engine, event, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
@@ -363,6 +363,36 @@ class SQLiteJobRepository:
 
     def get(self, job_id: str) -> JobRun:
         return self._domain(self._row(job_id))
+
+    def list_page(
+        self,
+        *,
+        job_type: str | None,
+        status: JobStatus | None,
+        before: tuple[str, str] | None,
+        limit: int,
+    ) -> list[JobRun]:
+        """Return one newest-first database keyset page."""
+        statement = select(JobRunRow)
+        if job_type is not None:
+            statement = statement.where(JobRunRow.job_type == job_type)
+        if status is not None:
+            statement = statement.where(JobRunRow.status == status.value)
+        if before is not None:
+            timestamp, stable_id = before
+            statement = statement.where(
+                or_(
+                    JobRunRow.created_at < timestamp,
+                    and_(
+                        JobRunRow.created_at == timestamp,
+                        JobRunRow.job_id < stable_id,
+                    ),
+                )
+            )
+        rows = self._session.scalars(
+            statement.order_by(JobRunRow.created_at.desc(), JobRunRow.job_id.desc()).limit(limit)
+        )
+        return [self._domain(row) for row in rows]
 
     def transition(
         self,
