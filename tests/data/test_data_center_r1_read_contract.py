@@ -21,6 +21,7 @@ from quantking.data.center import (
     DataCenterQueryService,
     DataCenterReadIntegrityError,
     InvalidDataCenterQueryError,
+    _override_provenance,
 )
 from quantking.data.models import (
     BatchFailureInfo,
@@ -29,8 +30,10 @@ from quantking.data.models import (
     DatasetVersionStatus,
     DataSource,
     IngestionBatch,
+    QualityRunStatus,
     SourceOverrideStatus,
 )
+from quantking.jobs.models import JobStatus
 
 
 class _Uow:
@@ -48,6 +51,16 @@ class _Jobs:
     def list_jobs_page(self, **filters: object) -> list[object]:
         del filters
         return []
+
+    def count_jobs(self, **filters: object) -> int:
+        del filters
+        return 0
+
+
+class _CountingJobs(_Jobs):
+    def count_jobs(self, **filters: object) -> int:
+        assert filters == {"job_type": "data.eod.v1", "status": JobStatus.FAILED}
+        return 2
 
 
 class _Preview:
@@ -69,6 +82,10 @@ class _Preview:
                 },
             ]
         )
+
+    def verify_manifest_by_id(self, **request: object) -> object:
+        del request
+        raise AssertionError("manifest verification was not configured")
 
 
 class _Verifier:
@@ -199,6 +216,35 @@ def test_source_matrix_does_not_invent_real_evidence_without_assessment() -> Non
     assert exchange_calendar["status"] == "PRODUCTION_READY"
     assert exchange_calendar["evidence_kind"] is None
     assert exchange_calendar["assessment_status"] is None
+
+
+def test_summary_uses_aggregate_counts_without_loading_failure_pages() -> None:
+    class _Repository:
+        def count_failed_entities(self) -> int:
+            return 7
+
+        def list_versions_page(self, **filters: object) -> list[object]:
+            del filters
+            return []
+
+        def find_latest_source_candidate_assessment(self, **filters: object) -> None:
+            del filters
+            return None
+
+        def list_batches_page(self, **filters: object) -> list[object]:
+            raise AssertionError(f"summary loaded failed batches: {filters}")
+
+        def list_quality_runs_page(self, **filters: object) -> list[object]:
+            raise AssertionError(f"summary loaded failed quality runs: {filters}")
+
+    service = DataCenterQueryService(
+        data_uow_factory=lambda: _Uow(_Repository()),
+        preview=_Preview(),
+        difference_verifier=_Verifier(),
+        jobs=_CountingJobs(),
+    )
+
+    assert service.summary()["failures"] == 9
 
 
 def test_synthetic_assessment_is_reported_without_promoting_matrix_status() -> None:
@@ -492,3 +538,152 @@ def test_applied_override_rejects_a_different_persisted_child(
 
     with pytest.raises(DataCenterReadIntegrityError, match="APPLIED"):
         service.get_source_override(str(override.override_id))
+
+
+def test_approved_override_rejects_fully_credentialed_applied_application(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    override, report, child = _override_fixture()
+    quality_run_id = new_entity_id("data_quality")
+    child.status = DatasetVersionStatus.PUBLISHED
+    child.quality_run_id = quality_run_id
+    child.content_sha256 = "6" * 64
+    child.manifest_sha256 = "7" * 64
+    child.validated_at = child.created_at
+    child.published_at = child.created_at
+    child.row_count = 1
+    child.security_count = 1
+    quality = SimpleNamespace(
+        run_id=quality_run_id,
+        version_id=child.version_id,
+        dataset=child.dataset,
+        status=QualityRunStatus.PASSED,
+        schema_version=child.schema_version,
+        rule_version=child.rule_version,
+        content_sha256=child.content_sha256,
+    )
+    binding = _binding(override, child, fingerprint="a" * 64, status="APPLIED")
+    binding.report_sha256 = report.report_sha256
+    binding.contribution_scope_sha256 = override.contribution_scope_sha256
+    attempt = _attempt(override, child, fingerprint="a" * 64, status="APPLIED")
+    repository = SimpleNamespace(
+        get_override=lambda requested: override,
+        find_latest_override_application_binding=lambda requested: binding,
+        find_active_override_application_binding=lambda requested: binding,
+        find_last_override_application_attempt=lambda requested: attempt,
+        list_override_audits=lambda requested, limit: [],
+        get_version=lambda requested: child,
+        get_quality_run=lambda requested: quality,
+    )
+    service = _service(repository)
+    monkeypatch.setattr(
+        service,
+        "_load_verified_difference",
+        lambda requested: (
+            report,
+            SimpleNamespace(dataset=DatasetKind.DAILY_BAR_UNADJUSTED.value),
+        ),
+    )
+    monkeypatch.setattr(
+        service._preview,
+        "verify_manifest_by_id",
+        lambda **request: SimpleNamespace(
+            manifest={"source_override": _override_provenance(override, report)}
+        ),
+    )
+
+    with pytest.raises(DataCenterReadIntegrityError, match="APPROVED"):
+        service.get_source_override(str(override.override_id))
+
+
+@pytest.mark.parametrize("application_status", ["FAILED", "CLAIMED", "PUBLISHED"])
+def test_approved_override_state_matrix_accepts_only_recoverable_states(
+    application_status: str,
+) -> None:
+    override, _report, child = _override_fixture()
+    binding = _binding(
+        override,
+        child,
+        fingerprint="a" * 64,
+        status=application_status,
+    )
+    attempt = _attempt(
+        override,
+        child,
+        fingerprint="a" * 64,
+        status=application_status,
+    )
+
+    DataCenterQueryService._validate_override_state_graph(
+        override,
+        binding,
+        None if application_status == "FAILED" else binding,
+        attempt,
+    )
+
+
+@pytest.mark.parametrize(
+    ("override_status", "application_status", "has_active"),
+    [
+        (SourceOverrideStatus.PENDING, "CLAIMED", True),
+        (SourceOverrideStatus.REJECTED, "FAILED", False),
+        (SourceOverrideStatus.APPROVED, "APPLIED", True),
+        (SourceOverrideStatus.APPLIED, "PUBLISHED", True),
+        (SourceOverrideStatus.APPROVED, "FAILED", True),
+        (SourceOverrideStatus.APPROVED, "CLAIMED", False),
+        (SourceOverrideStatus.APPROVED, "PUBLISHED", False),
+    ],
+)
+def test_override_state_matrix_rejects_impossible_status_graphs(
+    override_status: SourceOverrideStatus,
+    application_status: str,
+    has_active: bool,
+) -> None:
+    override, _report, child = _override_fixture()
+    override.status = override_status
+    binding = _binding(
+        override,
+        child,
+        fingerprint="a" * 64,
+        status=application_status,
+    )
+    attempt = _attempt(
+        override,
+        child,
+        fingerprint="a" * 64,
+        status=application_status,
+    )
+    if override_status is SourceOverrideStatus.APPLIED:
+        override.applied_version_id = child.version_id
+
+    with pytest.raises(DataCenterReadIntegrityError):
+        DataCenterQueryService._validate_override_state_graph(
+            override,
+            binding,
+            binding if has_active else None,
+            attempt,
+        )
+
+
+def test_applied_override_state_matrix_requires_one_exact_child() -> None:
+    override, _report, child = _override_fixture()
+    override.status = SourceOverrideStatus.APPLIED
+    override.applied_version_id = child.version_id
+    binding = _binding(override, child, fingerprint="a" * 64, status="APPLIED")
+    attempt = _attempt(override, child, fingerprint="a" * 64, status="APPLIED")
+
+    DataCenterQueryService._validate_override_state_graph(
+        override,
+        binding,
+        binding,
+        attempt,
+    )
+
+    active = _binding(override, child, fingerprint="a" * 64, status="APPLIED")
+    with pytest.raises(DataCenterReadIntegrityError, match="latest"):
+        DataCenterQueryService._validate_override_state_graph(
+            override,
+            binding,
+            active,
+            attempt,
+        )

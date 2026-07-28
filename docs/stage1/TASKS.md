@@ -9,7 +9,7 @@ S1-04 已于 2026-07-22 在提交 `2f99491e9dc410acf85ca81c131a77cae08d0cc3`
 完成主验收，证据见 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。
 S1-05 已于 2026-07-27 在提交 `e580d6963e01b1301dc26f29ed57a0b5b4770a0f`
 完成主验收，证据见 [S1-05 主验收证据](S1-05_ACCEPTANCE.md)。
-S1-06-R1 修复已提交、等待主验收；S1-07～S1-08 未开始、未获授权。
+S1-06-R2 修复已提交、等待主验收；S1-07～S1-08 未开始、未获授权。
 
 真实 XTQuant 和备用源验证仍延期并阻断 Stage 1 最终验收。
 
@@ -107,7 +107,7 @@ S1-06-R1 修复已提交、等待主验收；S1-07～S1-08 未开始、未获授
 
 ## S1-06：数据中心 Web
 
-- **状态**：S1-06-R1 修复已提交、等待主验收；真实网络、QMT、真实供应商和正式数据根未授权。
+- **状态**：S1-06-R2 修复已提交、等待主验收；真实网络、QMT、真实供应商和正式数据根未授权。
 - **范围**：展示来源、批次、版本、覆盖、质量、失败、差异、override 和 EOD 任务状态的数据中心
   页面及关键端到端测试。
 - **实现**：应用层查询服务通过窄 port 组合数据库级 keyset 仓储、严格 Warehouse 与
@@ -117,6 +117,9 @@ S1-06-R1 修复已提交、等待主验收；S1-07～S1-08 未开始、未获授
   Override 显示 FAILED attempt 并严格核对 active binding、child 与 manifest provenance；
   Cursor 绑定资源、全部过滤、投影和排序版本；来源证据读取最新持久 assessment；前端增加
   过滤、专用血缘详情和独立详情分页；Playwright 使用真实临时应用查询链。
+- **R2 修复**：Override application/attempt/active binding 与 override 状态执行双向矩阵
+  验证，保留 `APPROVED + PUBLISHED` 恢复窗口但拒绝 `APPROVED + APPLIED`；总览失败数
+  使用与统一失败列表相同状态集合的数据库聚合计数，不加载或截断失败对象。
 - **验证**：仅使用临时 SQLite/Warehouse、合成证据、Fake Gateway 和 loopback；
   Playwright 不启动 Worker，也不加载 XTQuant 或访问外部网络。
 - **依赖**：S1-05 完成。

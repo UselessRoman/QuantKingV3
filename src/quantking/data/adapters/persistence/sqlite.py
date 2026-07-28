@@ -24,7 +24,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Self
 
-from sqlalchemy import Engine, and_, delete, or_, select
+from sqlalchemy import Engine, and_, delete, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from quantking.common.errors import (
@@ -707,6 +707,27 @@ class DataRepository:
         if row is None:
             raise InvalidIdError("ingestion batch does not exist", context={"batch_id": batch_id})
         return _batch_domain(row)
+
+    def count_failed_entities(self) -> int:
+        """Count every entity represented by the unified failure view in SQL."""
+        counts = (
+            self._session.scalar(
+                select(func.count())
+                .select_from(IngestionBatchRow)
+                .where(IngestionBatchRow.status == IngestionBatchStatus.FAILED.value)
+            ),
+            self._session.scalar(
+                select(func.count())
+                .select_from(DatasetVersionRow)
+                .where(DatasetVersionRow.status == DatasetVersionStatus.FAILED.value)
+            ),
+            self._session.scalar(
+                select(func.count())
+                .select_from(QualityRunRow)
+                .where(QualityRunRow.status == QualityRunStatus.FAILED.value)
+            ),
+        )
+        return sum(int(value or 0) for value in counts)
 
     def list_batches_page(
         self,

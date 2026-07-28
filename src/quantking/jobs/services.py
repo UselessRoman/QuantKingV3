@@ -120,6 +120,11 @@ class JobService:
             )
         )
 
+    def count_jobs(self, *, job_type: str | None, status: JobStatus | None) -> int:
+        return self._execute(
+            lambda repository: repository.count_jobs(job_type=job_type, status=status)
+        )
+
     def transition(
         self,
         job_id: str,

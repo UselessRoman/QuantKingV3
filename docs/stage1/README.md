@@ -16,7 +16,7 @@ Stage 1 的目标是完成首个可发布、可查询和可追溯的 A 股日频
   完成主验收；细节见 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。
 - S1-05 已于 2026-07-27 在提交 `e580d6963e01b1301dc26f29ed57a0b5b4770a0f`
   完成主验收；细节见 [S1-05 主验收证据](S1-05_ACCEPTANCE.md)。
-- S1-06-R1 修复已提交、等待主验收；S1-07～S1-08 未开始、未获授权。
+- S1-06-R2 修复已提交、等待主验收；S1-07～S1-08 未开始、未获授权。
 
 ## 授权边界
 
@@ -60,24 +60,30 @@ S1-02 已于 2026-07-18 完成主验收（提交
 S1-05 已于 2026-07-27 完成主验收（提交
 `e580d6963e01b1301dc26f29ed57a0b5b4770a0f`，证据见
 [S1-05 主验收证据](S1-05_ACCEPTANCE.md)）；该验收只使用 Fake Gateway、临时 SQLite
-和临时 Warehouse，没有访问真实网络、QMT 或正式数据根。S1-06-R1 修复已提交、
+和临时 Warehouse，没有访问真实网络、QMT 或正式数据根。S1-06-R2 修复已提交、
 等待主验收；S1-07～S1-08 未开始、未获授权。
 
-## S1-06-R1 离线修复
+## S1-06-R2 离线修复
 
 数据中心现提供 framework-neutral 查询服务与窄 Web port。SQLite 仅读元数据，
 Canonical 预览每次先复验 `PUBLISHED` 状态、SQLite 凭证、manifest、`COMPLETE`、
 文件集合和 SHA，再由 DuckDB 按 Canonical sort key 执行字段 allowlist、过滤、keyset
-和 `LIMIT`。R1 的统一 DifferenceReport loader 精确交叉绑定 SQLite 与 artifact 的双方
+和 `LIMIT`。统一 DifferenceReport loader 精确交叉绑定 SQLite 与 artifact 的双方
 source/batch/version/content/quality、样本、阈值、汇总、创建时间和报告 SHA，并重新复验
 双方 PUBLISHED Warehouse 与 PASSED QualityRun。Override 详情不再吞掉异常，会区分从未
 申请、FAILED attempt 和 active application，并核对 fingerprint、child 及 manifest
 `source_override` provenance。
 
+R2 在读侧加入双向 Override 状态矩阵：`PENDING/REJECTED` 不得携带 application，
+`APPROVED` 只接受无 application、历史 `FAILED`、active `CLAIMED` 或发布恢复窗口
+`PUBLISHED`，`APPLIED` 必须绑定同一 active application、attempt 和已发布 child。
+总览失败数由 SQLite 对批次、版本、质量和 `data.eod.v1` Job 分别执行聚合计数，状态集合
+与统一失败列表一致，不再受列表页上限影响。
+
 React 页面覆盖总览、来源、批次、版本与显式预览、质量、差异、Override、EOD 和失败。
 所有 Cursor 绑定规范查询指纹；列表上限 100、默认 50，预览上限 200。Playwright 使用
 临时 SQLite、真实查询服务、Warehouse/DuckDB 与 verifier，不注入内存数据中心；EOD
-只通过既有命令服务入队，不启动 Worker。本状态仅表示 S1-06-R1 修复已提交并等待主验收，
+只通过既有命令服务入队，不启动 Worker。本状态仅表示 S1-06-R2 修复已提交并等待主验收，
 不表示 S1-06 或 Stage 1 通过主验收。
 
 ## 失败产物纪律

@@ -394,6 +394,15 @@ class SQLiteJobRepository:
         )
         return [self._domain(row) for row in rows]
 
+    def count_jobs(self, *, job_type: str | None, status: JobStatus | None) -> int:
+        """Count jobs matching the same allowlisted filters as list_page."""
+        statement = select(func.count()).select_from(JobRunRow)
+        if job_type is not None:
+            statement = statement.where(JobRunRow.job_type == job_type)
+        if status is not None:
+            statement = statement.where(JobRunRow.status == status.value)
+        return int(self._session.scalar(statement) or 0)
+
     def transition(
         self,
         job_id: str,

@@ -8,7 +8,7 @@
 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。真实 XTQuant 样本验证仍须逐项授权，合成数据不能
 标生产可用。S1-05 已于 2026-07-27 在提交
 `e580d6963e01b1301dc26f29ed57a0b5b4770a0f` 完成主验收，证据见
-[S1-05 主验收证据](S1-05_ACCEPTANCE.md)。S1-06-R1 修复已提交、等待主验收；
+[S1-05 主验收证据](S1-05_ACCEPTANCE.md)。S1-06-R2 修复已提交、等待主验收；
 S1-07～S1-08 未开始、未获授权。
 
 ## 数据中心只读查询合同（S1-06）
@@ -25,9 +25,14 @@ S1-07～S1-08 未开始、未获授权。
 - Override 明确区分无 application、FAILED attempt 与 active application；active binding
   必须与 attempt 的 child/fingerprint/status 一致，已发布子版本还要通过 Warehouse 复验并
   精确匹配 manifest `source_override` provenance、report SHA 和 contribution scope SHA。
+  状态关系为双向合同：`PENDING/REJECTED` 无 application/attempt；`APPROVED` 仅允许无申请、
+  历史 `FAILED`、active `CLAIMED` 或 active `PUBLISHED` 恢复窗口；`APPLIED` 仅允许同一
+  active `APPLIED` binding/attempt/child。
 - 来源页同时展示权威 matrix role/status 与最新持久 assessment；没有 assessment 时
   `evidence_kind=null`，SYNTHETIC 证据不能成为 assessment 的生产可用结论，也不能自动切源。
 - 失败响应不返回绝对路径、provider payload、请求清单、机密、异常栈、SQL 或数据库细节。
+- 总览 `failures` 是批次、版本、质量与 `data.eod.v1` Job 中 `FAILED` 状态的 SQL 聚合总数，
+  与统一失败列表范围完全一致，不具有截断语义。
 
 本文件固化 Stage 1 六类 Canonical 数据集的可执行合同。权威来源是 `src/quantking/data/schemas.py`（框架无关描述符）和 `src/quantking/data/adapters/canonical_schema.py`（PyArrow 映射与验证）。文档不得替代 schema 与契约测试。
 

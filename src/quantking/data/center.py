@@ -82,6 +82,7 @@ class DataRepositoryPort(Protocol):
     def find_latest_source_candidate_assessment(
         self, *, source: str, dataset: DatasetKind
     ) -> SourceCandidateAssessment | None: ...
+    def count_failed_entities(self) -> int: ...
 
     def list_batches_page(
         self,
@@ -234,6 +235,7 @@ class JobListPort(Protocol):
         before: tuple[str, str] | None,
         limit: int,
     ) -> list[JobRun]: ...
+    def count_jobs(self, *, job_type: str | None, status: JobStatus | None) -> int: ...
 
 
 _CURSOR_VERSION = 2
@@ -715,6 +717,7 @@ class DataCenterQueryService:
     def summary(self) -> Mapping[str, object]:
         datasets: list[Mapping[str, object]] = []
         with self._uow_factory() as uow:
+            failure_count = uow.data.count_failed_entities()
             for dataset in DatasetKind:
                 versions = uow.data.list_versions_page(
                     dataset=dataset, status=None, before=None, limit=1
@@ -734,7 +737,8 @@ class DataCenterQueryService:
                 )
         return {
             "datasets": datasets,
-            "failures": len(self._failures(limit=101, before=None)),
+            "failures": failure_count
+            + self._jobs.count_jobs(job_type="data.eod.v1", status=JobStatus.FAILED),
             "blocked_sources": sum(item["status"] != "PRODUCTION_READY" for item in self.sources()),
             "generated_at": utc_now(clock=self._clock).to_iso(),
         }
@@ -1195,6 +1199,77 @@ class DataCenterQueryService:
             lambda x: str(x.override_id),
         )
 
+    @staticmethod
+    def _validate_override_state_graph(
+        override: SourceOverride,
+        latest_binding: OverrideBinding | None,
+        active_binding: OverrideBinding | None,
+        attempt: OverrideAttempt | None,
+    ) -> None:
+        if latest_binding is None:
+            if active_binding is not None or attempt is not None:
+                raise DataCenterReadIntegrityError(
+                    "override application and attempt presence do not match"
+                )
+            if override.status is SourceOverrideStatus.APPLIED:
+                raise DataCenterReadIntegrityError(
+                    "APPLIED override application binding is missing"
+                )
+            return
+
+        if attempt is None:
+            raise DataCenterReadIntegrityError(
+                "override application and attempt presence do not match"
+            )
+        if (
+            latest_binding.override_id != override.override_id
+            or attempt.override_id != override.override_id
+            or latest_binding.child_version_id != attempt.child_version_id
+            or latest_binding.input_fingerprint != attempt.input_fingerprint
+            or latest_binding.status != attempt.status
+        ):
+            raise DataCenterReadIntegrityError(
+                "override application and attempt lineage do not match"
+            )
+
+        allowed_statuses = {
+            SourceOverrideStatus.PENDING: frozenset(),
+            SourceOverrideStatus.REJECTED: frozenset(),
+            SourceOverrideStatus.APPROVED: frozenset({"FAILED", "CLAIMED", "PUBLISHED"}),
+            SourceOverrideStatus.APPLIED: frozenset({"APPLIED"}),
+        }
+        if latest_binding.status not in allowed_statuses[override.status]:
+            raise DataCenterReadIntegrityError(
+                f"{override.status.value} override application state is invalid"
+            )
+
+        requires_active = latest_binding.status in {"CLAIMED", "PUBLISHED", "APPLIED"}
+        if requires_active != (active_binding is not None):
+            raise DataCenterReadIntegrityError(
+                "override active application does not match its state"
+            )
+        if active_binding is not None and (
+            active_binding.application_id != latest_binding.application_id
+            or active_binding.override_id != latest_binding.override_id
+            or active_binding.child_version_id != latest_binding.child_version_id
+            or active_binding.input_fingerprint != latest_binding.input_fingerprint
+            or active_binding.status != latest_binding.status
+            or active_binding.report_sha256 != latest_binding.report_sha256
+            or active_binding.contribution_scope_sha256 != latest_binding.contribution_scope_sha256
+            or active_binding.claimed_by != latest_binding.claimed_by
+            or active_binding.claimed_at != latest_binding.claimed_at
+            or active_binding.updated_at != latest_binding.updated_at
+            or active_binding.failure_message != latest_binding.failure_message
+        ):
+            raise DataCenterReadIntegrityError(
+                "override active application is not the latest binding"
+            )
+        if override.status is SourceOverrideStatus.APPLIED and (
+            override.applied_version_id != latest_binding.child_version_id
+            or attempt.child_version_id != latest_binding.child_version_id
+        ):
+            raise DataCenterReadIntegrityError("APPLIED override application binding is invalid")
+
     def get_source_override(self, override_id: str) -> Mapping[str, object]:
         try:
             with self._uow_factory() as uow:
@@ -1214,48 +1289,12 @@ class DataCenterQueryService:
                 raise DataCenterReadIntegrityError(
                     "override does not match its verified difference report"
                 )
-            if (latest_binding is None) != (attempt is None):
-                raise DataCenterReadIntegrityError(
-                    "override application and attempt presence do not match"
-                )
-            if (
-                latest_binding is not None
-                and attempt is not None
-                and (
-                    latest_binding.override_id != override.override_id
-                    or attempt.override_id != override.override_id
-                    or latest_binding.child_version_id != attempt.child_version_id
-                    or latest_binding.input_fingerprint != attempt.input_fingerprint
-                    or latest_binding.status != attempt.status
-                )
-            ):
-                raise DataCenterReadIntegrityError(
-                    "override application and attempt lineage do not match"
-                )
-            if active_binding is not None and (
-                latest_binding is None
-                or active_binding.application_id != latest_binding.application_id
-            ):
-                raise DataCenterReadIntegrityError(
-                    "override active application is not the latest binding"
-                )
-            if (
-                override.status
-                in {
-                    SourceOverrideStatus.PENDING,
-                    SourceOverrideStatus.REJECTED,
-                }
-                and latest_binding is not None
-            ):
-                raise DataCenterReadIntegrityError("undecided override cannot carry an application")
-            if override.status is SourceOverrideStatus.APPLIED and (
-                active_binding is None
-                or active_binding.status != "APPLIED"
-                or override.applied_version_id != active_binding.child_version_id
-            ):
-                raise DataCenterReadIntegrityError(
-                    "APPLIED override application binding is invalid"
-                )
+            self._validate_override_state_graph(
+                override,
+                latest_binding,
+                active_binding,
+                attempt,
+            )
 
             child_response: Mapping[str, object] | None = None
             if latest_binding is not None:

@@ -67,7 +67,7 @@ class TestStage1DocsExist:
         text = _read(path)
         assert "e580d6963e01b1301dc26f29ed57a0b5b4770a0f" in text
         assert "S1-05" in text and "完成主验收" in text
-        assert "S1-06-R1 修复已提交" in text
+        assert "S1-06-R2 修复已提交" in text
 
     def test_s1_05_acceptance_evidence_is_complete(self) -> None:
         evidence = _read(_STAGE1_DIR / "S1-05_ACCEPTANCE.md")

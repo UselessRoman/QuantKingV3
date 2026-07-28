@@ -212,10 +212,12 @@ R4 使已有 failure evidence 的 stale recovery 成为严格幂等协调：证�
 R5 将 handler 的发布后观察与终态 evidence 收敛到同一套状态感知 completed-result
 验证：新发布版本直接绑定冻结 base 和本次 batch；未变化结果则指向冻结 base 本身，
 同时保持该 base 的真实历史 parent 与原始 input batches，禁止自指或伪造父血缘。
-S1-06-R1 修复已提交、等待主验收：framework-neutral 查询服务通过窄 port
+S1-06-R2 修复已提交、等待主验收：framework-neutral 查询服务通过窄 port
 组合元数据仓储、严格 Warehouse/DifferenceReport verifier、DuckDB 显式版本预览和
 既有 Job/EOD 服务。统一报告 loader 与 Override loader 在读侧精确绑定持久血缘和已验证
 manifest；Cursor 绑定完整查询指纹；Web 路由不读取 SQLite、Parquet 或 artifact。
+Override 读模型同时验证 override、latest application、active binding、attempt 和 child 的
+双向状态矩阵；总览失败数通过数据与 Job 仓储窄端口执行 SQL 聚合，范围与统一失败列表一致。
 S1-07～S1-08
 尚未实现且未获授权。各模块状态以
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)、[路线图](ROADMAP.md) 和 Stage 1

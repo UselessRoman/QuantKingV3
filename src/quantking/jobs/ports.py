@@ -27,6 +27,8 @@ class JobRepository(Protocol):
         limit: int,
     ) -> list[JobRun]: ...
 
+    def count_jobs(self, *, job_type: str | None, status: JobStatus | None) -> int: ...
+
     def transition(
         self,
         job_id: str,
