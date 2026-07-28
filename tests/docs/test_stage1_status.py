@@ -21,6 +21,7 @@ _REQUIRED_STAGE1_DOCS = (
     "DATA_CONTRACTS.md",
     "S1-02_ACCEPTANCE.md",
     "S1-05_ACCEPTANCE.md",
+    "S1-06_ACCEPTANCE.md",
 )
 
 # The canonical status phrase required across updated documents.
@@ -63,17 +64,28 @@ class TestStage1DocsExist:
             _REPO_ROOT / "docs" / "ROADMAP.md",
         ),
     )
-    def test_s1_05_is_main_accepted_and_s1_06_is_submitted(self, path: Path) -> None:
+    def test_s1_05_and_s1_06_are_main_accepted(self, path: Path) -> None:
         text = _read(path)
         assert "e580d6963e01b1301dc26f29ed57a0b5b4770a0f" in text
         assert "S1-05" in text and "完成主验收" in text
-        assert "S1-06-R2 修复已提交" in text
+        assert "413805074b3a82c2d2a090d2b73c854a238e2e19" in text
+        assert "S1-06" in text and "完成主验收" in text
 
     def test_s1_05_acceptance_evidence_is_complete(self) -> None:
         evidence = _read(_STAGE1_DIR / "S1-05_ACCEPTANCE.md")
         assert "e580d6963e01b1301dc26f29ed57a0b5b4770a0f" in evidence
         assert "918 passed, 2 skipped, 3 deselected" in evidence
         assert "20260722_0009" in evidence
+        assert "Stage 1 尚未完成" in evidence
+
+    def test_s1_06_acceptance_evidence_is_complete(self) -> None:
+        evidence = _read(_STAGE1_DIR / "S1-06_ACCEPTANCE.md")
+        assert "413805074b3a82c2d2a090d2b73c854a238e2e19" in evidence
+        assert "958 passed, 2 skipped, 3 deselected" in evidence
+        assert "OVERRIDE_ATTACK=REJECTED" in evidence
+        assert "SUMMARY_FAILURES=150" in evidence
+        assert "20260722_0009" in evidence
+        assert "S1-07～S1-08 未开始、未获授权" in evidence
         assert "Stage 1 尚未完成" in evidence
 
     def test_stage1_tasks_lists_s1_01_through_s1_08(self) -> None:

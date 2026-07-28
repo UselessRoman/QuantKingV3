@@ -59,13 +59,15 @@ def test_quality_and_source_matrix_documents_exist() -> None:
     assert "自动接管" not in matrix
 
 
-def test_s1_05_is_main_accepted_but_external_and_later_tasks_remain_unauthorized() -> None:
+def test_s1_06_is_main_accepted_but_external_and_later_tasks_remain_unauthorized() -> None:
     tasks = _read("docs/stage1/TASKS.md")
     assert "S1-05" in tasks
     assert "e580d6963e01b1301dc26f29ed57a0b5b4770a0f" in tasks
     assert "完成主验收" in tasks
     assert "已获离线实施授权" in tasks
-    assert "S1-06-R2 修复已提交、等待主验收" in tasks
+    assert "S1-06" in tasks
+    assert "413805074b3a82c2d2a090d2b73c854a238e2e19" in tasks
+    assert "完成主验收" in tasks
     assert "S1-07～S1-08 未开始、未获授权" in tasks
     contracts = _read("docs/stage1/DATA_CONTRACTS.md")
     # 真实 XTQuant 样本验证仍须逐项授权

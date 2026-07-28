@@ -212,7 +212,8 @@ R4 使已有 failure evidence 的 stale recovery 成为严格幂等协调：证�
 R5 将 handler 的发布后观察与终态 evidence 收敛到同一套状态感知 completed-result
 验证：新发布版本直接绑定冻结 base 和本次 batch；未变化结果则指向冻结 base 本身，
 同时保持该 base 的真实历史 parent 与原始 input batches，禁止自指或伪造父血缘。
-S1-06-R2 修复已提交、等待主验收：framework-neutral 查询服务通过窄 port
+S1-06 已于 2026-07-28 在提交 `413805074b3a82c2d2a090d2b73c854a238e2e19`
+完成主验收：framework-neutral 查询服务通过窄 port
 组合元数据仓储、严格 Warehouse/DifferenceReport verifier、DuckDB 显式版本预览和
 既有 Job/EOD 服务。统一报告 loader 与 Override loader 在读侧精确绑定持久血缘和已验证
 manifest；Cursor 绑定完整查询指纹；Web 路由不读取 SQLite、Parquet 或 artifact。

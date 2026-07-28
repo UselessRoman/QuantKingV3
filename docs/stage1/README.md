@@ -16,7 +16,9 @@ Stage 1 的目标是完成首个可发布、可查询和可追溯的 A 股日频
   完成主验收；细节见 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。
 - S1-05 已于 2026-07-27 在提交 `e580d6963e01b1301dc26f29ed57a0b5b4770a0f`
   完成主验收；细节见 [S1-05 主验收证据](S1-05_ACCEPTANCE.md)。
-- S1-06-R2 修复已提交、等待主验收；S1-07～S1-08 未开始、未获授权。
+- S1-06 已于 2026-07-28 在提交 `413805074b3a82c2d2a090d2b73c854a238e2e19`
+  完成主验收；细节见 [S1-06 主验收证据](S1-06_ACCEPTANCE.md)。
+- S1-07～S1-08 未开始、未获授权。
 
 ## 授权边界
 
@@ -42,7 +44,7 @@ S1-01 数据合同、元数据持久化与安全迁移基础（已主验收）
     → S1-03 XTQuant 主数据适配器与增量抓取
     → S1-04 质量、跨源差异与 SourceOverride（已主验收）
     → S1-05 EOD、Worker、CLI 与 API（已主验收）
-    → S1-06 数据中心 Web（已获离线实施授权）
+    → S1-06 数据中心 Web（已主验收）
     → S1-07 经授权真实样本与旧数据 DATA_ONLY 判定
     → S1-08 真实或明确范围 Canonical 构建及 Stage 1 最终验收
 ```
@@ -60,10 +62,11 @@ S1-02 已于 2026-07-18 完成主验收（提交
 S1-05 已于 2026-07-27 完成主验收（提交
 `e580d6963e01b1301dc26f29ed57a0b5b4770a0f`，证据见
 [S1-05 主验收证据](S1-05_ACCEPTANCE.md)）；该验收只使用 Fake Gateway、临时 SQLite
-和临时 Warehouse，没有访问真实网络、QMT 或正式数据根。S1-06-R2 修复已提交、
-等待主验收；S1-07～S1-08 未开始、未获授权。
+和临时 Warehouse，没有访问真实网络、QMT 或正式数据根。S1-06 已于 2026-07-28 在提交
+`413805074b3a82c2d2a090d2b73c854a238e2e19` 完成主验收，证据见
+[S1-06 主验收证据](S1-06_ACCEPTANCE.md)；S1-07～S1-08 未开始、未获授权。
 
-## S1-06-R2 离线修复
+## S1-06 主验收
 
 数据中心现提供 framework-neutral 查询服务与窄 Web port。SQLite 仅读元数据，
 Canonical 预览每次先复验 `PUBLISHED` 状态、SQLite 凭证、manifest、`COMPLETE`、
@@ -83,8 +86,8 @@ R2 在读侧加入双向 Override 状态矩阵：`PENDING/REJECTED` 不得携带
 React 页面覆盖总览、来源、批次、版本与显式预览、质量、差异、Override、EOD 和失败。
 所有 Cursor 绑定规范查询指纹；列表上限 100、默认 50，预览上限 200。Playwright 使用
 临时 SQLite、真实查询服务、Warehouse/DuckDB 与 verifier，不注入内存数据中心；EOD
-只通过既有命令服务入队，不启动 Worker。本状态仅表示 S1-06-R2 修复已提交并等待主验收，
-不表示 S1-06 或 Stage 1 通过主验收。
+只通过既有命令服务入队，不启动 Worker。S1-06 已完成主验收；该结论不表示 Stage 1
+完成，也不授权 S1-07、S1-08 或任何真实外部访问。
 
 ## 失败产物纪律
 
@@ -98,6 +101,7 @@ React 页面覆盖总览、来源、批次、版本与显式预览、质量、�
 
 - [任务卡](TASKS.md)
 - [验收矩阵](ACCEPTANCE.md)
+- [S1-06 主验收证据](S1-06_ACCEPTANCE.md)
 - [S1-02 主验收证据](S1-02_ACCEPTANCE.md)
 - [S1-03 离线验收证据](S1-03_ACCEPTANCE.md)
 - [S1-04 主验收证据](S1-04_ACCEPTANCE.md)
