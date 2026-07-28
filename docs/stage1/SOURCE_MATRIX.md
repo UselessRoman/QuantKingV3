@@ -9,8 +9,7 @@
 
 | 源 | 数据集 | 角色 | 当前状态 | 阻塞原因 | auto_switch |
 |---|---|---|---|---|---|
-| XTQUANT | exchange_calendar | PRIMARY | PRODUCTION_READY | - | False |
-| XTQUANT | 其余五类 | PRIMARY | BLOCKED_EXTERNAL_VALIDATION | dataset semantics require external validation | False |
+| XTQUANT | 六类 | PRIMARY | BLOCKED_EXTERNAL_VALIDATION | requires authorized REAL fixed-sample validation | False |
 | BAOSTOCK/AKSHARE/TUSHARE | 六类 | FALLBACK | BLOCKED_EXTERNAL_VALIDATION | requires authorized external validation | False |
 
 ## 规则

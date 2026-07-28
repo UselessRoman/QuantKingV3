@@ -77,6 +77,7 @@ from quantking.data.models import (
     SourceOverrideStatus,
     transition_override,
 )
+from quantking.data.validation.models import VerifiedAssessmentEvidence
 from quantking.jobs.adapters.persistence.models import AuditRecordRow
 from quantking.jobs.adapters.persistence.sqlite import (
     create_sqlite_engine as _create_jobs_engine,
@@ -1873,8 +1874,18 @@ class DataRepository:
     # -- source candidate assessments -------------------------------------
 
     def save_source_candidate_assessment(
-        self, assessment: SourceCandidateAssessment
+        self, evidence: VerifiedAssessmentEvidence
     ) -> SourceCandidateAssessment:
+        if not isinstance(evidence, VerifiedAssessmentEvidence):
+            raise TypeError("source assessment persistence requires VerifiedAssessmentEvidence")
+        assessment = evidence.assessment
+        if (
+            assessment.evidence_sha256 != evidence.evidence_manifest_sha256
+            or assessment.evidence_relative_path != evidence.evidence_relative_path
+        ):
+            raise InvalidDataTransitionError(
+                "source assessment does not bind the verified evidence artifact"
+            )
         values = _assessment_row_values(assessment)
         row = self._session.get(SourceCandidateAssessmentRow, str(assessment.assessment_id))
         if row is not None and not _row_matches(row, values):

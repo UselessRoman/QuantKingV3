@@ -1,4 +1,3 @@
-# ruff: noqa: RUF001
 """S1-04 main-acceptance status and later-task boundaries must stay accurate."""
 
 from __future__ import annotations
@@ -68,7 +67,9 @@ def test_s1_06_is_main_accepted_but_external_and_later_tasks_remain_unauthorized
     assert "S1-06" in tasks
     assert "413805074b3a82c2d2a090d2b73c854a238e2e19" in tasks
     assert "完成主验收" in tasks
-    assert "S1-07～S1-08 未开始、未获授权" in tasks
+    assert "S1-07A 离线验证框架已提交、等待主验收" in tasks
+    assert "真实 XTQuant、备用源和旧数据读取尚未执行" in tasks
+    assert "S1-08 未开始、未获授权" in tasks
     contracts = _read("docs/stage1/DATA_CONTRACTS.md")
     # 真实 XTQuant 样本验证仍须逐项授权
     assert "真实 XTQuant" in contracts or "逐项授权" in contracts

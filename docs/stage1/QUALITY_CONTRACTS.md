@@ -167,3 +167,20 @@ APPROVED override 转成空精确范围。
 - 已批准计划、模型和正式产物不得原地修改，只能建立新版本或停用旧版本。
 - 失败任务不得发布半成品；失败目录、日志和输入清单必须保留，修复后创建新任务。
 - 合成数据不能标生产可用；`EvidenceKind.SYNTHETIC` 永远不能 `PRODUCTION_READY`。
+
+## 6. S1-07A 真实证据门
+
+S1-07A 新增版本化 `FixedSampleSpec`、`RealSourceValidationRun` 和
+`VerifiedAssessmentEvidence`。assessment 持久化入口只接受 verifier 返回的强类型证据；
+裸 assessment 摘要不能写入。真实证据目录逐项复验规范 JSON、自签名 manifest、
+`COMPLETE`、精确文件集合、逐文件 SHA/大小/行数、请求与样本 SHA、版本凭证、Canonical
+内容 SHA、质量结果及可选 DifferenceReport 血缘。
+
+`PRODUCTION_READY` 现在对所有来源和六类数据集统一要求 REAL evidence、五项 gate 全部通过，
+以及至少三个不同 `data_validation` run ID。此前仅凭 SDK 合同标记的 XTQuant
+`exchange_calendar` 也回到 `BLOCKED_EXTERNAL_VALIDATION`，等待相同真实门禁。
+
+固定样本 `s1-07.fixed-sample.v1` 覆盖六类数据集、SH/SZ/BJ 和沪深基准，SHA-256 为
+`7d1007817928189e39d038cc8afce00d35d26c89877f217f65cf7e9894b6e2b3`。事件目的枚举已固化，
+但 IPO、退市、ST、停牌和公司行动的正式 case 必须先取得可复查权威依据及版本；本次离线
+实施没有联网核验，因此没有凭记忆把事件证券或日期写入 v1。

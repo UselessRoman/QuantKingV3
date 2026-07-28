@@ -15,12 +15,18 @@ import pytest
 _FORMAL_ROOTS = (
     ntpath.normcase(ntpath.abspath(r"E:\QuantKingV3Data")),
     ntpath.normcase(ntpath.abspath(r"F:\QuantKingV3Backups")),
+    ntpath.normcase(ntpath.abspath(r"E:\QuantKing")),
 )
 
 
 def pytest_configure(config: pytest.Config) -> None:
     """Register every test class that requires explicit external authorization."""
     config.addinivalue_line("markers", "real_xtquant: accesses the real XTQuant/QMT runtime")
+    config.addinivalue_line("markers", "real_external: accesses an authorized external target")
+    config.addinivalue_line("markers", "real_baostock: accesses the real BaoStock service")
+    config.addinivalue_line("markers", "real_akshare: accesses real AKShare upstream services")
+    config.addinivalue_line("markers", "real_tushare: accesses the real Tushare service")
+    config.addinivalue_line("markers", "real_legacy_data: reads the authorized legacy-data root")
     config.addinivalue_line("markers", "real_backup: writes a real data or backup root")
     config.addinivalue_line("markers", "simulation_account: reads a real QMT simulation account")
 
@@ -67,7 +73,14 @@ def block_external_access(
 
     network_authorized = any(
         request.node.get_closest_marker(marker) is not None
-        for marker in ("real_xtquant", "simulation_account")
+        for marker in (
+            "real_external",
+            "real_xtquant",
+            "real_baostock",
+            "real_akshare",
+            "real_tushare",
+            "simulation_account",
+        )
     )
     if not network_authorized:
         monkeypatch.setattr(socket, "create_connection", deny_network)
@@ -75,8 +88,19 @@ def block_external_access(
         monkeypatch.setattr(socket.socket, "connect", deny_network)
         monkeypatch.setattr(socket.socket, "connect_ex", deny_network)
 
-    backup_authorized = request.node.get_closest_marker("real_backup") is not None
-    if not backup_authorized:
+    external_path_authorized = any(
+        request.node.get_closest_marker(marker) is not None
+        for marker in (
+            "real_external",
+            "real_xtquant",
+            "real_baostock",
+            "real_akshare",
+            "real_tushare",
+            "real_legacy_data",
+            "real_backup",
+        )
+    )
+    if not external_path_authorized:
         monkeypatch.setattr(builtins, "open", _guard_path_call(builtins.open))
         monkeypatch.setattr(io, "open", _guard_path_call(io.open))
         for name in (

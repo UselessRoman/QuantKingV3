@@ -13,6 +13,7 @@ from . import conftest as guard_policy
 _FORMAL_PATHS = (
     Path(r"E:\QuantKingV3Data") / "__guard_probe__",
     Path(r"F:\QuantKingV3Backups") / "__guard_probe__",
+    Path(r"E:\QuantKing") / "__guard_probe__",
 )
 _ORIGINAL_SINGLE_PATH_CALLS = {
     name: getattr(os, name) for name in ("chdir", "remove", "rmdir", "unlink")
@@ -25,7 +26,7 @@ _ORIGINAL_GETADDRINFO = socket.getaddrinfo
 _ORIGINAL_STAT = os.stat
 
 
-@pytest.mark.parametrize("formal_path", _FORMAL_PATHS, ids=("data", "offsite"))
+@pytest.mark.parametrize("formal_path", _FORMAL_PATHS, ids=("data", "offsite", "legacy"))
 @pytest.mark.parametrize("operation", sorted(_ORIGINAL_SINGLE_PATH_CALLS))
 def test_single_path_system_calls_are_blocked_before_dispatch(
     formal_path: Path, operation: str
@@ -37,7 +38,7 @@ def test_single_path_system_calls_are_blocked_before_dispatch(
         guarded(formal_path)
 
 
-@pytest.mark.parametrize("formal_path", _FORMAL_PATHS, ids=("data", "offsite"))
+@pytest.mark.parametrize("formal_path", _FORMAL_PATHS, ids=("data", "offsite", "legacy"))
 @pytest.mark.parametrize("operation", sorted(_ORIGINAL_TWO_PATH_CALLS))
 def test_two_path_system_calls_block_either_formal_argument(
     tmp_path: Path, formal_path: Path, operation: str
@@ -52,7 +53,7 @@ def test_two_path_system_calls_block_either_formal_argument(
         guarded(ordinary_path, formal_path)
 
 
-@pytest.mark.parametrize("formal_path", _FORMAL_PATHS, ids=("data", "offsite"))
+@pytest.mark.parametrize("formal_path", _FORMAL_PATHS, ids=("data", "offsite", "legacy"))
 def test_path_unlink_is_blocked_through_os_unlink(formal_path: Path) -> None:
     assert os.unlink is not _ORIGINAL_SINGLE_PATH_CALLS["unlink"]
     with pytest.raises(RuntimeError, match="default tests cannot access formal path"):

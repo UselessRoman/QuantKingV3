@@ -33,6 +33,7 @@ from quantking.data.models import (
     transition_batch,
     transition_dataset_version,
 )
+from quantking.data.validation.testing import verified_synthetic_assessment
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     initialize_database,
@@ -157,7 +158,7 @@ def test_latest_source_assessment_is_selected_in_sql_by_time_and_stable_id(
     ]
     with factory() as uow:
         for assessment in assessments:
-            uow.data.save_source_candidate_assessment(assessment)
+            uow.data.save_source_candidate_assessment(verified_synthetic_assessment(assessment))
         uow.commit()
 
     with factory() as uow:

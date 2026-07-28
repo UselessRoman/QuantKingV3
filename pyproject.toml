@@ -41,7 +41,12 @@ packages = ["src/quantking"]
 addopts = "--strict-config --strict-markers"
 testpaths = ["tests"]
 markers = [
+    "real_external: accesses an explicitly authorized external validation target",
     "real_xtquant: accesses the real XTQuant/QMT runtime",
+    "real_baostock: accesses the real BaoStock service",
+    "real_akshare: accesses real AKShare upstream services",
+    "real_tushare: accesses the real Tushare service",
+    "real_legacy_data: reads the authorized legacy-data root",
     "real_backup: writes a real data or backup root",
     "simulation_account: reads a real QMT simulation account",
 ]

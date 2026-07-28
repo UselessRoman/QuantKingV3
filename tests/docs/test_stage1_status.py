@@ -22,6 +22,7 @@ _REQUIRED_STAGE1_DOCS = (
     "S1-02_ACCEPTANCE.md",
     "S1-05_ACCEPTANCE.md",
     "S1-06_ACCEPTANCE.md",
+    "S1-07A_ACCEPTANCE.md",
 )
 
 # The canonical status phrase required across updated documents.
