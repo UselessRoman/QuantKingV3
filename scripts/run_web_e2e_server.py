@@ -1,19 +1,68 @@
-"""Serve the built Stage 0 shell over a disposable, deterministic SQLite fixture."""
+"""Serve the built data center over a disposable real SQLite/Warehouse fixture."""
 
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest.mock import patch
 
-from quantking.data.center import DataCenterPage
+import pyarrow as pa
+
+from quantking.common.ids import EntityId, new_entity_id
+from quantking.common.time import TradingDate, utc_now
+from quantking.data.adapters.canonical_schema import canonical_schema
+from quantking.data.adapters.persistence.sqlite import (
+    DataSqliteUnitOfWorkFactory,
+    create_data_engine,
+)
+from quantking.data.adapters.warehouse.canonical_warehouse import CanonicalWarehouse
+from quantking.data.adapters.warehouse.publish_coordinator import (
+    CanonicalPublishCoordinator,
+    CanonicalPublishCoordinatorRequest,
+)
+from quantking.data.adapters.warehouse.query import CanonicalQueryAdapter
+from quantking.data.center import (
+    CanonicalPreviewPort,
+    DataCenterQueryService,
+    DataUnitOfWorkFactory,
+    DifferenceVerifierPort,
+)
+from quantking.data.comparison.artifacts import DifferenceReportArtifactWriter
+from quantking.data.comparison.comparator import (
+    CrossSourceComparator,
+    CrossSourceComparisonRequest,
+)
+from quantking.data.comparison.thresholds import default_thresholds
+from quantking.data.comparison.verifier import DifferenceReportVerifier
 from quantking.data.eod.contracts import EodBaseVersion
 from quantking.data.eod.service import EodCommandService, EodExecutionConfig
+from quantking.data.models import (
+    DatasetKind,
+    DatasetVersion,
+    DataSource,
+    IngestionBatch,
+    IngestionBatchStatus,
+    ManifestFileEntry,
+    QualityResult,
+    QualityRun,
+)
+from quantking.data.override.service import CreateOverrideRequest, SourceOverrideService
+from quantking.data.quality.artifacts import QualityArtifactWriter
+from quantking.data.quality.engine import QualityEngine
+from quantking.data.quality.models import (
+    QualityRequest,
+    QualityRunArtifact,
+    ReferenceDataBinding,
+    RuleOutcomeStatus,
+)
+from quantking.data.quality.references import PublishedReferenceLoader
+from quantking.data.quality.rules import default_rule_set
+from quantking.data.quality.runner import QualityRunner
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
-    create_sqlite_engine,
     initialize_database,
 )
 from quantking.jobs.models import JobStatus
@@ -22,7 +71,6 @@ from quantking.web.app import create_app
 from quantking.web.main import run_server
 
 FIXED_JOB_ID = "job:00000000-0000-4000-8000-000000000004"
-VERSION_ID = "data_version:00000000-0000-4000-8000-000000000006"
 
 
 class _BaseResolver:
@@ -37,182 +85,295 @@ class _BaseResolver:
         )
 
 
-class _SyntheticDataCenter:
-    def __init__(self, jobs: JobService) -> None:
-        self._jobs = jobs
+def _table(dataset: str, rows: list[dict[str, object]]) -> pa.Table:
+    raw = pa.Table.from_pylist(rows)
+    schema = canonical_schema(dataset)
+    return pa.Table.from_arrays(
+        [raw.column(field.name).cast(field.type, safe=False) for field in schema],
+        schema=pa.schema(
+            [pa.field(field.name, field.type, nullable=field.nullable) for field in schema]
+        ),
+    )
 
-    def summary(self) -> dict[str, object]:
-        return {
-            "datasets": [
-                {
-                    "dataset": "exchange_calendar",
-                    "version": {
-                        "version_id": VERSION_ID,
-                        "dataset": "exchange_calendar",
-                        "status": "PUBLISHED",
-                        "coverage_start": "2026-07-15",
-                        "coverage_end": "2026-07-28",
-                        "quality_run_id": "data_quality:00000000-0000-4000-8000-000000000006",
-                    },
-                }
-            ],
-            "failures": 0,
-            "blocked_sources": 23,
-            "generated_at": "2026-07-28T00:00:00Z",
-        }
 
-    def sources(self) -> list[dict[str, object]]:
-        return [
+def _calendar() -> pa.Table:
+    return _table(
+        "exchange_calendar",
+        [
+            {"exchange": "SZ", "trade_date": date(2026, 7, 15), "is_open": True},
+            {"exchange": "SZ", "trade_date": date(2026, 7, 28), "is_open": True},
+        ],
+    )
+
+
+def _daily(close: float) -> pa.Table:
+    return _table(
+        "daily_bar_unadjusted",
+        [
             {
-                "source": "XTQUANT",
-                "dataset": "exchange_calendar",
-                "role": "PRIMARY",
-                "status": "PRODUCTION_READY",
-                "evidence_kind": "REAL",
-                "blocking_reason": None,
-                "auto_switch": False,
-            },
-            {
-                "source": "XTQUANT",
-                "dataset": "daily_bar_unadjusted",
-                "role": "PRIMARY",
-                "status": "BLOCKED_EXTERNAL_VALIDATION",
-                "evidence_kind": None,
-                "blocking_reason": "XTQuant dataset semantics require external validation",
-                "auto_switch": False,
-            },
-            {
-                "source": "BAOSTOCK",
-                "dataset": "daily_bar_unadjusted",
-                "role": "FALLBACK",
-                "status": "BLOCKED_EXTERNAL_VALIDATION",
-                "evidence_kind": None,
-                "blocking_reason": "requires authorized external validation",
-                "auto_switch": False,
-            },
-        ]
+                "code": "000001.SZ",
+                "trade_date": trading_date,
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.5,
+                "close": close,
+                "pre_close": 10.0,
+                "volume": 1_000_000,
+                "amount": close * 1_000_000,
+            }
+            for trading_date in (date(2026, 7, 15), date(2026, 7, 28))
+        ],
+    )
 
-    def list_batches(self, **_filters: object) -> DataCenterPage:
-        return DataCenterPage((), None)
 
-    def list_versions(self, **_filters: object) -> DataCenterPage:
-        return DataCenterPage(
-            (
+def _batch(source: DataSource, dataset: DatasetKind, row_count: int) -> IngestionBatch:
+    return IngestionBatch(
+        batch_id=new_entity_id("data_batch"),
+        source=source,
+        dataset=dataset,
+        status=IngestionBatchStatus.SUCCEEDED,
+        adapter_version="playwright-real-query-chain",
+        request_params={"scope": "synthetic-loopback"},
+        request_params_json='{"scope":"synthetic-loopback"}',
+        started_at=utc_now(),
+        ended_at=utc_now(),
+        row_count=row_count,
+        security_count=1,
+        manifest_files=(
+            ManifestFileEntry(relative_path="raw/part.parquet", size=1, sha256="a" * 64),
+        ),
+        failure=None,
+        job_run_id=None,
+        empty_result=None,
+    )
+
+
+def _quality_domain(outcome: QualityRunArtifact, relative_path: str) -> QualityRun:
+    return QualityRun(
+        run_id=outcome.run_id,
+        version_id=outcome.version_id,
+        status=outcome.status,
+        rule_version=outcome.rule_version,
+        schema_version=outcome.schema_version,
+        content_sha256=outcome.content_sha256,
+        started_at=outcome.started_at,
+        ended_at=outcome.ended_at,
+        results=tuple(
+            QualityResult(
+                rule_code=item.rule_code,
+                passed=item.status is RuleOutcomeStatus.PASSED,
+                affected_count=item.affected_count,
+                summary=item.summary,
+                report_relative_path=item.row_evidence_relative_path,
+            )
+            for item in outcome.results
+            if item.status is not RuleOutcomeStatus.SKIPPED
+        ),
+        summary_report_relative_path=relative_path,
+        failure=outcome.failure,
+    )
+
+
+def _publish(
+    *,
+    dataset: DatasetKind,
+    source: DataSource,
+    table: pa.Table,
+    artifacts_root: Path,
+    uow_factory: DataSqliteUnitOfWorkFactory,
+    coordinator: CanonicalPublishCoordinator,
+    runner: QualityRunner,
+    reference_data: dict[str, ReferenceDataBinding],
+) -> tuple[DatasetVersion, EntityId, IngestionBatch]:
+    batch = _batch(source, dataset, table.num_rows)
+    version = DatasetVersion.building(
+        version_id=new_entity_id("data_version"),
+        dataset=dataset,
+        schema_version=f"{dataset.value}.v1",
+        code_version="playwright-real-query-chain",
+        rule_version="quality-rules.v1",
+        parent_version_id=None,
+        input_batch_ids=(batch.batch_id,),
+        created_at=utc_now(),
+    )
+    with uow_factory() as uow:
+        uow.data.save_batch(batch)
+        uow.data.save_version(version)
+        uow.commit()
+    request = QualityRequest(
+        dataset=dataset,
+        version_id=version.version_id,
+        rule_version=version.rule_version,
+        schema_version=version.schema_version,
+        code_version=version.code_version,
+        content_sha256="0" * 64,
+        input_batch_ids=version.input_batch_ids,
+        expected_securities=(("000001.SZ",) if dataset is DatasetKind.DAILY_BAR_UNADJUSTED else ()),
+        expected_exchanges=("SZ",),
+        coverage_start=TradingDate(date(2026, 7, 15)),
+        coverage_end=TradingDate(date(2026, 7, 28)),
+        reference_data=reference_data,
+        empty_result=None,
+    )
+    outcome = runner.run(request=request, table=table)
+    directory = QualityArtifactWriter(artifacts_root=artifacts_root).write(
+        outcome=outcome,
+        row_evidence_tables={},
+    )
+    run = _quality_domain(outcome, directory.relative_to(artifacts_root).as_posix())
+    with uow_factory() as uow:
+        uow.data.save_quality_run(run)
+        uow.commit()
+    published = coordinator.coordinate(
+        CanonicalPublishCoordinatorRequest(
+            version=version,
+            tables=(table,),
+            code_version=version.code_version,
+            rule_version=version.rule_version,
+            quality_run_id=run.run_id,
+        )
+    ).version
+    return published, run.run_id, batch
+
+
+def _seed_data_center(
+    *,
+    data_root: Path,
+    uow_factory: DataSqliteUnitOfWorkFactory,
+    jobs: JobService,
+) -> DataCenterQueryService:
+    artifacts_root = data_root / "artifacts"
+    coordinator = CanonicalPublishCoordinator(
+        warehouse=CanonicalWarehouse(data_root=data_root),
+        uow_factory=uow_factory,
+    )
+    loader = PublishedReferenceLoader(data_root=data_root, uow_factory=uow_factory)
+    runner = QualityRunner(
+        engine=QualityEngine(rule_set=default_rule_set()),
+        reference_loader=loader,
+    )
+    calendar, _, _ = _publish(
+        dataset=DatasetKind.EXCHANGE_CALENDAR,
+        source=DataSource.XTQUANT,
+        table=_calendar(),
+        artifacts_root=artifacts_root,
+        uow_factory=uow_factory,
+        coordinator=coordinator,
+        runner=runner,
+        reference_data={},
+    )
+    calendar_binding = ReferenceDataBinding(
+        dataset=calendar.dataset,
+        version_id=calendar.version_id,
+        content_sha256=calendar.content_sha256 or "",
+    )
+    primary_table = _daily(10.5)
+    fallback_table = _daily(10.8)
+    primary, primary_run_id, primary_batch = _publish(
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        source=DataSource.XTQUANT,
+        table=primary_table,
+        artifacts_root=artifacts_root,
+        uow_factory=uow_factory,
+        coordinator=coordinator,
+        runner=runner,
+        reference_data={"exchange_calendar": calendar_binding},
+    )
+    fallback, fallback_run_id, fallback_batch = _publish(
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        source=DataSource.BAOSTOCK,
+        table=fallback_table,
+        artifacts_root=artifacts_root,
+        uow_factory=uow_factory,
+        coordinator=coordinator,
+        runner=runner,
+        reference_data={"exchange_calendar": calendar_binding},
+    )
+    comparison = CrossSourceComparator().compare(
+        request=CrossSourceComparisonRequest(
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            schema_version=primary.schema_version,
+            primary_source=DataSource.XTQUANT,
+            fallback_source=DataSource.BAOSTOCK,
+            primary_version_id=primary.version_id,
+            fallback_version_id=fallback.version_id,
+            primary_batch_id=primary_batch.batch_id,
+            fallback_batch_id=fallback_batch.batch_id,
+            primary_content_sha256=primary.content_sha256 or "",
+            fallback_content_sha256=fallback.content_sha256 or "",
+            primary_quality_run_id=primary_run_id,
+            fallback_quality_run_id=fallback_run_id,
+            primary_table=primary_table,
+            fallback_table=fallback_table,
+            thresholds=default_thresholds(),
+            sample_spec=("fixed:000001.SZ:2026-07-15:2026-07-28",),
+            created_at=utc_now(),
+        )
+    )
+    DifferenceReportArtifactWriter(artifacts_root=artifacts_root).write(outcome=comparison)
+    verifier = DifferenceReportVerifier(artifacts_root=artifacts_root)
+    with uow_factory() as uow:
+        uow.data.save_difference_report(verifier.verify(report_id=comparison.report_id))
+        uow.commit()
+
+    query_adapter = CanonicalQueryAdapter(data_root=data_root, uow_factory=uow_factory)
+    override_service = SourceOverrideService(
+        uow_factory=uow_factory,
+        query_adapter=query_adapter,
+        quality_engine=QualityEngine(rule_set=default_rule_set()),
+        reference_loader=loader,
+        quality_artifact_writer=QualityArtifactWriter(artifacts_root=artifacts_root),
+        publish_coordinator=coordinator,
+        difference_report_verifier=verifier,
+    )
+    pending = override_service.create_override(
+        CreateOverrideRequest(
+            difference_report_id=comparison.report_id,
+            primary_batch_id=primary_batch.batch_id,
+            fallback_batch_id=fallback_batch.batch_id,
+            primary_source=DataSource.XTQUANT.value,
+            fallback_source=DataSource.BAOSTOCK.value,
+            scope_codes=("000001.SZ",),
+            scope_dates=(TradingDate(date(2026, 7, 28)),),
+            fields=("close",),
+            field_replacements=(
                 {
-                    "version_id": VERSION_ID,
-                    "dataset": "exchange_calendar",
-                    "status": "PUBLISHED",
-                    "coverage_start": "2026-07-15",
-                    "coverage_end": "2026-07-28",
-                    "row_count": 2,
-                    "quality_run_id": "data_quality:00000000-0000-4000-8000-000000000006",
+                    "code": "000001.SZ",
+                    "trade_date": "2026-07-28",
+                    "field": "close",
                 },
             ),
-            None,
-        )
-
-    def get_version(self, version_id: str) -> dict[str, object]:
-        return {"version_id": version_id, "dataset": "exchange_calendar", "status": "PUBLISHED"}
-
-    def preview(self, **_filters: object) -> DataCenterPage:
-        return DataCenterPage(
-            (
-                {"exchange": "SH", "trade_date": "2026-07-28", "is_open": True},
-                {"exchange": "SZ", "trade_date": "2026-07-28", "is_open": True},
-            ),
-            None,
-        )
-
-    def list_quality_runs(self, **_filters: object) -> DataCenterPage:
-        return DataCenterPage(
-            (
-                {
-                    "run_id": "data_quality:00000000-0000-4000-8000-000000000006",
-                    "version_id": VERSION_ID,
-                    "status": "PASSED",
-                    "rule_version": "quality-rules.v1",
-                },
-            ),
-            None,
-        )
-
-    def get_quality_run(self, run_id: str) -> dict[str, object]:
-        return {"run_id": run_id, "status": "PASSED", "results": []}
-
-    def list_difference_reports(self, **_filters: object) -> DataCenterPage:
-        return DataCenterPage(
-            (
-                {
-                    "report_id": "data_diff:00000000-0000-4000-8000-000000000006",
-                    "version_id": VERSION_ID,
-                    "primary_source": "XTQUANT",
-                    "fallback_source": "BAOSTOCK",
-                    "threshold_rule_version": "comparison-thresholds.v1",
-                    "total_differences": 1,
-                },
-            ),
-            None,
-        )
-
-    def get_difference_report(self, report_id: str) -> dict[str, object]:
-        return {"report_id": report_id, "total_differences": 1}
-
-    def difference_rows(self, **_filters: object) -> DataCenterPage:
-        return DataCenterPage(({"primary_key": {"code": "000001.SZ"}, "field": "close"},), None)
-
-    def list_source_overrides(self, **_filters: object) -> DataCenterPage:
-        return DataCenterPage(
-            (
-                {
-                    "override_id": "data_override:00000000-0000-4000-8000-000000000006",
-                    "dataset": "daily_bar_unadjusted",
-                    "status": "APPLIED",
-                    "difference_report_id": "data_diff:00000000-0000-4000-8000-000000000006",
-                    "exact_scope_sha256": "c" * 64,
-                    "applied_version_id": VERSION_ID,
-                },
-            ),
-            None,
-        )
-
-    def get_source_override(self, override_id: str) -> dict[str, object]:
-        return {
-            "override_id": override_id,
-            "status": "APPLIED",
-            "difference_report_id": "data_diff:00000000-0000-4000-8000-000000000006",
-            "field_replacements": [
-                {"code": "000001.SZ", "trade_date": "2026-07-28", "field": "close"}
-            ],
-            "fallback_only_keys": [],
-            "exact_scope_sha256": "c" * 64,
-            "application": {"status": "APPLIED", "child_version_id": VERSION_ID},
-            "attempt": {"status": "APPLIED", "child_version_id": VERSION_ID},
-        }
-
-    def list_failures(self, **_filters: object) -> DataCenterPage:
-        return DataCenterPage((), None)
-
-    def list_eod_runs(self, **filters: object) -> DataCenterPage:
-        status = filters.get("status")
-        rows = self._jobs.list_jobs_page(
-            job_type="data.eod.v1",
-            status=JobStatus(str(status)) if status else None,
-            before=None,
-            limit=51,
-        )
-        return DataCenterPage(
-            tuple(
-                {
-                    "job_id": row.job_id,
-                    "status": row.status.value,
-                    "progress": row.progress,
-                    "row_version": row.row_version,
-                    "created_at": row.created_at.to_iso(),
-                }
-                for row in rows
-            ),
-            None,
-        )
+            reason="Playwright verified difference",
+        ),
+        created_at=utc_now(),
+    )
+    override_service.approve_override(pending.override_id, actor="playwright", at=utc_now())
+    override_service.apply_override(
+        pending.override_id,
+        utc_now(),
+        actor="playwright",
+        quality_request=QualityRequest(
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            version_id=new_entity_id("data_version"),
+            rule_version="quality-rules.v1",
+            schema_version=primary.schema_version,
+            code_version=primary.code_version,
+            content_sha256="0" * 64,
+            input_batch_ids=(),
+            expected_securities=("000001.SZ",),
+            expected_exchanges=("SZ",),
+            coverage_start=TradingDate(date(2026, 7, 15)),
+            coverage_end=TradingDate(date(2026, 7, 28)),
+            reference_data={"exchange_calendar": calendar_binding},
+            empty_result=None,
+        ),
+    )
+    return DataCenterQueryService(
+        data_uow_factory=cast(DataUnitOfWorkFactory, uow_factory),
+        preview=cast(CanonicalPreviewPort, query_adapter),
+        difference_verifier=cast(DifferenceVerifierPort, verifier),
+        jobs=jobs,
+    )
 
 
 def _arguments() -> argparse.Namespace:
@@ -228,13 +389,13 @@ def main() -> int:
     fixed_now = datetime(2026, 7, 15, 4, 5, 6, tzinfo=UTC)
 
     with TemporaryDirectory(prefix="quantking-web-e2e-") as temporary:
-        database = Path(temporary) / "e2e.db"
-        (Path(temporary) / "warehouse").mkdir()
+        data_root = Path(temporary)
+        database = data_root / "e2e.db"
         initialize_database(database)
-        engine = create_sqlite_engine(database, busy_timeout_ms=250)
-        service = JobService(SqliteUnitOfWorkFactory(engine), clock=lambda: fixed_now)
+        engine = create_data_engine(database, busy_timeout_ms=1_000)
+        jobs = JobService(SqliteUnitOfWorkFactory(engine), clock=lambda: fixed_now)
         with patch("quantking.jobs.services.new_entity_id", return_value=FIXED_JOB_ID):
-            job = service.create_job(
+            job = jobs.create_job(
                 CreateJob(
                     job_type="synthetic",
                     idempotency_key="playwright-web-shell",
@@ -245,23 +406,29 @@ def main() -> int:
                     log_id="logs/jobs/playwright-web-shell.jsonl",
                 )
             )
-        service.transition(job.job_id, JobStatus.RUNNING, worker_id="e2e-worker")
-        service.report_progress(
+        jobs.transition(job.job_id, JobStatus.RUNNING, worker_id="e2e-worker")
+        jobs.report_progress(
             job.job_id,
             stage="synthetic-step",
             progress=0.5,
             summary="synthetic progress",
         )
+        data_uow_factory = DataSqliteUnitOfWorkFactory(engine)
+        center = _seed_data_center(
+            data_root=data_root,
+            uow_factory=data_uow_factory,
+            jobs=jobs,
+        )
         eod = EodCommandService(
-            service,
+            jobs,
             config=EodExecutionConfig.production(code_version="playwright"),
             base_resolver=_BaseResolver(),
         )
         app = create_app(
-            service,
+            jobs,
             eod_command_port=eod,
-            job_command_port=service,
-            data_center_port=_SyntheticDataCenter(service),
+            job_command_port=jobs,
+            data_center_port=center,
             static_root=static_root,
             clock=lambda: fixed_now,
         )

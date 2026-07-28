@@ -22,7 +22,7 @@ from quantking.data.adapters.warehouse.errors import (
     DatasetVersionNotQueryableError,
     QueryContractError,
 )
-from quantking.data.center import InvalidDataCenterQueryError
+from quantking.data.center import DataCenterReadIntegrityError, InvalidDataCenterQueryError
 from quantking.data.comparison.verifier import DifferenceReportVerificationError
 from quantking.web.api import InvalidEodRequestError, InvalidRequestError, create_api_router
 from quantking.web.data_center import DataCenterReadPort
@@ -77,6 +77,12 @@ def _install_error_handlers(app: FastAPI) -> None:
         _request: Request, _error_value: InvalidDataCenterQueryError
     ) -> JSONResponse:
         return _error(400, "invalid_data_query", "数据查询参数无效。")
+
+    @app.exception_handler(DataCenterReadIntegrityError)
+    async def data_read_integrity(
+        _request: Request, _error_value: DataCenterReadIntegrityError
+    ) -> JSONResponse:
+        return _error(409, "data_lineage_invalid", "数据血缘验证失败。")
 
     @app.exception_handler(QueryContractError)
     async def query_contract(_request: Request, _error_value: QueryContractError) -> JSONResponse:

@@ -99,9 +99,13 @@ _TOKEN_RE = re.compile(r"(?i)(token|password|secret|api[_-]?key)=[^\s,;]+")
 class OverrideApplicationAttempt:
     attempt_id: EntityId
     override_id: EntityId
+    attempt_no: int
     child_version_id: EntityId
     input_fingerprint: str
     status: str
+    claimed_by: str
+    started_at: UtcTimestamp
+    ended_at: UtcTimestamp | None
     failure_message: str | None
 
 
@@ -114,12 +118,17 @@ class OverrideApplicationFailureState:
 
 @dataclass(frozen=True, slots=True)
 class OverrideApplicationBinding:
+    application_id: EntityId
     override_id: EntityId
     child_version_id: EntityId
     input_fingerprint: str
     status: str
     report_sha256: str | None
     contribution_scope_sha256: str | None
+    claimed_by: str
+    claimed_at: UtcTimestamp
+    updated_at: UtcTimestamp
+    failure_message: str | None
 
 
 def create_data_engine(database_path: Path, *, busy_timeout_ms: int) -> Engine:
@@ -596,9 +605,13 @@ def _override_attempt_domain(
     return OverrideApplicationAttempt(
         attempt_id=parse_entity_id(row.attempt_id),
         override_id=parse_entity_id(row.override_id),
+        attempt_no=row.attempt_no,
         child_version_id=parse_entity_id(row.child_version_id),
         input_fingerprint=row.input_fingerprint,
         status=row.status,
+        claimed_by=row.claimed_by,
+        started_at=UtcTimestamp.from_iso(row.started_at),
+        ended_at=_timestamp(row.ended_at),
         failure_message=row.failure_message,
     )
 
@@ -1728,27 +1741,81 @@ class DataRepository:
             child_version_id=row.child_version_id,
             allow_applied=True,
         )
+        return self._override_binding_domain(row)
+
+    @staticmethod
+    def _override_binding_domain(
+        row: SourceOverrideApplicationRow,
+    ) -> OverrideApplicationBinding:
         return OverrideApplicationBinding(
+            application_id=parse_entity_id(row.application_id),
             override_id=parse_entity_id(row.override_id),
             child_version_id=parse_entity_id(row.child_version_id),
             input_fingerprint=row.input_fingerprint,
             status=row.status,
             report_sha256=row.report_sha256,
             contribution_scope_sha256=row.contribution_scope_sha256,
+            claimed_by=row.claimed_by,
+            claimed_at=UtcTimestamp.from_iso(row.claimed_at),
+            updated_at=UtcTimestamp.from_iso(row.updated_at),
+            failure_message=row.failure_message,
         )
+
+    def find_latest_override_application_binding(
+        self, override_id: str
+    ) -> OverrideApplicationBinding | None:
+        row = self._session.scalar(
+            select(SourceOverrideApplicationRow)
+            .where(SourceOverrideApplicationRow.override_id == override_id)
+            .order_by(
+                SourceOverrideApplicationRow.claimed_at.desc(),
+                SourceOverrideApplicationRow.application_id.desc(),
+            )
+            .limit(1)
+        )
+        return self._override_binding_domain(row) if row is not None else None
+
+    def find_active_override_application_binding(
+        self, override_id: str
+    ) -> OverrideApplicationBinding | None:
+        row = self._session.scalar(
+            select(SourceOverrideApplicationRow).where(
+                SourceOverrideApplicationRow.override_id == override_id,
+                SourceOverrideApplicationRow.status.in_(["CLAIMED", "PUBLISHED", "APPLIED"]),
+            )
+        )
+        return self._override_binding_domain(row) if row is not None else None
 
     def find_last_override_application_attempt(
         self, override_id: str
-    ) -> OverrideApplicationAttempt:
+    ) -> OverrideApplicationAttempt | None:
         row = self._session.scalar(
             select(SourceOverrideApplicationAttemptRow)
             .where(SourceOverrideApplicationAttemptRow.override_id == override_id)
             .order_by(SourceOverrideApplicationAttemptRow.attempt_no.desc())
             .limit(1)
         )
-        if row is None:
-            raise InvalidIdError("override application attempt does not exist")
-        return _override_attempt_domain(row)
+        return _override_attempt_domain(row) if row is not None else None
+
+    def list_override_audits(self, override_id: str, *, limit: int) -> list[AuditRecord]:
+        rows = self._session.scalars(
+            select(AuditRecordRow)
+            .where(AuditRecordRow.entity == override_id)
+            .order_by(AuditRecordRow.audit_id.desc())
+            .limit(limit)
+        )
+        return [
+            AuditRecord(
+                audit_id=row.audit_id,
+                actor=row.actor,
+                entity=row.entity,
+                action=row.action,
+                correlation_id=row.correlation_id,
+                occurred_at=UtcTimestamp.from_iso(row.occurred_at),
+                details=_load_mapping(row.details_json),
+            )
+            for row in rows
+        ]
 
     def record_override_application_failure(
         self,
@@ -1821,6 +1888,27 @@ class DataRepository:
         if status is not None:
             statement = statement.where(SourceCandidateAssessmentRow.status == status.value)
         return [_assessment_domain(item) for item in self._session.scalars(statement)]
+
+    def find_latest_source_candidate_assessment(
+        self,
+        *,
+        source: str,
+        dataset: DatasetKind,
+    ) -> SourceCandidateAssessment | None:
+        """Return the newest persisted assessment for one exact matrix cell."""
+        row = self._session.scalar(
+            select(SourceCandidateAssessmentRow)
+            .where(
+                SourceCandidateAssessmentRow.source == source,
+                SourceCandidateAssessmentRow.dataset == dataset.value,
+            )
+            .order_by(
+                SourceCandidateAssessmentRow.created_at.desc(),
+                SourceCandidateAssessmentRow.assessment_id.desc(),
+            )
+            .limit(1)
+        )
+        return _assessment_domain(row) if row is not None else None
 
     # -- audit (delegates to the shared audit_records table) --------------
 

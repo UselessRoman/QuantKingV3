@@ -4,6 +4,7 @@ import sys
 
 from fastapi.testclient import TestClient
 
+from quantking.data.center import DataCenterReadIntegrityError
 from quantking.web.app import create_app
 from quantking.web.data_center import DataCenterPage
 
@@ -71,3 +72,28 @@ def test_list_contract_rejects_invalid_cursor_limit_and_enum() -> None:
     assert bad_cursor.status_code == 400
     assert bad_limit.status_code == 422
     assert bad_dataset.status_code == 422
+
+
+def test_read_lineage_corruption_maps_to_stable_sanitized_409() -> None:
+    class _CorruptDataCenter(_DataCenter):
+        def get_difference_report(self, report_id: str) -> object:
+            del report_id
+            raise DataCenterReadIntegrityError(
+                r"SQLite E:\secret\warehouse payload token=do-not-leak"
+            )
+
+    app = create_app(_Jobs(), data_center_port=_CorruptDataCenter())
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/data/difference-reports/data_diff:00000000-0000-4000-8000-000000000006"
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": {
+            "code": "data_lineage_invalid",
+            "message": "数据血缘验证失败。",
+        }
+    }
+    assert "secret" not in response.text
+    assert "token" not in response.text

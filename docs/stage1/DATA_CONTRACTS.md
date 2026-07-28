@@ -8,18 +8,25 @@
 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。真实 XTQuant 样本验证仍须逐项授权，合成数据不能
 标生产可用。S1-05 已于 2026-07-27 在提交
 `e580d6963e01b1301dc26f29ed57a0b5b4770a0f` 完成主验收，证据见
-[S1-05 主验收证据](S1-05_ACCEPTANCE.md)。S1-06 离线实现已提交、等待主验收；
+[S1-05 主验收证据](S1-05_ACCEPTANCE.md)。S1-06-R1 修复已提交、等待主验收；
 S1-07～S1-08 未开始、未获授权。
 
 ## 数据中心只读查询合同（S1-06）
 
-- 列表只接受 allowlist 过滤，使用时间加稳定 ID 的不透明 keyset cursor；默认 50、上限 100。
+- 列表只接受 allowlist 过滤，使用时间加稳定 ID 的不透明 keyset cursor；Cursor 信封严格
+  绑定资源类型、全部规范过滤、排序版本与查询指纹，跨过滤复用稳定返回 400；默认 50、上限 100。
 - 预览只接受完整 `data_version:` ID 和 `PUBLISHED`，拒绝 `latest`、路径、SQL、未知字段
   及其他状态；每页最多 200 行，DuckDB 在 Canonical sort key 上执行游标和限制。
 - 每次预览复验 SQLite version、manifest SHA、`COMPLETE`、文件集合、逐文件 SHA、schema
   与全部版本凭证；任何漂移均不可查询。
-- DifferenceReport 摘要和行详情读取前通过 verifier；APPLIED Override 还须复验
-  application、attempt 和 child version 血缘。
+- DifferenceReport 摘要、行详情及 Override 展示统一经过 verified loader，逐项比较报告
+  ID、双方 source/batch/version/content/quality、样本 SHA、阈值版本、汇总、创建时间和
+  报告 SHA；双方版本必须为 PUBLISHED、QualityRun 必须为 PASSED 且凭证一致。
+- Override 明确区分无 application、FAILED attempt 与 active application；active binding
+  必须与 attempt 的 child/fingerprint/status 一致，已发布子版本还要通过 Warehouse 复验并
+  精确匹配 manifest `source_override` provenance、report SHA 和 contribution scope SHA。
+- 来源页同时展示权威 matrix role/status 与最新持久 assessment；没有 assessment 时
+  `evidence_kind=null`，SYNTHETIC 证据不能成为 assessment 的生产可用结论，也不能自动切源。
 - 失败响应不返回绝对路径、provider payload、请求清单、机密、异常栈、SQL 或数据库细节。
 
 本文件固化 Stage 1 六类 Canonical 数据集的可执行合同。权威来源是 `src/quantking/data/schemas.py`（框架无关描述符）和 `src/quantking/data/adapters/canonical_schema.py`（PyArrow 映射与验证）。文档不得替代 schema 与契约测试。

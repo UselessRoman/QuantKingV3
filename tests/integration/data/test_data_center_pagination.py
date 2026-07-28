@@ -11,6 +11,11 @@ from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
 )
+from quantking.data.assessment.models import (
+    AssessmentStatus,
+    EvidenceKind,
+    SourceCandidateAssessment,
+)
 from quantking.data.models import (
     DatasetKind,
     DataSource,
@@ -82,4 +87,50 @@ def test_database_keyset_page_is_stable_across_concurrent_insert(tmp_path: Path)
         raise AssertionError("keyset pagination did not terminate")
 
     assert seen == {str(item.batch_id) for item in originals}
+    engine.dispose()
+
+
+def test_latest_source_assessment_is_selected_in_sql_by_time_and_stable_id(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "source-assessment.db"
+    initialize_database(database)
+    engine = create_data_engine(database, busy_timeout_ms=250)
+    factory = DataSqliteUnitOfWorkFactory(engine)
+    base = datetime(2026, 7, 28, tzinfo=UTC)
+    assessments = [
+        SourceCandidateAssessment(
+            assessment_id=new_entity_id("data_assessment"),
+            source="BAOSTOCK",
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            evidence_kind=EvidenceKind.SYNTHETIC,
+            semantic_contract_verified=True,
+            schema_unit_verified=True,
+            coverage_adequate=True,
+            quality_passed=True,
+            fixed_sample_differences_adequate=True,
+            stability_runs=index,
+            status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
+            blocking_reason="external validation required",
+            assessment_config_version="assessment.v1",
+            sample_spec_version="sample.v1",
+            rule_version="rules.v1",
+            evidence_relative_path=f"assessments/{index}.json",
+            evidence_sha256=f"{index + 1:x}".rjust(64, "0"),
+            created_at=UtcTimestamp(base + timedelta(seconds=index)),
+        )
+        for index in range(2)
+    ]
+    with factory() as uow:
+        for assessment in assessments:
+            uow.data.save_source_candidate_assessment(assessment)
+        uow.commit()
+
+    with factory() as uow:
+        latest = uow.data.find_latest_source_candidate_assessment(
+            source="BAOSTOCK",
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        )
+
+    assert latest == assessments[-1]
     engine.dispose()

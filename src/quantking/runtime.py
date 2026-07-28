@@ -33,6 +33,7 @@ from quantking.data.adapters.warehouse.publish_coordinator import (
 from quantking.data.adapters.warehouse.query import CanonicalQueryAdapter
 from quantking.data.adapters.warehouse.raw_store import RawBatchPublisher
 from quantking.data.center import (
+    CanonicalPreviewPort,
     DataCenterQueryService,
     DataUnitOfWorkFactory,
     DifferenceVerifierPort,
@@ -176,7 +177,10 @@ def build_eod_runtime(
         job_command_port=jobs,
         data_center_port=DataCenterQueryService(
             data_uow_factory=cast(DataUnitOfWorkFactory, data_uow),
-            preview=CanonicalQueryAdapter(data_root=data_root, uow_factory=data_uow),
+            preview=cast(
+                CanonicalPreviewPort,
+                CanonicalQueryAdapter(data_root=data_root, uow_factory=data_uow),
+            ),
             difference_verifier=cast(
                 DifferenceVerifierPort,
                 DifferenceReportVerifier(artifacts_root=data_root / "artifacts"),

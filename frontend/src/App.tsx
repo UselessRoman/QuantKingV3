@@ -59,6 +59,18 @@ const datasets = [
   "trading_status",
   "benchmark_index_daily",
 ] as const;
+const sources = ["XTQUANT", "BAOSTOCK", "AKSHARE", "TUSHARE"] as const;
+const filterDefaults: Record<Tab, Record<string, string>> = {
+  overview: {},
+  sources: {},
+  batches: { dataset: "", source: "", status: "", started_from: "", started_to: "" },
+  versions: { dataset: "", status: "" },
+  quality: { version_id: "", status: "" },
+  differences: { version_id: "", primary_source: "" },
+  overrides: { dataset: "", status: "" },
+  eod: { status: "" },
+  failures: {},
+};
 
 const connectionLabels = {
   connecting: "正在连接",
@@ -149,6 +161,79 @@ function DataTable({
   );
 }
 
+function FilterBar({
+  tab,
+  values,
+  onChange,
+}: {
+  tab: Tab;
+  values: Record<string, string>;
+  onChange: (name: string, value: string) => void;
+}) {
+  const datasetSelect = ["batches", "versions", "overrides"].includes(tab);
+  if (!datasetSelect && !["quality", "differences", "eod"].includes(tab)) return null;
+  return (
+    <div className="filters" aria-label={`${tab} 过滤`}>
+      {datasetSelect && (
+        <label>数据集<select aria-label={`${tab} dataset`} value={values.dataset} onChange={(event) => onChange("dataset", event.target.value)}>
+          <option value="">全部</option>{datasets.map((value) => <option key={value}>{value}</option>)}
+        </select></label>
+      )}
+      {tab === "batches" && (
+        <>
+          <label>来源<select aria-label="batches source" value={values.source} onChange={(event) => onChange("source", event.target.value)}>
+            <option value="">全部</option>{sources.map((value) => <option key={value}>{value}</option>)}
+          </select></label>
+          <label>状态<select aria-label="batches status" value={values.status} onChange={(event) => onChange("status", event.target.value)}>
+            <option value="">全部</option>{["RUNNING", "SUCCEEDED", "PARTIAL", "FAILED"].map((value) => <option key={value}>{value}</option>)}
+          </select></label>
+          <label>开始时间<input aria-label="batches started from" type="datetime-local" value={values.started_from} onChange={(event) => onChange("started_from", event.target.value)} /></label>
+          <label>结束时间<input aria-label="batches started to" type="datetime-local" value={values.started_to} onChange={(event) => onChange("started_to", event.target.value)} /></label>
+        </>
+      )}
+      {tab === "versions" && <label>状态<select aria-label="versions status" value={values.status} onChange={(event) => onChange("status", event.target.value)}><option value="">全部</option>{["BUILDING", "VALIDATED", "PUBLISHED", "FAILED"].map((value) => <option key={value}>{value}</option>)}</select></label>}
+      {tab === "quality" && (
+        <>
+          <label>Version ID<input aria-label="quality version" value={values.version_id} onChange={(event) => onChange("version_id", event.target.value)} /></label>
+          <label>状态<select aria-label="quality status" value={values.status} onChange={(event) => onChange("status", event.target.value)}><option value="">全部</option>{["RUNNING", "PASSED", "FAILED", "SKIPPED"].map((value) => <option key={value}>{value}</option>)}</select></label>
+        </>
+      )}
+      {tab === "differences" && (
+        <>
+          <label>Version ID<input aria-label="differences version" value={values.version_id} onChange={(event) => onChange("version_id", event.target.value)} /></label>
+          <label>主来源<select aria-label="differences source" value={values.primary_source} onChange={(event) => onChange("primary_source", event.target.value)}><option value="">全部</option>{sources.map((value) => <option key={value}>{value}</option>)}</select></label>
+        </>
+      )}
+      {tab === "overrides" && <label>状态<select aria-label="overrides status" value={values.status} onChange={(event) => onChange("status", event.target.value)}><option value="">全部</option>{["PENDING", "APPROVED", "REJECTED", "APPLIED"].map((value) => <option key={value}>{value}</option>)}</select></label>}
+      {tab === "eod" && <label>状态<select aria-label="eod status" value={values.status} onChange={(event) => onChange("status", event.target.value)}><option value="">全部</option>{["PENDING", "RUNNING", "CANCEL_REQUESTED", "CANCELLED", "SUCCEEDED", "FAILED"].map((value) => <option key={value}>{value}</option>)}</select></label>}
+    </div>
+  );
+}
+
+function VersionLineage({ value }: { value: Record<string, unknown> }) {
+  return (
+    <div className="lineage-detail" aria-label="Version 完整血缘">
+      <h3>Version 血缘</h3>
+      <dl>
+        {["version_id", "parent_version_id", "input_batch_ids", "coverage", "coverage_start", "coverage_end", "quality_run_id", "schema_version", "rule_version", "content_sha256"].map((key) => (
+          <div key={key}><dt>{key}</dt><dd>{displayValue(key, value[key])}</dd></div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
+function OverrideLineage({ value }: { value: Record<string, unknown> }) {
+  return (
+    <div className="lineage-detail" aria-label="Override 完整血缘">
+      <h3>Override 精确血缘与审计</h3>
+      {["override_id", "difference_report_id", "primary_source", "fallback_source", "primary_batch_id", "fallback_batch_id", "exact_scope_sha256", "field_replacements", "fallback_only_keys", "application", "last_application", "attempt", "child", "approved_by", "approved_at", "applied_at", "audits"].map((key) => (
+        <div className="lineage-row" key={key}><strong>{key}</strong><pre>{displayValue(key, value[key])}</pre></div>
+      ))}
+    </div>
+  );
+}
+
 export function App({ api = webApi, eventSourceFactory = defaultEventSourceFactory }: AppProps) {
   const [health, setHealth] = useState<"checking" | "healthy" | "unhealthy">("checking");
   const [tab, setTab] = useState<Tab>("overview");
@@ -157,12 +242,27 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
   const [dataError, setDataError] = useState("");
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [pageHistory, setPageHistory] = useState<string[]>([]);
+  const [filters, setFilters] = useState(filterDefaults);
   const [jobId, setJobId] = useState("");
   const [job, setJob] = useState<JobResponse | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
   const [stream, dispatch] = useReducer(streamReducer, initialStreamState);
   const cursorRef = useRef(0);
-  const [preview, setPreview] = useState<{ versionId: string; rows: Record<string, unknown>[] } | null>(null);
+  const [versionDetail, setVersionDetail] = useState<Record<string, unknown> | null>(null);
+  const [preview, setPreview] = useState<{
+    versionId: string;
+    rows: Record<string, unknown>[];
+    nextCursor: string | null;
+    history: string[];
+  } | null>(null);
+  const [overrideDetail, setOverrideDetail] = useState<Record<string, unknown> | null>(null);
+  const [differenceDetail, setDifferenceDetail] = useState<{
+    reportId: string;
+    rows: Record<string, unknown>[];
+    nextCursor: string | null;
+    history: string[];
+  } | null>(null);
+  const [differenceReport, setDifferenceReport] = useState<Record<string, unknown> | null>(null);
   const [detail, setDetail] = useState<{ title: string; rows: Record<string, unknown>[] } | null>(null);
   const [startDate, setStartDate] = useState("2026-07-28");
   const [endDate, setEndDate] = useState("2026-07-28");
@@ -193,10 +293,17 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
     setDataState("loading");
     setDataError("");
     try {
-      const separator = item.path.includes("?") ? "&" : "?";
-      const result = await api.getData(
-        cursor ? `${item.path}${separator}cursor=${encodeURIComponent(cursor)}` : item.path,
-      );
+      const params = new URLSearchParams();
+      for (const [name, value] of Object.entries(filters[target])) {
+        if (value) {
+          const normalized = name.startsWith("started_")
+            ? new Date(`${value}:00+08:00`).toISOString()
+            : value;
+          params.set(name, normalized);
+        }
+      }
+      if (cursor) params.set("cursor", cursor);
+      const result = await api.getData(`${item.path}${params.size ? `?${params}` : ""}`);
       setData(result);
       const page = result as Partial<CursorPage>;
       setNextCursor(page.next_cursor ?? null);
@@ -212,8 +319,12 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
     setNextCursor(null);
     setDetail(null);
     setPreview(null);
+    setVersionDetail(null);
+    setOverrideDetail(null);
+    setDifferenceDetail(null);
+    setDifferenceReport(null);
     void load(tab);
-  }, [tab]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [tab, JSON.stringify(filters[tab])]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let active = true;
@@ -299,6 +410,25 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
     catch (error) { setJobError(safeMessage(error)); }
   };
 
+  const loadPreviewPage = async (
+    versionId: string,
+    cursor?: string,
+    history: string[] = [],
+  ) => {
+    if (!api.getData) return;
+    const params = new URLSearchParams({ limit: "50" });
+    if (cursor) params.set("cursor", cursor);
+    const result = await api.getData(
+      `/api/data/versions/${encodeURIComponent(versionId)}/preview?${params}`,
+    ) as CursorPage;
+    setPreview({
+      versionId,
+      rows: result.items,
+      nextCursor: result.next_cursor,
+      history,
+    });
+  };
+
   const showPreview = async (row: Record<string, unknown>) => {
     const versionId = String(row.version_id ?? "");
     if (!versionId || row.status !== "PUBLISHED" || !api.getData) {
@@ -307,15 +437,35 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
     }
     setDataState("loading");
     try {
-      const result = await api.getData(
-        `/api/data/versions/${encodeURIComponent(versionId)}/preview?limit=50`,
-      ) as CursorPage;
-      setPreview({ versionId, rows: result.items });
+      const detailResult = await api.getData(
+        `/api/data/versions/${encodeURIComponent(versionId)}`,
+      ) as Record<string, unknown>;
+      setVersionDetail(detailResult);
+      await loadPreviewPage(versionId);
       setDataState("ready");
     } catch (error) {
       setDataError(safeMessage(error));
       setDataState("error");
     }
+  };
+
+  const loadDifferencePage = async (
+    reportId: string,
+    cursor?: string,
+    history: string[] = [],
+  ) => {
+    if (!api.getData) return;
+    const params = new URLSearchParams({ limit: "50" });
+    if (cursor) params.set("cursor", cursor);
+    const result = await api.getData(
+      `/api/data/difference-reports/${encodeURIComponent(reportId)}/rows?${params}`,
+    ) as CursorPage;
+    setDifferenceDetail({
+      reportId,
+      rows: result.items,
+      nextCursor: result.next_cursor,
+      history,
+    });
   };
 
   const inspectRow = async (row: Record<string, unknown>) => {
@@ -330,16 +480,16 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
         setDetail({ title: `质量规则 · ${runId}`, rows: result.results ?? [] });
       } else if (tab === "differences") {
         const reportId = String(row.report_id);
-        const result = await api.getData(
-          `/api/data/difference-reports/${encodeURIComponent(reportId)}/rows?limit=50`,
-        ) as CursorPage;
-        setDetail({ title: `行级差异 · ${reportId}`, rows: result.items });
+        setDifferenceReport(await api.getData(
+          `/api/data/difference-reports/${encodeURIComponent(reportId)}`,
+        ) as Record<string, unknown>);
+        await loadDifferencePage(reportId);
       } else if (tab === "overrides") {
         const overrideId = String(row.override_id);
         const result = await api.getData(
           `/api/data/source-overrides/${encodeURIComponent(overrideId)}`,
         ) as Record<string, unknown>;
-        setDetail({ title: `Override 审计血缘 · ${overrideId}`, rows: [result] });
+        setOverrideDetail(result);
       }
       setDataState("ready");
     } catch (error) {
@@ -352,8 +502,9 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
     event.preventDefault();
     setEodMessage("");
     if (!api.enqueueEod || selected.length === 0) return setEodMessage("至少选择一个数据集。");
+    const normalizedDatasets = datasets.filter((dataset) => selected.includes(dataset));
     const mapping = baseMode === "mapping"
-      ? Object.fromEntries(selected.map((dataset) => [dataset, baseVersions[dataset]?.trim() ?? ""]))
+      ? Object.fromEntries(normalizedDatasets.map((dataset) => [dataset, baseVersions[dataset]?.trim() ?? ""]))
       : {};
     if (baseMode === "mapping" && Object.values(mapping).some((value) => !value)) {
       return setEodMessage("完整映射模式要求每个所选数据集都有精确 version_id。");
@@ -361,7 +512,7 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
     const request: EodRequest = {
       start_date: startDate,
       end_date: endDate,
-      datasets: selected,
+      datasets: normalizedDatasets,
       publish_intent: "PUBLISH_AFTER_QUALITY",
       base_versions: mapping,
     };
@@ -422,6 +573,14 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
         {dataState === "ready" && tab !== "eod" && (
           <section>
             {tab === "sources" && <p className="notice">阻断状态是明确能力结论；合成证据不会显示为生产可用，且所有 auto_switch 均为 false。</p>}
+            <FilterBar
+              tab={tab}
+              values={filters[tab]}
+              onChange={(name, value) => setFilters((current) => ({
+                ...current,
+                [tab]: { ...current[tab], [name]: value },
+              }))}
+            />
             <DataTable
               rows={rows}
               onPreview={
@@ -451,8 +610,54 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
         {preview && tab === "versions" && (
           <section>
             <div className="section-title"><h3>版本预览</h3><code>{preview.versionId}</code></div>
+            {versionDetail && <VersionLineage value={versionDetail} />}
             <DataTable rows={preview.rows} />
+            <div className="pager">
+              <button className="secondary" disabled={preview.history.length === 0} onClick={() => {
+                const history = preview.history.slice(0, -1);
+                void loadPreviewPage(preview.versionId, history.at(-1), history);
+              }}>预览上一页</button>
+              <button disabled={!preview.nextCursor} onClick={() => {
+                if (!preview.nextCursor) return;
+                void loadPreviewPage(
+                  preview.versionId,
+                  preview.nextCursor,
+                  [...preview.history, preview.nextCursor],
+                );
+              }}>预览下一页</button>
+            </div>
           </section>
+        )}
+
+        {differenceDetail && tab === "differences" && (
+          <section>
+            <div className="section-title"><h3>行级差异</h3><code>{differenceDetail.reportId}</code></div>
+            {differenceReport && (
+              <p className="notice">
+                threshold_rule_version：<code>{displayValue("threshold_rule_version", differenceReport.threshold_rule_version)}</code>
+                {" · "}total_differences：{displayValue("total_differences", differenceReport.total_differences)}
+              </p>
+            )}
+            <DataTable rows={differenceDetail.rows} />
+            <div className="pager">
+              <button className="secondary" disabled={differenceDetail.history.length === 0} onClick={() => {
+                const history = differenceDetail.history.slice(0, -1);
+                void loadDifferencePage(differenceDetail.reportId, history.at(-1), history);
+              }}>差异上一页</button>
+              <button disabled={!differenceDetail.nextCursor} onClick={() => {
+                if (!differenceDetail.nextCursor) return;
+                void loadDifferencePage(
+                  differenceDetail.reportId,
+                  differenceDetail.nextCursor,
+                  [...differenceDetail.history, differenceDetail.nextCursor],
+                );
+              }}>差异下一页</button>
+            </div>
+          </section>
+        )}
+
+        {overrideDetail && tab === "overrides" && (
+          <section><OverrideLineage value={overrideDetail} /></section>
         )}
 
         {detail && (
@@ -465,6 +670,14 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
         {tab === "eod" && dataState !== "loading" && (
           <>
             <section>
+              <FilterBar
+                tab={tab}
+                values={filters[tab]}
+                onChange={(name, value) => setFilters((current) => ({
+                  ...current,
+                  [tab]: { ...current[tab], [name]: value },
+                }))}
+              />
               <h3>手动入队 EOD</h3>
               <form onSubmit={submitEod} className="eod-form">
                 <div className="form-grid">
