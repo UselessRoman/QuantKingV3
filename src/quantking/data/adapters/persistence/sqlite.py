@@ -77,12 +77,6 @@ from quantking.data.models import (
     SourceOverrideStatus,
     transition_override,
 )
-from quantking.data.validation.persistence import (
-    _AssessmentPersistenceRecord,
-    _record_receipt_is_valid,
-)
-from quantking.data.validation.samples import load_packaged_fixed_sample
-from quantking.data.validation.service import assess_verified_runs, common_fingerprint
 from quantking.jobs.adapters.persistence.models import AuditRecordRow
 from quantking.jobs.adapters.persistence.sqlite import (
     create_sqlite_engine as _create_jobs_engine,
@@ -678,14 +672,8 @@ def _assessment_domain(row: SourceCandidateAssessmentRow) -> SourceCandidateAsse
 class DataRepository:
     """Repository scoped to one SQLAlchemy session and one short transaction."""
 
-    def __init__(
-        self,
-        session: Session,
-        *,
-        assessment_persistence_key: bytes | None = None,
-    ) -> None:
+    def __init__(self, session: Session) -> None:
         self._session = session
-        self._assessment_persistence_key = assessment_persistence_key
 
     # -- batches -----------------------------------------------------------
 
@@ -1882,92 +1870,7 @@ class DataRepository:
             failure_message=sanitized,
         )
 
-    # -- source candidate assessments -------------------------------------
-
-    def _persist_verified_source_assessment(
-        self, record: _AssessmentPersistenceRecord
-    ) -> SourceCandidateAssessment:
-        if not isinstance(record, _AssessmentPersistenceRecord):
-            raise TypeError(
-                "source assessment persistence requires the verification application service"
-            )
-        if not _record_receipt_is_valid(record, self._assessment_persistence_key):
-            raise InvalidDataTransitionError(
-                "source assessment requires a current directory-verification receipt"
-            )
-        evidence = record.evidence
-        assessment = evidence.assessment
-        if (
-            assessment.evidence_sha256 != evidence.evidence_manifest_sha256
-            or assessment.evidence_relative_path != evidence.evidence_relative_path
-        ):
-            raise InvalidDataTransitionError(
-                "source assessment does not bind the verified evidence artifact"
-            )
-        expected = assess_verified_runs(
-            verified_runs=evidence.verified_runs,
-            evidence_relative_path=evidence.evidence_relative_path,
-            evidence_sha256=evidence.evidence_manifest_sha256,
-            created_at=assessment.created_at,
-            sample_eligibility=evidence.sample_eligibility,
-        )
-        controlled_sample = load_packaged_fixed_sample()
-        if (
-            evidence.sample_eligibility is not controlled_sample.eligibility
-            or assessment.sample_spec_version != controlled_sample.sample_spec_version
-            or any(
-                run.sample_spec_sha256 != controlled_sample.sample_spec_sha256
-                or run.versions.sample_spec_version != controlled_sample.sample_spec_version
-                for run in evidence.verified_runs
-            )
-        ):
-            raise InvalidDataTransitionError(
-                "source assessment does not bind the controlled fixed sample"
-            )
-        if expected != assessment:
-            raise InvalidDataTransitionError(
-                "source assessment is not the deterministic result of verified runs"
-            )
-        if (
-            assessment.evidence_kind is EvidenceKind.SYNTHETIC
-            and assessment.status is not AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION
-        ):
-            raise InvalidDataTransitionError("synthetic assessment must remain blocked")
-        if evidence.common_run_fingerprint != common_fingerprint(evidence.verified_runs):
-            raise InvalidDataTransitionError("source assessment run fingerprint mismatch")
-        if assessment.status is AssessmentStatus.PRODUCTION_READY and any(
-            run.raw_manifest_sha256 is None
-            or run.canonical_content_sha256 is None
-            or run.quality_manifest_sha256 is None
-            for run in evidence.verified_runs
-        ):
-            raise InvalidDataTransitionError(
-                "production assessment lacks deeply verified evidence lineage"
-            )
-        if not record.signer_profiles or (
-            len(record.result_attestation_sha256s) != len(evidence.verified_runs)
-        ):
-            raise InvalidDataTransitionError(
-                "source assessment signer/attestation receipt is incomplete"
-            )
-        values = {
-            **_assessment_row_values(assessment),
-            "signer_profiles_json": json.dumps(
-                list(record.signer_profiles), separators=(",", ":"), sort_keys=True
-            ),
-            "result_attestation_sha256s_json": json.dumps(
-                list(record.result_attestation_sha256s),
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-        }
-        row = self._session.get(SourceCandidateAssessmentRow, str(assessment.assessment_id))
-        if row is not None and not _row_matches(row, values):
-            raise InvalidDataTransitionError("source assessment evidence is immutable")
-        if row is None:
-            self._session.add(SourceCandidateAssessmentRow(**values))
-        self._session.flush()
-        return assessment
+    # -- source candidate assessments (read-only) -------------------------
 
     def get_source_candidate_assessment(self, assessment_id: str) -> SourceCandidateAssessment:
         row = self._session.get(SourceCandidateAssessmentRow, assessment_id)
@@ -2067,23 +1970,14 @@ class DataRepository:
 class DataSqliteUnitOfWork:
     """Fresh session per call; exceptions always roll back."""
 
-    def __init__(
-        self,
-        session_factory: sessionmaker[Session],
-        *,
-        assessment_persistence_key: bytes | None = None,
-    ) -> None:
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
-        self._assessment_persistence_key = assessment_persistence_key
         self._session: Session | None = None
         self.data: DataRepository
 
     def __enter__(self) -> Self:
         self._session = self._session_factory()
-        self.data = DataRepository(
-            self._session,
-            assessment_persistence_key=self._assessment_persistence_key,
-        )
+        self.data = DataRepository(self._session)
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -2110,8 +2004,5 @@ class DataSqliteUnitOfWorkFactory:
     def __init__(self, engine: Engine) -> None:
         self._session_factory = sessionmaker(bind=engine, expire_on_commit=False)
 
-    def __call__(self, *, assessment_persistence_key: bytes | None = None) -> DataSqliteUnitOfWork:
-        return DataSqliteUnitOfWork(
-            self._session_factory,
-            assessment_persistence_key=assessment_persistence_key,
-        )
+    def __call__(self) -> DataSqliteUnitOfWork:
+        return DataSqliteUnitOfWork(self._session_factory)

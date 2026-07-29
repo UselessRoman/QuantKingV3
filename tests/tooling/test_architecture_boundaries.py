@@ -91,3 +91,18 @@ def test_web_must_consume_an_injected_port_instead_of_persistence(tmp_path: Path
     assert result.returncode == 1
     assert "web/api.py:1: forbidden import jobs.persistence" in result.stdout
     assert "allowed: injected Web application port" in result.stdout
+
+
+def test_assessment_internal_insert_and_dto_imports_are_forbidden(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "data/service.py",
+        "from quantking.data.validation.persistence import _AssessmentPersistenceRecord\n"
+        "from quantking.data.adapters.persistence.sqlite import "
+        "_persist_verified_source_assessment\n",
+    )
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 1
+    assert "assessment persistence internal" in result.stdout

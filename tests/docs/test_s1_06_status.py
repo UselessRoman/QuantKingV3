@@ -24,7 +24,7 @@ def test_s1_06_is_main_accepted_and_later_tasks_are_unauthorized(relative: str) 
     assert "413805074b3a82c2d2a090d2b73c854a238e2e19" in text
     assert "完成主验收" in text
     assert "Stage 1 已完成" not in text
-    assert "S1-07A-R3 修复已提交、等待主验收" in text
+    assert "S1-07A-R4 修复已提交、等待主验收" in text
     assert "未获授权" in text
     assert "S1-08 未开始" in text or "S1-08 尚未开始" in text
 

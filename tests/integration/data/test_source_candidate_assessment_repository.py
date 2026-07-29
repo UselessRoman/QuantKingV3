@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from quantking.data.adapters.persistence.assessment import (
+    SqliteSourceAssessmentPersistenceAdapter,
+)
 from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
@@ -15,7 +18,6 @@ from quantking.data.validation.authorization import (
     FakeRunnerTrustStore,
     SignerTrustPolicy,
 )
-from quantking.data.validation.persistence import VerifiedSourceAssessmentService
 from quantking.data.validation.testing import build_deep_fake_assessment
 from quantking.jobs.adapters.persistence.sqlite import initialize_database
 
@@ -31,14 +33,16 @@ def test_source_candidate_assessment_round_trip_and_dataset_filter(tmp_path: Pat
     initialize_database(database)
     engine = create_data_engine(database, busy_timeout_ms=250)
     factory = DataSqliteUnitOfWorkFactory(engine)
-    service = VerifiedSourceAssessmentService(
+    service = SqliteSourceAssessmentPersistenceAdapter(
+        engine=engine,
         validation_root=root,
         signer=FakeRunnerTrustStore(),
         signer_trust_policy=SignerTrustPolicy.synthetic_only(),
-        uow_factory=factory,
     )
     try:
-        saved = service.persist(_assessment_directory(root, verified.evidence_relative_path))
+        saved = service.persist_from_directory(
+            _assessment_directory(root, verified.evidence_relative_path)
+        )
         with factory() as uow:
             assert uow.data.get_source_candidate_assessment(str(saved.assessment_id)) == saved
             assert uow.data.list_source_candidate_assessments(
@@ -74,17 +78,16 @@ def test_application_service_persistence_is_immutable_for_same_assessment_id(
     database = tmp_path / "immutable.db"
     initialize_database(database)
     engine = create_data_engine(database, busy_timeout_ms=250)
-    factory = DataSqliteUnitOfWorkFactory(engine)
-    service = VerifiedSourceAssessmentService(
+    service = SqliteSourceAssessmentPersistenceAdapter(
+        engine=engine,
         validation_root=root,
         signer=FakeRunnerTrustStore(),
         signer_trust_policy=SignerTrustPolicy.synthetic_only(),
-        uow_factory=factory,
     )
     directory = _assessment_directory(root, verified.evidence_relative_path)
     try:
-        first = service.persist(directory)
-        second = service.persist(directory)
+        first = service.persist_from_directory(directory)
+        second = service.persist_from_directory(directory)
         assert second == first
     finally:
         engine.dispose()

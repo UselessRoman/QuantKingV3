@@ -9,6 +9,9 @@ import pytest
 
 from quantking.common.ids import new_entity_id
 from quantking.common.time import UtcTimestamp
+from quantking.data.adapters.persistence.assessment import (
+    SqliteSourceAssessmentPersistenceAdapter,
+)
 from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
@@ -32,7 +35,6 @@ from quantking.data.validation.authorization import (
     FakeRunnerTrustStore,
     SignerTrustPolicy,
 )
-from quantking.data.validation.persistence import VerifiedSourceAssessmentService
 from quantking.data.validation.testing import build_deep_fake_assessment
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
@@ -136,14 +138,15 @@ def test_latest_source_assessment_is_selected_in_sql_by_time_and_stable_id(
     verified = tuple(
         build_deep_fake_assessment(root=root, assessment_index=index) for index in (20, 21)
     )
-    service = VerifiedSourceAssessmentService(
+    service = SqliteSourceAssessmentPersistenceAdapter(
+        engine=engine,
         validation_root=root,
         signer=FakeRunnerTrustStore(),
         signer_trust_policy=SignerTrustPolicy.synthetic_only(),
-        uow_factory=factory,
     )
     saved = tuple(
-        service.persist((root / evidence.evidence_relative_path).parent) for evidence in verified
+        service.persist_from_directory((root / evidence.evidence_relative_path).parent)
+        for evidence in verified
     )
 
     with factory() as uow:

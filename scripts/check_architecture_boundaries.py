@@ -8,6 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _VENDOR_DATA = frozenset({"akshare", "baostock", "tushare", "xtquant"})
+_ASSESSMENT_PERSISTENCE_INTERNALS = frozenset(
+    {
+        "_AssessmentPersistenceRecord",
+        "_insert_assessment",
+        "_persist_verified_source_assessment",
+        "_record_receipt",
+        "_record_receipt_is_valid",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +131,21 @@ def check_boundaries(root: Path) -> list[Violation]:
             line = error.lineno if isinstance(error, SyntaxError) and error.lineno else 1
             violations.append(Violation(display, line, "<unparseable>", "valid Python syntax"))
             continue
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if any(
+                alias.name in _ASSESSMENT_PERSISTENCE_INTERNALS for alias in node.names
+            ) and parts != ("data", "adapters", "persistence", "assessment.py"):
+                violations.append(
+                    Violation(
+                        display,
+                        node.lineno,
+                        "assessment persistence internal",
+                        "data/adapters/persistence/assessment.py only",
+                    )
+                )
 
         for line, module, imports_request in _imports(tree):
             if (

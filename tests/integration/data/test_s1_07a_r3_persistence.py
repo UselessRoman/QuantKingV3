@@ -13,10 +13,7 @@ import pytest
 from quantking.common.errors import InvalidDataTransitionError
 from quantking.common.ids import new_entity_id
 from quantking.common.time import utc_now
-from quantking.data.adapters.persistence.sqlite import (
-    DataSqliteUnitOfWorkFactory,
-    create_data_engine,
-)
+from quantking.data.adapters.persistence.sqlite import create_data_engine
 from quantking.data.assessment.models import (
     AssessmentStatus,
     EvidenceKind,
@@ -36,16 +33,18 @@ from quantking.jobs.adapters.persistence.sqlite import initialize_database
 
 
 def _service(*, root: Path, database: Path):
-    from quantking.data.validation.persistence import VerifiedSourceAssessmentService
+    from quantking.data.adapters.persistence.assessment import (
+        SqliteSourceAssessmentPersistenceAdapter,
+    )
 
     initialize_database(database)
     engine = create_data_engine(database, busy_timeout_ms=250)
     return (
-        VerifiedSourceAssessmentService(
+        SqliteSourceAssessmentPersistenceAdapter(
+            engine=engine,
             validation_root=root,
             signer=FakeRunnerTrustStore(),
             signer_trust_policy=SignerTrustPolicy.synthetic_only(),
-            uow_factory=DataSqliteUnitOfWorkFactory(engine),
         ),
         engine,
     )
@@ -85,47 +84,23 @@ def test_repository_rejects_handmade_verified_evidence_without_directory(
     database = tmp_path / "manual.db"
     initialize_database(database)
     engine = create_data_engine(database, busy_timeout_ms=250)
-    factory = DataSqliteUnitOfWorkFactory(engine)
     try:
-        with (
-            factory() as uow,
-            pytest.raises((TypeError, AttributeError), match=r"application service|save_source"),
-        ):
-            uow.data.save_source_candidate_assessment(_manual_evidence())
+        from quantking.data.adapters.persistence.sqlite import DataRepository
+
+        assert not hasattr(DataRepository, "save_source_candidate_assessment")
+        assert not hasattr(DataRepository, "_persist_verified_source_assessment")
     finally:
         engine.dispose()
 
 
 def test_imported_private_seal_real_run_cannot_enter_repository(tmp_path: Path) -> None:
-    from quantking.data.validation.persistence import _AssessmentPersistenceRecord
-
-    evidence = _manual_evidence()
-    run = evidence.verified_runs[0]
-    object.__setattr__(run, "evidence_kind", EvidenceKind.REAL)
-    object.__setattr__(
-        evidence,
-        "assessment",
-        replace(evidence.assessment, evidence_kind=EvidenceKind.REAL),
-    )
     database = tmp_path / "forged-real.db"
     initialize_database(database)
     engine = create_data_engine(database, busy_timeout_ms=250)
-    factory = DataSqliteUnitOfWorkFactory(engine)
-    forged_record = _AssessmentPersistenceRecord(
-        evidence=evidence,
-        signer_profiles=("REAL",),
-        result_attestation_sha256s=("b" * 64,),
-        receipt_sha256="c" * 64,
-    )
     try:
-        with (
-            factory() as uow,
-            pytest.raises(
-                InvalidDataTransitionError,
-                match="directory-verification receipt",
-            ),
-        ):
-            uow.data._persist_verified_source_assessment(forged_record)
+        from quantking.data.adapters.persistence.sqlite import DataRepository
+
+        assert not hasattr(DataRepository, "_persist_verified_source_assessment")
     finally:
         engine.dispose()
 
@@ -147,7 +122,7 @@ def test_service_rejects_assessment_file_tampering(tmp_path: Path, attack: str) 
     service, engine = _service(root=root, database=tmp_path / f"{attack}.db")
     try:
         with pytest.raises(Exception, match=r"manifest|verification|evidence|SHA|canonical"):
-            service.persist(directory)
+            service.persist_from_directory(directory)
     finally:
         engine.dispose()
 
@@ -158,7 +133,7 @@ def test_service_rejects_missing_and_escaping_assessment_paths(tmp_path: Path) -
     try:
         for directory in (root / "missing", tmp_path / "outside"):
             with pytest.raises(Exception, match=r"managed|outside|missing|directory"):
-                service.persist(directory)
+                service.persist_from_directory(directory)
     finally:
         engine.dispose()
 
@@ -183,7 +158,7 @@ def test_service_rejects_reparse_assessment_directory(tmp_path: Path) -> None:
     service, engine = _service(root=root, database=tmp_path / "reparse.db")
     try:
         with pytest.raises(Exception, match=r"reparse|symlink|unsafe|managed"):
-            service.persist(link)
+            service.persist_from_directory(link)
     finally:
         engine.dispose()
 
@@ -220,7 +195,7 @@ def test_replacement_between_first_verify_and_persist_is_rejected(
             Exception,
             match=r"evidence|manifest|verification|mismatch|attestation|canonical",
         ):
-            service.persist(directory)
+            service.persist_from_directory(directory)
     finally:
         engine.dispose()
 
@@ -246,7 +221,7 @@ def test_service_rejects_first_pass_run_fingerprint_drift(
     monkeypatch.setattr(service._verifier, "verify_assessment", forge_first)
     try:
         with pytest.raises(InvalidDataTransitionError, match="changed between verification"):
-            service.persist(directory)
+            service.persist_from_directory(directory)
     finally:
         engine.dispose()
 
@@ -272,7 +247,7 @@ def test_service_rejects_first_pass_signer_summary_drift(
     monkeypatch.setattr(service, "_attestation_summary", forge_first)
     try:
         with pytest.raises(InvalidDataTransitionError, match="changed between verification"):
-            service.persist(directory)
+            service.persist_from_directory(directory)
     finally:
         engine.dispose()
 
@@ -304,7 +279,7 @@ def test_service_rejects_first_pass_assessment_drift(
     monkeypatch.setattr(service._verifier, "verify_assessment", forge_first)
     try:
         with pytest.raises(InvalidDataTransitionError, match="changed between verification"):
-            service.persist(directory)
+            service.persist_from_directory(directory)
     finally:
         engine.dispose()
 
@@ -315,7 +290,7 @@ def test_deep_verified_synthetic_blocked_assessment_is_persisted(tmp_path: Path)
     directory = _assessment_directory(root, verified)
     service, engine = _service(root=root, database=tmp_path / "valid.db")
     try:
-        saved = service.persist(directory)
+        saved = service.persist_from_directory(directory)
         assert saved == verified.assessment
         assert saved.evidence_kind is EvidenceKind.SYNTHETIC
         assert saved.status is AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION

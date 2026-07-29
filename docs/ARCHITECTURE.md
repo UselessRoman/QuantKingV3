@@ -219,7 +219,7 @@ S1-06 已于 2026-07-28 在提交 `413805074b3a82c2d2a090d2b73c854a238e2e19`
 manifest；Cursor 绑定完整查询指纹；Web 路由不读取 SQLite、Parquet 或 artifact。
 Override 读模型同时验证 override、latest application、active binding、attempt 和 child 的
 双向状态矩阵；总览失败数通过数据与 Job 仓储窄端口执行 SQL 聚合，范围与统一失败列表一致。
-S1-07A-R3 修复已提交、等待主验收；24 个单元仍为
+S1-07A-R4 修复已提交、等待主验收；24 个单元仍为
 BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。各模块状态以
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)、[路线图](ROADMAP.md) 和 Stage 1
 任务卡为准。
