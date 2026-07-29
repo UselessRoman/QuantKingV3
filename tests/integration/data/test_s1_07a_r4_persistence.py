@@ -192,7 +192,7 @@ def test_assessment_files_are_locked_through_commit(
         saved = adapter.persist_from_directory(directory)
         assert saved.evidence_kind is EvidenceKind.SYNTHETIC
         assert saved.status is AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION
-        assert blocked == [True]
+        assert blocked and all(blocked)
     finally:
         engine.dispose()
 

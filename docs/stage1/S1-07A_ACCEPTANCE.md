@@ -1,14 +1,14 @@
-# S1-07A-R5 assessment 原子 seal 与历史隔离修复交接
+# S1-07A-R6 finalized seal 最终 TOCTOU 修复交接
 
-状态：S1-07A-R5 修复已提交、等待主验收；24 个单元仍为
+状态：S1-07A-R6 修复已提交、等待主验收；24 个单元仍为
 BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。
 
 ## 范围与基线
 
-- Stage：Stage 1 / S1-07A-R5。
-- R5 基线：`120aa3b5deaa1135741eb60b155da9e0c78373ee`。
-- 只关闭 assessment 最终 TOCTOU、直接 SQL、历史行和读取信任缺口；R2/R3 signer、
-  coverage、quality、sample 与 authorization claim 均未修改。
+- Stage：Stage 1 / S1-07A-R6。
+- R6 基线：`72b56a9a03d5f479acdec039f69fa0b965771cba`。
+- 只关闭 incomplete seal 首次深验后到 finalized seal 独占锁之间的最终 TOCTOU；R2～R5
+  signer、coverage、quality、sample、authorization、历史隔离和读取边界均未修改。
 - 没有迁移数据、发布 `DatasetVersion`、创建 `SourceOverride`、启用 auto-switch 或开始
   S1-08/Stage 2。
 
@@ -17,13 +17,13 @@ BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。
 命令：
 
 ```powershell
-uv run --offline --frozen pytest tests/integration/data/test_s1_07a_r5_persistence.py -q -p no:cacheprovider --tb=no
+uv run --offline --frozen pytest tests/integration/data/test_s1_07a_r6_finalized_seal.py -q -p no:cacheprovider --tb=no
 ```
 
-R5 首次结果为 `8 failed`。根因为 R4 只锁定首次枚举的普通文件，最终 verifier 到 SQLite
-commit 之间仍可由另一进程新增文件或目录；0011 仍允许合法 JSON 外形的
-SYNTHETIC/BLOCKED 直接 SQL；0010/0011 旁路历史行仍留在活跃表；读取端没有把数据库行与
-受管 evidence 的当前深验结果重新绑定。
+R6 首次结果为 `5 failed, 2 passed`。根因为 `_verify_final(incomplete)` 通过后，incomplete
+ZIP 仍可在 `_finalize_seal()` 前被追加未声明/重复 entry 或替换 Canonical/Quality；
+finalized 文件只以此前 SHA 进入后续流程，没有在取得独占句柄后重新安全解包和完整深验。
+锁前 finalized 截断/替换已被 R5 的 SHA 回滚保护拒绝，因此两项初始即通过。
 
 ## 固定样本 v2
 
@@ -66,13 +66,17 @@ SYNTHETIC/BLOCKED 直接 SQL；0010/0011 旁路历史行仍留在活跃表；读
    保留在受管 `.assessment-retained` 取证目录；
 3. 在保持原始相对路径语义的私有 root 中再次深验，并拒绝未声明顶层项、空目录、symlink、
    junction、reparse point 和非普通文件；
-4. 将精确文件集合写成单一 ZIP_STORED seal，fsync 后从 seal 安全解包到临时受管 root，
-   再次完整复验 Raw、Canonical、Quality、Difference、coverage、fingerprint、signer 和
-   result attestation；
-5. 以 seal 全文件 SHA 命名并原子完成，持有不共享 WRITE/DELETE 的 seal 文件句柄；
-6. 在同一连接和事务内启用一次性、短期、精确绑定全部行字段及 seal 路径/SHA 的 SQLite UDF
+4. 将精确文件集合写成单一 ZIP_STORED incomplete seal，fsync 后安全解包并完成一次完整
+   verifier 预检；
+5. 以 seal 全文件 SHA 命名并原子完成；如果同 SHA finalized seal 已存在，也不在锁外信任
+   文件名或字节比较；
+6. finalized seal 获得不共享 WRITE/DELETE 的独占句柄后，重新计算 SHA、重新安全解包并再次
+   执行完整 ValidationEvidenceVerifier、精确树检查、signer/attestation summary；结果必须与
+   claim 后及 incomplete 预检得到的 `VerifiedAssessmentEvidence`/summary 精确相等；
+7. 只有锁内完整复验通过，才在同一连接和事务内启用一次性、短期、精确绑定全部行字段及
+   seal 路径/SHA 的 SQLite UDF
    write gate；trigger 消费 gate 后 flush，再核对 seal SHA，commit 前再次核对；
-7. commit 完成后才释放 seal、原路径和跨进程锁。竞争者不能在原路径新增嵌套目录，单文件
+8. commit 完成后才释放 seal、原路径和跨进程锁。竞争者不能在原路径新增嵌套目录，单文件
    seal 也不存在目录项新增窗口；异常回滚且写入稳定脱敏 failure 取证。
 
 通用 `DataRepository` 与 `DataSqliteUnitOfWorkFactory` 已删除全部 assessment 写方法和
@@ -84,6 +88,12 @@ assessment DTO/receipt/insert 名称。不存在实际 evidence directory 时，
 精确行、`SEALED_VERIFIED_V1`、seal 相对路径及 SHA，并在 10 秒内有效；跨连接、事务结束、
 异常回滚、重复或过期调用均返回拒绝。普通 SQLite/SQLAlchemy 连接没有 gate 或只有已 disarm
 gate，因此 REAL/PRODUCTION、SYNTHETIC/BLOCKED、无目录及伪造 SHA 的合法外形 INSERT 都失败。
+
+该 UDF gate 的威胁边界是防止普通应用代码、通用 UoW 和未授权 SQL 路径误写或旁路写入；
+它不声称能够防御拥有数据库文件完全控制权的本机管理员或恶意进程，因为其可以注册同名
+UDF、删除 trigger 或直接修改数据库文件。无论数据库行如何出现，缺少真实 finalized seal、
+seal SHA 不符或深验血缘不一致的伪造行仍由 `SealedAssessmentReadVerifier` 失败关闭，绝不显示
+为有效 assessment，也不能提升为 `PRODUCTION_READY`。
 
 由于 0010/0011 曾存在旁路，`0012` 将所有既有行逐列原样复制到不可 INSERT/UPDATE/DELETE 的
 `source_candidate_assessment_quarantine`，标记 `PRE_R5_UNVERIFIED_WRITE_PATH`，再从活跃表
@@ -197,9 +207,12 @@ S1-07A 不包含 provider runner 或 CLI REAL signer。
 - R5 独立攻击集覆盖真实子进程普通/嵌套新增、原路径重建、manifest/attestation/Canonical/
   Quality 替换删除重命名、SQLite/SQLAlchemy 直插、无 gate/跨连接/事务后/异常后/过期复用、
   seal 篡改读取、0010 REAL/SYNTHETIC/混合历史隔离、隔离后降级阻断和空表升降级；`18 passed`。
-- validation、R3/R4/R5 persistence、assessment repository、DataCenter、0010/0011/0012
-  migration、架构和 Stage 1 文档定向组合：`252 passed`。
+- R6 独立攻击集覆盖 incomplete ZIP 未声明/重复/Canonical/Quality entry 攻击、finalized
+  seal 在独占锁前截断/替换、既有同 SHA seal 的锁内完整复验，以及数据库所有者伪造行的
+  读侧失败关闭；`8 passed`。
+- validation、R3/R4/R5/R6 persistence、assessment repository、DataCenter、
+  0010/0011/0012 migration、架构和 Stage 1 文档定向组合：`260 passed`。
 - `scripts/quality.ps1` 完整通过。
-- 最终离线 pytest：`1105 passed, 2 skipped, 3 deselected`。
+- 最终离线 pytest：`1113 passed, 2 skipped, 3 deselected`。
 - 前端单测：`17 passed`；生产构建通过；Playwright：`1 passed`。
 - Ruff、mypy、锁文件、架构边界、Markdown 链接和 `git diff --check` 全部通过。

@@ -315,13 +315,25 @@ class SqliteSourceAssessmentPersistenceAdapter:
                 final = self._verify_final(incomplete, relative, claimed)
                 seal, seal_sha = self._finalize_seal(incomplete)
                 with _ExclusiveFile(seal):
+                    locked_sha = compute_sha256(seal.read_bytes())
+                    if locked_sha != seal_sha:
+                        raise InvalidDataTransitionError(
+                            "finalized assessment seal changed before lock"
+                        )
+                    locked_final = self._verify_final(seal, relative, claimed)
+                    if locked_final != final:
+                        raise InvalidDataTransitionError(
+                            "finalized assessment seal verification drifted"
+                        )
+                    with suppress(FileNotFoundError):
+                        incomplete.unlink()
                     saved = self._persist_transaction(
-                        evidence=final[0],
-                        summary=final[1],
+                        evidence=locked_final[0],
+                        summary=locked_final[1],
                         seal=seal,
-                        seal_sha=seal_sha,
+                        seal_sha=locked_sha,
                     )
-                    self._verify_unchanged(seal, seal_sha)
+                    self._verify_unchanged(seal, locked_sha)
                 return saved
             except InvalidDataTransitionError:
                 self._record_failure(claim.operation_id)
@@ -403,11 +415,8 @@ class SqliteSourceAssessmentPersistenceAdapter:
         seal_root = self._root / ".assessment-seals"
         target = seal_root / f"{sha}.zip"
         if target.exists():
-            if target.read_bytes() != payload:
-                raise InvalidDataTransitionError("assessment seal identity conflict")
-            incomplete.unlink()
-        else:
-            os.replace(incomplete, target)
+            return target, sha
+        os.replace(incomplete, target)
         return target, sha
 
     def _persist_transaction(
@@ -437,6 +446,14 @@ class SqliteSourceAssessmentPersistenceAdapter:
         session = self._session_factory()
         gate = _SQLiteWriteGate()
         try:
+            row = session.get(
+                SourceCandidateAssessmentRow,
+                str(assessment.assessment_id),
+            )
+            if row is not None:
+                if not _row_matches(row, values):
+                    raise InvalidDataTransitionError("source assessment evidence is immutable")
+                return assessment
             raw = session.connection().connection.driver_connection
             if not isinstance(raw, sqlite3.Connection):
                 raise InvalidDataTransitionError("assessment write gate requires SQLite")

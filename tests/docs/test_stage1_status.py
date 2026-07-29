@@ -31,7 +31,7 @@ _STATUS_PHRASES = (
     "Stage 0 已完成；Stage 1 已获实施授权并进行中，但尚未完成。",
 )
 _S1_07A_R1_STATUS = (
-    "S1-07A-R5 修复已提交、等待主验收；24 个单元仍为 "
+    "S1-07A-R6 修复已提交、等待主验收；24 个单元仍为 "
     "BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。"
 )
 
