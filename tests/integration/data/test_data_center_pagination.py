@@ -156,9 +156,10 @@ def test_latest_source_assessment_is_selected_in_sql_by_time_and_stable_id(
         )
         for index in range(2)
     ]
+    verified = tuple(verified_synthetic_assessment(item) for item in assessments)
     with factory() as uow:
-        for assessment in assessments:
-            uow.data.save_source_candidate_assessment(verified_synthetic_assessment(assessment))
+        for evidence in verified:
+            uow.data.save_source_candidate_assessment(evidence)
         uow.commit()
 
     with factory() as uow:
@@ -167,7 +168,7 @@ def test_latest_source_assessment_is_selected_in_sql_by_time_and_stable_id(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         )
 
-    assert latest == assessments[-1]
+    assert latest == verified[-1].assessment
     engine.dispose()
 
 

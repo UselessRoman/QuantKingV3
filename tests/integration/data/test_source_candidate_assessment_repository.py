@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -50,17 +51,18 @@ def test_source_candidate_assessment_round_trip_and_dataset_filter(tmp_path: Pat
         created_at=utc_now(),
     )
     try:
+        verified = verified_synthetic_assessment(assessment)
         with factory() as uow:
-            uow.data.save_source_candidate_assessment(verified_synthetic_assessment(assessment))
+            uow.data.save_source_candidate_assessment(verified)
             uow.commit()
         with factory() as uow:
             assert (
                 uow.data.get_source_candidate_assessment(str(assessment.assessment_id))
-                == assessment
+                == verified.assessment
             )
             assert uow.data.list_source_candidate_assessments(
                 source="BAOSTOCK", dataset=DatasetKind.DAILY_BAR_UNADJUSTED
-            ) == [assessment]
+            ) == [verified.assessment]
             assert (
                 uow.data.list_source_candidate_assessments(dataset=DatasetKind.EXCHANGE_CALENDAR)
                 == []
@@ -139,6 +141,53 @@ def test_repository_rederives_status_and_rejects_forged_production_evidence(
         with (
             factory() as uow,
             pytest.raises(InvalidDataTransitionError, match="controlled fixed sample"),
+        ):
+            uow.data.save_source_candidate_assessment(verified)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"coverage_adequate": True},
+        {"stability_runs": 3},
+        {"blocking_reason": "caller supplied blocked reason"},
+    ),
+)
+def test_repository_rejects_blocked_assessment_drift(
+    tmp_path: Path, mutation: dict[str, object]
+) -> None:
+    assessment = SourceCandidateAssessment(
+        assessment_id=new_entity_id("data_assessment"),
+        source="BAOSTOCK",
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        evidence_kind=EvidenceKind.SYNTHETIC,
+        semantic_contract_verified=False,
+        schema_unit_verified=False,
+        coverage_adequate=False,
+        quality_passed=False,
+        fixed_sample_differences_adequate=False,
+        stability_runs=0,
+        status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
+        blocking_reason="fixture input",
+        assessment_config_version="assessment.v1",
+        sample_spec_version="s1-07.fixed-sample.v2",
+        rule_version="quality-rules.v1",
+        evidence_relative_path="assessments/blocked.json",
+        evidence_sha256="b" * 64,
+        created_at=utc_now(),
+    )
+    verified = verified_synthetic_assessment(assessment)
+    object.__setattr__(verified, "assessment", replace(verified.assessment, **mutation))
+    database = tmp_path / "blocked-drift.db"
+    initialize_database(database)
+    engine = create_data_engine(database, busy_timeout_ms=250)
+    factory = DataSqliteUnitOfWorkFactory(engine)
+    try:
+        with (
+            factory() as uow,
+            pytest.raises(InvalidDataTransitionError, match="deterministic result"),
         ):
             uow.data.save_source_candidate_assessment(verified)
     finally:

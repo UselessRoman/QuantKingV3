@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
-from quantking.common.ids import EntityId
+from quantking.common.ids import EntityId, parse_entity_id
 from quantking.common.time import UtcTimestamp
 from quantking.data.adapters.validation_content import (
     build_fake_exchange_calendar_parquet,
@@ -26,7 +27,7 @@ from quantking.data.quality.models import (
 from quantking.data.validation.artifacts import ValidationEvidenceVerifier, ValidationEvidenceWriter
 from quantking.data.validation.authorization import (
     FakeRunnerTrustStore,
-    RunnerInvocationAttestation,
+    ResultAttestation,
 )
 from quantking.data.validation.models import (
     _VERIFICATION_SEAL,
@@ -43,6 +44,7 @@ from quantking.data.validation.request import (
     sha256_json,
 )
 from quantking.data.validation.samples import load_packaged_fixed_sample
+from quantking.data.validation.service import assess_verified_runs
 
 
 def _id(namespace: str, index: int, *, lane: int) -> EntityId:
@@ -121,33 +123,27 @@ def build_deep_fake_run(
     start = started_at or UtcTimestamp(datetime(2026, 7, 29, 0, 0, run_index * 2, tzinfo=UTC))
     end = ended_at or UtcTimestamp(start.value + timedelta(seconds=1))
     trust = FakeRunnerTrustStore()
-    attestation = trust.sign(
-        RunnerInvocationAttestation(
-            invocation_id=invocation,
-            session_id=session,
-            authorization_id=authorization,
-            run_id=run_id,
-            source=source,
-            dataset=dataset,
-            request_sha256=request_sha,
-            run_fingerprint=fingerprint,
-            started_at=start,
-            ended_at=end,
-            signature="0" * 64,
-        )
-    )
 
     cases = request.cases
     rows = sorted(
         {
-            (str(case["exchange"]), date.fromisoformat(str(case["start_date"])), True)
+            (str(case["exchange"]), day, True)
             for case in cases
+            for day in (
+                date.fromisoformat(str(case["start_date"])) + timedelta(days=offset)
+                for offset in range(
+                    (
+                        date.fromisoformat(str(case["end_date"]))
+                        - date.fromisoformat(str(case["start_date"]))
+                    ).days
+                    + 1
+                )
+            )
         }
     )
     parquet_bytes, content_sha, row_count = build_fake_exchange_calendar_parquet(tuple(rows))
     files: dict[str, tuple[bytes, int]] = {
         "request/manifest.json": (request_bytes, len(cases)),
-        "runner/attestation.json": (attestation.to_bytes(), 1),
         "canonical/content.parquet": (parquet_bytes, row_count),
     }
 
@@ -197,6 +193,52 @@ def build_deep_fake_run(
         )
     )
 
+    raw_manifest_key = next(
+        key for key in files if key.startswith("raw-root/") and key.endswith("/manifest.json")
+    )
+    raw_manifest_sha = str(json.loads(files[raw_manifest_key][0])["manifest_sha256"])
+    quality_manifest_key = next(
+        key for key in files if key.startswith("quality-root/") and key.endswith("/manifest.json")
+    )
+    quality_manifest = json.loads(files[quality_manifest_key][0])
+    quality_manifest_sha = str(quality_manifest["manifest_sha256"])
+    quality_run_id = parse_entity_id(str(quality_manifest["run_id"]))
+    inventory = [
+        {
+            "relative_path": relative,
+            "row_count": item[1],
+            "sha256": hashlib.sha256(item[0]).hexdigest(),
+            "size": len(item[0]),
+        }
+        for relative, item in sorted(files.items())
+    ]
+    inventory_sha = hashlib.sha256(canonical_json(inventory)).hexdigest()
+    attestation = trust.sign(
+        ResultAttestation(
+            signer_key_id=trust.key_id,
+            invocation_id=invocation,
+            session_id=session,
+            authorization_id=authorization,
+            run_id=run_id,
+            source=source,
+            dataset=dataset,
+            request_sha256=request_sha,
+            run_fingerprint=fingerprint,
+            raw_manifest_sha256=raw_manifest_sha,
+            canonical_content_sha256=content_sha,
+            quality_manifest_sha256=quality_manifest_sha,
+            quality_run_id=quality_run_id,
+            difference_report_id=None,
+            difference_report_sha256=None,
+            evidence_inventory_sha256=inventory_sha,
+            versions=versions.to_dict(),
+            started_at=start,
+            ended_at=end,
+            signature="0" * 64,
+        )
+    )
+    files["runner/result-attestation.json"] = (attestation.to_bytes(), 1)
+
     difference_id = (
         _id("data_diff", run_index, lane=8) if attack == "difference_claim_without_report" else None
     )
@@ -210,6 +252,48 @@ def build_deep_fake_run(
         files["quality/result.json"] = (b'{"status":"PASSED"}', 1)
     if attack == "missing_request":
         files.pop("request/manifest.json")
+    if attack == "replace_raw_after_attestation":
+        replacement_root = root / f"_fake-raw-replacement-{run_index}"
+        replacement_dir = RawBatchPublisher(data_root=replacement_root).publish(
+            RawBatchPublishRequest(
+                source=source,
+                dataset=dataset.value,
+                batch_id=f"run-{run_index}",
+                adapter_version=versions.adapter_version,
+                code_version=versions.code_version,
+                request_params={"request_sha256": request_sha, "run_id": str(run_id)},
+                files=(RawManifestFile("payload.json", b'{"fake":"replacement"}', row_count),),
+                created_at=start.to_iso(),
+            )
+        )
+        files = {key: value for key, value in files.items() if not key.startswith("raw-root/")}
+        files.update(
+            _collect(
+                replacement_dir,
+                prefix=(f"raw-root/{replacement_dir.relative_to(replacement_root).as_posix()}"),
+            )
+        )
+    elif attack == "replace_canonical_after_attestation":
+        replacement_rows = tuple(
+            (*row[:2], False) if index == len(rows) - 1 else row for index, row in enumerate(rows)
+        )
+        replacement_bytes, _replacement_sha, replacement_count = (
+            build_fake_exchange_calendar_parquet(replacement_rows)
+        )
+        files["canonical/content.parquet"] = (replacement_bytes, replacement_count)
+    elif attack == "replace_quality_after_attestation":
+        replacement_root = root / f"_fake-quality-replacement-{run_index}"
+        replacement_quality = replace(quality, run_id=_id("data_quality", run_index, lane=9))
+        replacement_dir = QualityArtifactWriter(artifacts_root=replacement_root).write(
+            outcome=replacement_quality, row_evidence_tables={}
+        )
+        files = {key: value for key, value in files.items() if not key.startswith("quality-root/")}
+        files.update(
+            _collect(
+                replacement_dir,
+                prefix=(f"quality-root/{replacement_dir.relative_to(replacement_root).as_posix()}"),
+            )
+        )
 
     envelope = ValidationRunEvidence(
         run_id=run_id,
@@ -304,7 +388,7 @@ def verified_synthetic_assessment(
             schema_version="fixture-schema.v1",
             rule_version=assessment.rule_version,
             threshold_version="fixture-thresholds.v1",
-            sample_spec_version=assessment.sample_spec_version,
+            sample_spec_version=sample.sample_spec_version,
             config_version=assessment.assessment_config_version,
         ),
         request_sha256="1" * 64,
@@ -326,8 +410,15 @@ def verified_synthetic_assessment(
         verification_reason="SYNTHETIC_FIXTURE",
         _seal=_VERIFICATION_SEAL,
     )
+    derived = assess_verified_runs(
+        verified_runs=(run,),
+        evidence_relative_path=assessment.evidence_relative_path,
+        evidence_sha256=assessment.evidence_sha256,
+        created_at=assessment.created_at,
+        sample_eligibility=sample.eligibility,
+    )
     return VerifiedAssessmentEvidence(
-        assessment=assessment,
+        assessment=derived,
         verified_runs=(run,),
         evidence_manifest_sha256=assessment.evidence_sha256,
         evidence_relative_path=assessment.evidence_relative_path,

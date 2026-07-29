@@ -32,9 +32,12 @@ from quantking.data.quality.models import (
     RuleOutcomeStatus,
 )
 from quantking.data.validation.authorization import (
-    RunnerAttestationVerifier,
-    RunnerInvocationAttestation,
+    ResultAttestation,
+    ResultAttestationSigner,
+    SignerProfile,
+    SignerTrustPolicy,
 )
+from quantking.data.validation.coverage import evaluate_fixed_sample_coverage
 from quantking.data.validation.models import (
     _VERIFICATION_SEAL,
     AssessmentGates,
@@ -45,6 +48,7 @@ from quantking.data.validation.models import (
     VerifiedAssessmentEvidence,
     VerifiedValidationRun,
 )
+from quantking.data.validation.quality import validate_quality_rule_catalog
 from quantking.data.validation.request import compute_run_fingerprint, verify_request_manifest
 from quantking.data.validation.samples import SampleEligibility, load_packaged_fixed_sample
 from quantking.data.validation.service import (
@@ -112,7 +116,7 @@ class ValidationEvidenceWriter:
         self,
         *,
         validation_root: Path,
-        runner_attestation_verifier: RunnerAttestationVerifier | None = None,
+        runner_attestation_verifier: ResultAttestationSigner | None = None,
     ) -> None:
         self._root = _validate_root(validation_root)
         self._runner_trust = runner_attestation_verifier
@@ -254,10 +258,19 @@ class ValidationEvidenceVerifier:
         self,
         *,
         validation_root: Path,
-        runner_attestation_verifier: RunnerAttestationVerifier | None = None,
+        runner_attestation_verifier: ResultAttestationSigner | None = None,
+        signer_trust_policy: SignerTrustPolicy | None = None,
     ) -> None:
         self._root = _validate_root(validation_root)
         self._runner_trust = runner_attestation_verifier
+        self._signer_policy = signer_trust_policy or SignerTrustPolicy.synthetic_only()
+
+    def with_trust_policy(self, policy: SignerTrustPolicy) -> ValidationEvidenceVerifier:
+        return ValidationEvidenceVerifier(
+            validation_root=self._root,
+            runner_attestation_verifier=self._runner_trust,
+            signer_trust_policy=policy,
+        )
 
     def verify(self, *, directory: Path) -> VerifiedAssessmentEvidence:
         run = self.verify_run(directory=directory)
@@ -318,10 +331,11 @@ class ValidationEvidenceVerifier:
             )
             if expected_fingerprint != envelope.run_fingerprint:
                 raise ValueError("run fingerprint mismatch")
-            attestation = RunnerInvocationAttestation.from_bytes(files["runner/attestation.json"])
+            attestation = ResultAttestation.from_bytes(files["runner/result-attestation.json"])
             session_id = attestation.session_id
             if (
                 self._runner_trust is None
+                or attestation.signer_key_id != self._runner_trust.key_id
                 or not self._runner_trust.verify(attestation)
                 or attestation.run_id != envelope.run_id
                 or attestation.invocation_id != envelope.invocation_id
@@ -333,7 +347,9 @@ class ValidationEvidenceVerifier:
                 or attestation.started_at != envelope.started_at
                 or attestation.ended_at != envelope.ended_at
             ):
-                raise ValueError("runner invocation attestation is untrusted or unbound")
+                raise ValueError("result attestation is untrusted or unbound")
+            if attestation.evidence_inventory_sha256 != compute_evidence_inventory_sha256(manifest):
+                raise ValueError("result attestation artifact lineage mismatch")
 
             raw_manifests = [
                 path
@@ -363,16 +379,30 @@ class ValidationEvidenceVerifier:
             canonical_path = directory / "canonical" / "content.parquet"
             canonical = verify_canonical_evidence(path=canonical_path, dataset=envelope.dataset)
             canonical_sha = canonical.content_sha256
-            coverage = _fixed_sample_coverage(list(canonical.rows), request.cases)
-            quality_id, quality_sha = _verify_quality(
+            calendar_rows: list[dict[str, object]] = []
+            if envelope.dataset is not DatasetKind.EXCHANGE_CALENDAR:
+                reference_path = directory / "reference" / "exchange_calendar.parquet"
+                if reference_path.is_file():
+                    reference = verify_canonical_evidence(
+                        path=reference_path,
+                        dataset=DatasetKind.EXCHANGE_CALENDAR,
+                    )
+                    calendar_rows = list(reference.rows)
+            coverage = evaluate_fixed_sample_coverage(
+                dataset=envelope.dataset,
+                rows=list(canonical.rows),
+                cases=request.cases,
+                calendar_rows=calendar_rows,
+            )
+            quality_id, quality_sha, quality_ok = _verify_quality(
                 directory / "quality-root",
+                dataset=envelope.dataset,
                 expected_rule=envelope.versions.rule_version,
                 expected_schema=envelope.versions.schema_version,
                 expected_content_sha=canonical_sha,
             )
             semantic = True
             schema_ok = True
-            quality_ok = True
 
             difference_ok = False
             if envelope.difference_report_id is not None:
@@ -397,16 +427,31 @@ class ValidationEvidenceVerifier:
                 quality_passed=quality_ok,
                 fixed_sample_differences_adequate=difference_ok,
             )
+            if (
+                attestation.raw_manifest_sha256 != raw_sha
+                or attestation.canonical_content_sha256 != canonical_sha
+                or attestation.quality_manifest_sha256 != quality_sha
+                or attestation.quality_run_id != quality_id
+                or attestation.difference_report_id
+                != (envelope.difference_report_id if difference_sha else None)
+                or attestation.difference_report_sha256 != difference_sha
+                or dict(attestation.versions) != envelope.versions.to_dict()
+            ):
+                raise ValueError("result attestation artifact lineage mismatch")
             verification_succeeded = True
             identity = (
                 EvidenceKind.REAL
-                if self._runner_trust.establishes_real_identity
+                if self._signer_policy.profile_for(attestation.signer_key_id) is SignerProfile.REAL
                 else EvidenceKind.SYNTHETIC
             )
             if identity is EvidenceKind.SYNTHETIC:
                 reason = "SYNTHETIC_RUNNER"
-        except Exception:
-            reason = "VERIFICATION_FAILED"
+        except Exception as error:
+            reason = (
+                "RESULT_ATTESTATION_MISMATCH"
+                if "attestation artifact lineage mismatch" in str(error)
+                else "VERIFICATION_FAILED"
+            )
             gates = AssessmentGates.none_passed()
             identity = EvidenceKind.SYNTHETIC
 
@@ -635,33 +680,14 @@ def _read_file(path: Path) -> bytes:
         raise ValidationEvidenceVerificationError("required evidence file is missing") from error
 
 
-def _fixed_sample_coverage(
-    rows: list[dict[str, object]], cases: tuple[dict[str, object], ...]
-) -> bool:
-    for case in cases:
-        code = case.get("code")
-        exchange = case["exchange"]
-        start = str(case["start_date"])
-        end = str(case["end_date"])
-        matches = [
-            row
-            for row in rows
-            if (code is None or row.get("code") == code)
-            and row.get("exchange") == exchange
-            and start <= str(row.get("trade_date", row.get("effective_from", ""))) <= end
-        ]
-        if not matches:
-            return False
-    return True
-
-
 def _verify_quality(
     artifacts_root: Path,
     *,
+    dataset: DatasetKind,
     expected_rule: str,
     expected_schema: str,
     expected_content_sha: str,
-) -> tuple[EntityId, str]:
+) -> tuple[EntityId, str, bool]:
     directories = list((artifacts_root / "data-quality").glob("*"))
     if len(directories) != 1 or not directories[0].is_dir():
         raise ValueError("exactly one QualityRun artifact is required")
@@ -743,7 +769,27 @@ def _verify_quality(
     }
     if actual_files != expected_files:
         raise ValueError("QualityRun file set mismatch")
-    return outcome.run_id, embedded
+    catalog_ok = validate_quality_rule_catalog(
+        dataset=dataset,
+        rule_version=outcome.rule_version,
+        result_rule_codes=tuple(result.rule_code for result in outcome.results),
+    )
+    return outcome.run_id, embedded, catalog_ok
+
+
+def compute_evidence_inventory_sha256(manifest: Mapping[str, object]) -> str:
+    raw_entries = manifest.get("files")
+    if not isinstance(raw_entries, list):
+        raise ValueError("manifest files must be an array")
+    entries = [
+        entry
+        for entry in raw_entries
+        if isinstance(entry, dict)
+        and entry.get("relative_path") != "runner/result-attestation.json"
+    ]
+    if len(entries) != len(raw_entries) - 1:
+        raise ValueError("exactly one result attestation is required")
+    return compute_sha256(_canonical(entries))
 
 
 def _verify_summary(directory: Path) -> tuple[dict[str, object], str]:
@@ -789,4 +835,5 @@ __all__ = [
     "ValidationEvidenceVerificationError",
     "ValidationEvidenceVerifier",
     "ValidationEvidenceWriter",
+    "compute_evidence_inventory_sha256",
 ]

@@ -18,7 +18,7 @@ def test_repository_fixed_sample_is_canonical_and_covers_required_markets() -> N
     from quantking.data.validation.samples import load_packaged_fixed_sample
 
     spec = load_packaged_fixed_sample()
-    assert spec.sample_spec_version == "s1-07.fixed-sample.v1"
+    assert spec.sample_spec_version == "s1-07.fixed-sample.v2"
     assert spec.sample_spec_sha256 == spec.compute_sha256()
     assert json.loads(spec.to_canonical_json())["sample_spec_sha256"] == spec.sample_spec_sha256
     assert {case.dataset for case in spec.cases} == set(DatasetKind)

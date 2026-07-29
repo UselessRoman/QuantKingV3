@@ -180,7 +180,8 @@ S1-07A 新增版本化 `FixedSampleSpec`、`RealSourceValidationRun` 和
 以及至少三个不同 `data_validation` run ID。此前仅凭 SDK 合同标记的 XTQuant
 `exchange_calendar` 也回到 `BLOCKED_EXTERNAL_VALIDATION`，等待相同真实门禁。
 
-固定样本 `s1-07.fixed-sample.v1` 覆盖六类数据集、SH/SZ/BJ 和沪深基准，SHA-256 为
-`7d1007817928189e39d038cc8afce00d35d26c89877f217f65cf7e9894b6e2b3`。事件目的枚举已固化，
+固定样本 release `s1-07.fixed-sample.v2` 覆盖六类数据集、SH/SZ/BJ 和沪深基准，SHA-256 为
+`03d3d6c1e898b0746b7c5ab3911917a600fa3975f802c1d414fd0b6196c80dfb`。v2 release 绑定不可变
+v1 基础内容，避免相同 version 接受不同规范内容。事件目的枚举已固化，
 但 IPO、退市、ST、停牌和公司行动的正式 case 必须先取得可复查权威依据及版本；本次离线
-实施没有联网核验，因此没有凭记忆把事件证券或日期写入 v1。
+实施没有联网核验，因此没有凭记忆把事件证券或日期写入 v2。

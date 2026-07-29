@@ -1908,7 +1908,7 @@ class DataRepository:
             raise InvalidDataTransitionError(
                 "source assessment does not bind the controlled fixed sample"
             )
-        if assessment.status is AssessmentStatus.PRODUCTION_READY and expected != assessment:
+        if expected != assessment:
             raise InvalidDataTransitionError(
                 "source assessment is not the deterministic result of verified runs"
             )

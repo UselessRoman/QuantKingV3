@@ -1,4 +1,4 @@
-"""Per-invocation authorization and runner-attestation contracts."""
+"""Scoped authorization, controlled signer trust and result attestations."""
 
 from __future__ import annotations
 
@@ -6,9 +6,13 @@ import hashlib
 import hmac
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
+from enum import StrEnum
 from pathlib import Path
+from threading import Lock
+from types import MappingProxyType
 from typing import Protocol
 
 from quantking.common.ids import EntityId, new_entity_id, parse_entity_id
@@ -17,6 +21,18 @@ from quantking.data.models import DatasetKind
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE = re.compile(r"^[A-Z][A-Z0-9_]{1,31}$")
+_VERSION_FIELDS = frozenset(
+    {
+        "adapter_version",
+        "package_version",
+        "code_version",
+        "schema_version",
+        "rule_version",
+        "threshold_version",
+        "sample_spec_version",
+        "config_version",
+    }
+)
 
 
 def _canonical(value: object) -> bytes:
@@ -45,10 +61,9 @@ class ExecutionAuthorization:
             raise ValueError("authorization source must be a stable uppercase identifier")
         if not Path(self.output_root).is_absolute():
             raise ValueError("authorization output_root must be absolute")
-        if not _HEX64.fullmatch(self.sample_sha256):
-            raise ValueError("authorization sample_sha256 is invalid")
-        if not _HEX64.fullmatch(self.signature):
-            raise ValueError("authorization signature is invalid")
+        for digest in (self.sample_sha256, self.signature):
+            if not _HEX64.fullmatch(digest):
+                raise ValueError("authorization digest is invalid")
         if self.expires_at.value <= self.valid_from.value:
             raise ValueError("authorization expiry must follow its start")
 
@@ -74,7 +89,7 @@ class ExecutionAuthorization:
             raise ValueError("execution authorization is invalid JSON") from error
         if not isinstance(parsed, dict) or payload != _canonical(parsed):
             raise ValueError("execution authorization must be canonical JSON")
-        required = {
+        if set(parsed) != {
             "authorization_id",
             "dataset",
             "expires_at",
@@ -83,8 +98,7 @@ class ExecutionAuthorization:
             "signature",
             "source",
             "valid_from",
-        }
-        if set(parsed) != required:
+        }:
             raise ValueError("execution authorization fields do not match the schema")
         return cls(
             authorization_id=parse_entity_id(str(parsed["authorization_id"])),
@@ -112,8 +126,6 @@ class AuthorizationVerifier(Protocol):
 
 
 class HmacAuthorizationAuthority:
-    """In-memory authority; the signing key is never serialized into evidence."""
-
     def __init__(self, *, key: bytes) -> None:
         if not isinstance(key, bytes) or len(key) < 32:
             raise ValueError("authorization signing key must contain at least 32 bytes")
@@ -141,10 +153,7 @@ class HmacAuthorizationAuthority:
             expires_at=end,
             signature="0" * 64,
         )
-        return replace(
-            unsigned,
-            signature=_signature(self._key, unsigned.unsigned_payload()),
-        )
+        return replace(unsigned, signature=_signature(self._key, unsigned.unsigned_payload()))
 
     def verify(
         self,
@@ -156,8 +165,6 @@ class HmacAuthorizationAuthority:
         sample_sha256: str,
         at: UtcTimestamp,
     ) -> bool:
-        if not isinstance(authorization, ExecutionAuthorization):
-            return False
         expected = _signature(self._key, authorization.unsigned_payload())
         return (
             hmac.compare_digest(expected, authorization.signature)
@@ -170,136 +177,258 @@ class HmacAuthorizationAuthority:
 
 
 class FakeAuthorizationAuthority(HmacAuthorizationAuthority):
-    """Deterministic offline-only authority for tmp_path tests."""
+    def __init__(self) -> None:
+        super().__init__(key=b"quantking-s1-07a-r2-fake-authority-key")
+
+
+class AuthorizationClaimError(Exception):
+    """Stable one-time authorization claim failure."""
+
+
+class AuthorizationClaimStore:
+    """Process-local atomic claim registry; future runners may replace its storage port."""
 
     def __init__(self) -> None:
-        super().__init__(key=b"quantking-s1-07a-r1-fake-authority-key")
+        self._lock = Lock()
+        self._claims: dict[EntityId, EntityId] = {}
+
+    def claim(
+        self,
+        authorization: ExecutionAuthorization,
+        *,
+        invocation_id: EntityId,
+        verifier: AuthorizationVerifier,
+        source: str,
+        dataset: DatasetKind,
+        output_root: Path,
+        sample_sha256: str,
+        at: UtcTimestamp,
+    ) -> None:
+        if invocation_id.namespace != "data_invocation":
+            raise ValueError("invocation_id must use data_invocation namespace")
+        if not verifier.verify(
+            authorization,
+            source=source,
+            dataset=dataset,
+            output_root=output_root,
+            sample_sha256=sample_sha256,
+            at=at,
+        ):
+            raise AuthorizationClaimError("AUTHORIZATION_INVALID_OR_EXPIRED")
+        with self._lock:
+            if authorization.authorization_id in self._claims:
+                raise AuthorizationClaimError("AUTHORIZATION_ALREADY_CONSUMED")
+            self._claims[authorization.authorization_id] = invocation_id
+
+
+class SignerProfile(StrEnum):
+    SYNTHETIC = "SYNTHETIC"
+    REAL = "REAL"
 
 
 @dataclass(frozen=True, slots=True)
-class RunnerInvocationAttestation:
+class SignerTrustPolicy:
+    _profiles: Mapping[str, SignerProfile]
+
+    def __post_init__(self) -> None:
+        profiles = dict(self._profiles)
+        if profiles.get(FakeRunnerTrustStore.KEY_ID) not in {
+            None,
+            SignerProfile.SYNTHETIC,
+        }:
+            raise ValueError("Fake runner key is permanently SYNTHETIC")
+        if SignerProfile.REAL in profiles.values():
+            raise ValueError("S1-07A has no allowlisted REAL signer")
+        object.__setattr__(self, "_profiles", MappingProxyType(profiles))
+
+    @classmethod
+    def synthetic_only(cls) -> SignerTrustPolicy:
+        return cls(MappingProxyType({FakeRunnerTrustStore.KEY_ID: SignerProfile.SYNTHETIC}))
+
+    def profile_for(self, key_id: str) -> SignerProfile | None:
+        return self._profiles.get(key_id)
+
+
+@dataclass(frozen=True, slots=True)
+class ResultAttestation:
+    signer_key_id: str
+    authorization_id: EntityId
     invocation_id: EntityId
     session_id: EntityId
-    authorization_id: EntityId
     run_id: EntityId
     source: str
     dataset: DatasetKind
     request_sha256: str
     run_fingerprint: str
+    raw_manifest_sha256: str
+    canonical_content_sha256: str
+    quality_manifest_sha256: str
+    quality_run_id: EntityId
+    difference_report_id: EntityId | None
+    difference_report_sha256: str | None
+    evidence_inventory_sha256: str
+    versions: Mapping[str, str]
     started_at: UtcTimestamp
     ended_at: UtcTimestamp
     signature: str
 
     def __post_init__(self) -> None:
         for value, namespace, field in (
+            (self.authorization_id, "data_authorization", "authorization_id"),
             (self.invocation_id, "data_invocation", "invocation_id"),
             (self.session_id, "data_session", "session_id"),
-            (self.authorization_id, "data_authorization", "authorization_id"),
             (self.run_id, "data_validation", "run_id"),
+            (self.quality_run_id, "data_quality", "quality_run_id"),
         ):
             if value.namespace != namespace:
                 raise ValueError(f"{field} must use {namespace} namespace")
-        if self.ended_at.value <= self.started_at.value:
-            raise ValueError("runner invocation end must follow its start")
-        if not _SOURCE.fullmatch(self.source):
-            raise ValueError("runner source must be a stable uppercase identifier")
-        for digest, field in (
-            (self.request_sha256, "request_sha256"),
-            (self.run_fingerprint, "run_fingerprint"),
-            (self.signature, "signature"),
+        if (
+            self.difference_report_id is not None
+            and self.difference_report_id.namespace != "data_diff"
+        ):
+            raise ValueError("difference_report_id must use data_diff namespace")
+        if (self.difference_report_id is None) != (self.difference_report_sha256 is None):
+            raise ValueError("DifferenceReport ID and SHA must be supplied together")
+        for digest in (
+            self.request_sha256,
+            self.run_fingerprint,
+            self.raw_manifest_sha256,
+            self.canonical_content_sha256,
+            self.quality_manifest_sha256,
+            self.evidence_inventory_sha256,
+            self.signature,
         ):
             if not _HEX64.fullmatch(digest):
-                raise ValueError(f"runner {field} is invalid")
+                raise ValueError("result attestation digest is invalid")
+        if self.difference_report_sha256 is not None and not _HEX64.fullmatch(
+            self.difference_report_sha256
+        ):
+            raise ValueError("difference_report_sha256 is invalid")
+        if set(self.versions) != _VERSION_FIELDS:
+            raise ValueError("result attestation versions are incomplete")
+        object.__setattr__(self, "versions", MappingProxyType(dict(sorted(self.versions.items()))))
+        if self.ended_at.value <= self.started_at.value:
+            raise ValueError("result attestation end must follow start")
 
-    def unsigned_payload(self) -> dict[str, str]:
+    def unsigned_payload(self) -> dict[str, object]:
         return {
             "authorization_id": str(self.authorization_id),
+            "canonical_content_sha256": self.canonical_content_sha256,
             "dataset": self.dataset.value,
+            "difference_report_id": (
+                str(self.difference_report_id) if self.difference_report_id else None
+            ),
+            "difference_report_sha256": self.difference_report_sha256,
             "ended_at": self.ended_at.to_iso(),
+            "evidence_inventory_sha256": self.evidence_inventory_sha256,
             "invocation_id": str(self.invocation_id),
+            "quality_manifest_sha256": self.quality_manifest_sha256,
+            "quality_run_id": str(self.quality_run_id),
+            "raw_manifest_sha256": self.raw_manifest_sha256,
             "request_sha256": self.request_sha256,
             "run_fingerprint": self.run_fingerprint,
             "run_id": str(self.run_id),
             "session_id": str(self.session_id),
+            "signer_key_id": self.signer_key_id,
             "source": self.source,
             "started_at": self.started_at.to_iso(),
+            "versions": dict(self.versions),
         }
 
     def to_bytes(self) -> bytes:
         return _canonical({**self.unsigned_payload(), "signature": self.signature})
 
     @classmethod
-    def from_bytes(cls, payload: bytes) -> RunnerInvocationAttestation:
+    def from_bytes(cls, payload: bytes) -> ResultAttestation:
         try:
-            parsed = json.loads(payload)
+            raw = json.loads(payload)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ValueError("runner attestation is invalid JSON") from error
-        if not isinstance(parsed, dict) or payload != _canonical(parsed):
-            raise ValueError("runner attestation must be canonical JSON")
-        required = {
-            "authorization_id",
-            "dataset",
-            "ended_at",
-            "invocation_id",
-            "request_sha256",
-            "run_fingerprint",
-            "run_id",
-            "session_id",
-            "signature",
-            "source",
-            "started_at",
+            raise ValueError("result attestation is invalid JSON") from error
+        if not isinstance(raw, dict) or payload != _canonical(raw):
+            raise ValueError("result attestation must be canonical JSON")
+        expected = {
+            *cls.__dataclass_fields__,
         }
-        if set(parsed) != required:
-            raise ValueError("runner attestation fields do not match the schema")
+        if set(raw) != expected:
+            raise ValueError("result attestation fields do not match the schema")
+        signature = raw.pop("signature", None)
+        difference_id = raw["difference_report_id"]
         return cls(
-            invocation_id=parse_entity_id(str(parsed["invocation_id"])),
-            session_id=parse_entity_id(str(parsed["session_id"])),
-            authorization_id=parse_entity_id(str(parsed["authorization_id"])),
-            run_id=parse_entity_id(str(parsed["run_id"])),
-            source=str(parsed["source"]),
-            dataset=DatasetKind(str(parsed["dataset"])),
-            request_sha256=str(parsed["request_sha256"]),
-            run_fingerprint=str(parsed["run_fingerprint"]),
-            started_at=UtcTimestamp.from_iso(str(parsed["started_at"])),
-            ended_at=UtcTimestamp.from_iso(str(parsed["ended_at"])),
-            signature=str(parsed["signature"]),
+            signer_key_id=str(raw["signer_key_id"]),
+            authorization_id=parse_entity_id(str(raw["authorization_id"])),
+            invocation_id=parse_entity_id(str(raw["invocation_id"])),
+            session_id=parse_entity_id(str(raw["session_id"])),
+            run_id=parse_entity_id(str(raw["run_id"])),
+            source=str(raw["source"]),
+            dataset=DatasetKind(str(raw["dataset"])),
+            request_sha256=str(raw["request_sha256"]),
+            run_fingerprint=str(raw["run_fingerprint"]),
+            raw_manifest_sha256=str(raw["raw_manifest_sha256"]),
+            canonical_content_sha256=str(raw["canonical_content_sha256"]),
+            quality_manifest_sha256=str(raw["quality_manifest_sha256"]),
+            quality_run_id=parse_entity_id(str(raw["quality_run_id"])),
+            difference_report_id=(
+                parse_entity_id(str(difference_id)) if difference_id is not None else None
+            ),
+            difference_report_sha256=(
+                str(raw["difference_report_sha256"])
+                if raw["difference_report_sha256"] is not None
+                else None
+            ),
+            evidence_inventory_sha256=str(raw["evidence_inventory_sha256"]),
+            versions=MappingProxyType({str(k): str(v) for k, v in raw["versions"].items()}),
+            started_at=UtcTimestamp.from_iso(str(raw["started_at"])),
+            ended_at=UtcTimestamp.from_iso(str(raw["ended_at"])),
+            signature=str(signature),
         )
 
 
-class RunnerAttestationVerifier(Protocol):
+class ResultAttestationSigner(Protocol):
     @property
-    def establishes_real_identity(self) -> bool: ...
+    def key_id(self) -> str: ...
 
-    def verify(self, attestation: RunnerInvocationAttestation) -> bool: ...
+    def verify(self, attestation: ResultAttestation) -> bool: ...
 
 
 class FakeRunnerTrustStore:
-    """Offline Fake runner signer/verifier; never used as a provider SDK."""
+    KEY_ID = "quantking.fake-runner.v1"
 
     def __init__(self) -> None:
-        self._key = b"quantking-s1-07a-r1-fake-runner-key"
+        self._key = b"quantking-s1-07a-r2-fake-runner-key"
 
     @property
-    def establishes_real_identity(self) -> bool:
-        return False
+    def key_id(self) -> str:
+        return self.KEY_ID
 
-    def sign(self, attestation: RunnerInvocationAttestation) -> RunnerInvocationAttestation:
+    @property
+    def profile(self) -> SignerProfile:
+        return SignerProfile.SYNTHETIC
+
+    def sign(self, attestation: ResultAttestation) -> ResultAttestation:
+        if attestation.signer_key_id != self.key_id:
+            raise ValueError("attestation signer_key_id does not match Fake signer")
         return replace(
             attestation,
             signature=_signature(self._key, attestation.unsigned_payload()),
         )
 
-    def verify(self, attestation: RunnerInvocationAttestation) -> bool:
-        expected = _signature(self._key, attestation.unsigned_payload())
-        return hmac.compare_digest(expected, attestation.signature)
+    def verify(self, attestation: ResultAttestation) -> bool:
+        return attestation.signer_key_id == self.key_id and hmac.compare_digest(
+            _signature(self._key, attestation.unsigned_payload()),
+            attestation.signature,
+        )
 
 
 __all__ = [
+    "AuthorizationClaimError",
+    "AuthorizationClaimStore",
     "AuthorizationVerifier",
     "ExecutionAuthorization",
     "FakeAuthorizationAuthority",
     "FakeRunnerTrustStore",
     "HmacAuthorizationAuthority",
-    "RunnerAttestationVerifier",
-    "RunnerInvocationAttestation",
+    "ResultAttestation",
+    "ResultAttestationSigner",
+    "SignerProfile",
+    "SignerTrustPolicy",
 ]

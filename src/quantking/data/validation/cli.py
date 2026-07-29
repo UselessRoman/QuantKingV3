@@ -10,11 +10,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
+from quantking.common.ids import EntityId
 from quantking.common.time import utc_now
 from quantking.data.assessment.matrix import default_source_matrix
 from quantking.data.models import DatasetKind
 from quantking.data.validation.artifacts import ValidationEvidenceVerifier
 from quantking.data.validation.authorization import (
+    AuthorizationClaimError,
+    AuthorizationClaimStore,
     AuthorizationVerifier,
     ExecutionAuthorization,
 )
@@ -111,6 +114,8 @@ def execute(
     acknowledgement: str,
     authorization: ExecutionAuthorization | None = None,
     authorization_verifier: AuthorizationVerifier | None = None,
+    invocation_id: EntityId | None = None,
+    authorization_claim_store: AuthorizationClaimStore | None = None,
 ) -> Path:
     if acknowledgement != REAL_EXECUTION_ACK:
         raise ValueError("exact real-execution acknowledgement is required")
@@ -121,18 +126,24 @@ def execute(
         )
     plan = build_plan(source=source, dataset=dataset, output_root=output_root)
     sample = load_packaged_fixed_sample()
-    if not authorization_verifier.verify(
-        authorization,
-        source=plan.source,
-        dataset=dataset,
-        output_root=output_root,
-        sample_sha256=sample.sample_spec_sha256,
-        at=utc_now(),
-    ):
+    if invocation_id is None or authorization_claim_store is None:
         raise ValidationExecutionError(
-            "AUTHORIZATION_REQUIRED",
-            "matching one-time scoped authorization is required before runner import",
+            "AUTHORIZATION_RUNTIME_UNAVAILABLE",
+            "authorization claim runtime is unavailable; runner remains blocked",
         )
+    try:
+        authorization_claim_store.claim(
+            authorization,
+            invocation_id=invocation_id,
+            verifier=authorization_verifier,
+            source=plan.source,
+            dataset=dataset,
+            output_root=output_root,
+            sample_sha256=sample.sample_spec_sha256,
+            at=utc_now(),
+        )
+    except AuthorizationClaimError as error:
+        raise ValidationExecutionError(str(error), "authorization claim was rejected") from None
     module_name = f"quantking.data.validation.runners.{source.lower()}"
     try:
         module = importlib.import_module(module_name)
@@ -248,19 +259,16 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.action == "execute":
-            authorization = _load_authorization(args.authorization_file)
-            result = {
-                "directory": str(
-                    execute(
-                        source=args.source,
-                        dataset=DatasetKind(args.dataset),
-                        output_root=args.output_root,
-                        acknowledgement=args.ack,
-                        authorization=authorization,
-                        authorization_verifier=None,
-                    )
+            if args.ack != REAL_EXECUTION_ACK:
+                raise ValidationExecutionError(
+                    "ACKNOWLEDGEMENT_REQUIRED",
+                    "exact real-execution acknowledgement is required",
                 )
-            }
+            _load_authorization(args.authorization_file)
+            raise ValidationExecutionError(
+                "AUTHORIZATION_RUNTIME_UNAVAILABLE",
+                "authorization claim runtime is unavailable; runner remains blocked",
+            )
         elif args.action == "verify":
             result = verify(validation_root=args.validation_root, directory=args.directory)
         else:

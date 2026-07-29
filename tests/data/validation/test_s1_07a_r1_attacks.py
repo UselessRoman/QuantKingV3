@@ -60,7 +60,7 @@ def test_writer_manifest_does_not_persist_caller_declared_gates_or_real_kind(
     assert "evidence_kind" not in manifest
 
 
-def test_deep_verifier_derives_four_gates_but_ineligible_sample_blocks_fifth(
+def test_deep_verifier_rejects_fake_quality_catalogue_and_ineligible_sample(
     tmp_path: Path,
 ) -> None:
     from quantking.data.validation.testing import build_deep_fake_run
@@ -71,7 +71,7 @@ def test_deep_verifier_derives_four_gates_but_ineligible_sample_blocks_fifth(
     assert verified.gates.semantic_contract_verified
     assert verified.gates.schema_unit_verified
     assert verified.gates.coverage_adequate
-    assert verified.gates.quality_passed
+    assert not verified.gates.quality_passed
     assert not verified.gates.fixed_sample_differences_adequate
     assert verified.status.value == "BLOCKED_EXTERNAL_VALIDATION"
 
@@ -190,7 +190,11 @@ def test_acknowledgement_is_not_authorization_and_fails_before_import(
 
 
 def test_missing_runner_is_stable_sanitized_and_does_not_load_sdk(tmp_path: Path) -> None:
-    from quantking.data.validation.authorization import FakeAuthorizationAuthority
+    from quantking.common.ids import new_entity_id
+    from quantking.data.validation.authorization import (
+        AuthorizationClaimStore,
+        FakeAuthorizationAuthority,
+    )
     from quantking.data.validation.cli import (
         REAL_EXECUTION_ACK,
         ValidationExecutionError,
@@ -214,6 +218,8 @@ def test_missing_runner_is_stable_sanitized_and_does_not_load_sdk(tmp_path: Path
             acknowledgement=REAL_EXECUTION_ACK,
             authorization=authorization,
             authorization_verifier=authority,
+            invocation_id=new_entity_id("data_invocation"),
+            authorization_claim_store=AuthorizationClaimStore(),
         )
     assert captured.value.code == "RUNNER_UNAVAILABLE"
     assert str(captured.value) == "provider runner is not installed; assessment remains blocked"

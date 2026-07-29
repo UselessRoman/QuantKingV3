@@ -239,9 +239,26 @@ def load_packaged_fixed_sample() -> FixedSampleSpec:
     payload = json.loads(resource.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("packaged fixed sample must be a JSON object")
-    spec = fixed_sample_from_dict(payload)
-    if spec.to_canonical_json() != resource.read_text(encoding="utf-8").strip():
+    base = fixed_sample_from_dict(payload)
+    if base.to_canonical_json() != resource.read_text(encoding="utf-8").strip():
         raise ValueError("packaged fixed sample JSON must use canonical bytes")
+    release_resource = files("quantking.data.validation").joinpath("fixed_sample.release.v2.json")
+    release = json.loads(release_resource.read_text(encoding="utf-8"))
+    if (
+        not isinstance(release, dict)
+        or release.get("base_sample_spec_sha256") != base.sample_spec_sha256
+        or set(release)
+        != {
+            "base_sample_spec_sha256",
+            "sample_spec_sha256",
+            "sample_spec_version",
+        }
+    ):
+        raise ValueError("fixed sample release does not bind the immutable base")
+    promoted = dict(payload)
+    promoted["sample_spec_version"] = release["sample_spec_version"]
+    promoted["sample_spec_sha256"] = release["sample_spec_sha256"]
+    spec = fixed_sample_from_dict(promoted)
     return spec
 
 
