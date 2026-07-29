@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from quantking.data.adapters.persistence.assessment import (
+    SealedAssessmentReadVerifier,
     SqliteSourceAssessmentPersistenceAdapter,
 )
 from quantking.data.adapters.persistence.sqlite import (
@@ -32,12 +33,21 @@ def test_source_candidate_assessment_round_trip_and_dataset_filter(tmp_path: Pat
     database = tmp_path / "assessment.db"
     initialize_database(database)
     engine = create_data_engine(database, busy_timeout_ms=250)
-    factory = DataSqliteUnitOfWorkFactory(engine)
+    signer = FakeRunnerTrustStore()
+    policy = SignerTrustPolicy.synthetic_only()
+    factory = DataSqliteUnitOfWorkFactory(
+        engine,
+        assessment_read_verifier=SealedAssessmentReadVerifier(
+            validation_root=root,
+            signer=signer,
+            signer_trust_policy=policy,
+        ),
+    )
     service = SqliteSourceAssessmentPersistenceAdapter(
         engine=engine,
         validation_root=root,
-        signer=FakeRunnerTrustStore(),
-        signer_trust_policy=SignerTrustPolicy.synthetic_only(),
+        signer=signer,
+        signer_trust_policy=policy,
     )
     try:
         saved = service.persist_from_directory(

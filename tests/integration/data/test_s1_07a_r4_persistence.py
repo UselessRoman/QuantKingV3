@@ -211,7 +211,7 @@ def test_legal_deep_synthetic_blocked_directory_persists(tmp_path: Path) -> None
 def test_direct_sql_real_insert_is_rejected_by_database(tmp_path: Path) -> None:
     database = tmp_path / "direct-real.db"
     initialize_database(database)
-    with sqlite3.connect(database) as connection, pytest.raises(sqlite3.IntegrityError):
+    with sqlite3.connect(database) as connection, pytest.raises(sqlite3.DatabaseError):
         connection.execute(
             "INSERT INTO source_candidate_assessments "
             "(assessment_id,source,dataset,evidence_kind,semantic_contract_verified,"

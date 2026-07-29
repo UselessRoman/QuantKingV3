@@ -1,14 +1,14 @@
-# S1-07A-R4 assessment 目录权威持久化修复交接
+# S1-07A-R5 assessment 原子 seal 与历史隔离修复交接
 
-状态：S1-07A-R4 修复已提交、等待主验收；24 个单元仍为
+状态：S1-07A-R5 修复已提交、等待主验收；24 个单元仍为
 BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。
 
 ## 范围与基线
 
-- Stage：Stage 1 / S1-07A-R4。
-- R4 基线：`4b03ec26ef93cd7f2f64ad4aaff2434be1d54f38`。
-- 只删除调用方可签发的 assessment receipt 绕过，收紧 assessment 持久化入口和 TOCTOU
-  边界；R2/R3 signer、coverage、quality、sample 与 authorization claim 均未修改。
+- Stage：Stage 1 / S1-07A-R5。
+- R5 基线：`120aa3b5deaa1135741eb60b155da9e0c78373ee`。
+- 只关闭 assessment 最终 TOCTOU、直接 SQL、历史行和读取信任缺口；R2/R3 signer、
+  coverage、quality、sample 与 authorization claim 均未修改。
 - 没有迁移数据、发布 `DatasetVersion`、创建 `SourceOverride`、启用 auto-switch 或开始
   S1-08/Stage 2。
 
@@ -17,13 +17,13 @@ BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。
 命令：
 
 ```powershell
-uv run --offline --frozen pytest tests/integration/data/test_s1_07a_r4_persistence.py tests/tooling/test_architecture_boundaries.py -q -p no:cacheprovider --tb=no
+uv run --offline --frozen pytest tests/integration/data/test_s1_07a_r5_persistence.py -q -p no:cacheprovider --tb=no
 ```
 
-R4 首次结果为 `11 failed, 4 passed`。根因为通用 UoW 仍接受调用方提供的
-`assessment_persistence_key`，私有 DTO/HMAC receipt 能到达低层写入口；没有专用
-directory-only SQLite adapter 和跨最终复验至 commit 的文件锁；数据库也没有阻断
-S1-07A 阶段的直接 REAL/PRODUCTION 写入，架构检查尚未识别内部 assessment 写能力。
+R5 首次结果为 `8 failed`。根因为 R4 只锁定首次枚举的普通文件，最终 verifier 到 SQLite
+commit 之间仍可由另一进程新增文件或目录；0011 仍允许合法 JSON 外形的
+SYNTHETIC/BLOCKED 直接 SQL；0010/0011 旁路历史行仍留在活跃表；读取端没有把数据库行与
+受管 evidence 的当前深验结果重新绑定。
 
 ## 固定样本 v2
 
@@ -61,26 +61,40 @@ S1-07A 阶段的直接 REAL/PRODUCTION 写入，架构检查尚未识别内部 a
 唯一公共写入口为
 `SqliteSourceAssessmentPersistenceAdapter.persist_from_directory(absolute_assessment_directory)`：
 
-1. 将绝对 assessment directory 约束在受控 `validation_root` 下；
-2. 获取独占 assessment 维护锁，并以 Windows 不共享 WRITE/DELETE 的只读句柄锁定最终目录
-   已有文件；锁文件位于受控 root 的专用锁目录，跨进程同一 assessment 只能有一个 writer；
-3. 使用受控 signer 和 `SignerTrustPolicy` 深验 `_assessment`、全部 runs、Raw、Canonical、
-   Quality、DifferenceReport、coverage、fingerprint 和 result attestation；
-4. 计算并比较 signer profile 与逐 run result-attestation SHA 摘要，执行锁内第二次完整复验；
-5. 在锁仍持有时打开数据库 session/transaction，只写 verifier 返回的精确 assessment；
-6. SQL flush 后再次深验；commit 前再次深验；commit 完成后才关闭文件句柄并释放锁。
+1. 约束绝对 assessment directory 后完成一次受控深验；
+2. 以跨进程独占锁原子移走调用方可见目录，并立即用只读 sentinel 保留原路径；原 evidence
+   保留在受管 `.assessment-retained` 取证目录；
+3. 在保持原始相对路径语义的私有 root 中再次深验，并拒绝未声明顶层项、空目录、symlink、
+   junction、reparse point 和非普通文件；
+4. 将精确文件集合写成单一 ZIP_STORED seal，fsync 后从 seal 安全解包到临时受管 root，
+   再次完整复验 Raw、Canonical、Quality、Difference、coverage、fingerprint、signer 和
+   result attestation；
+5. 以 seal 全文件 SHA 命名并原子完成，持有不共享 WRITE/DELETE 的 seal 文件句柄；
+6. 在同一连接和事务内启用一次性、短期、精确绑定全部行字段及 seal 路径/SHA 的 SQLite UDF
+   write gate；trigger 消费 gate 后 flush，再核对 seal SHA，commit 前再次核对；
+7. commit 完成后才释放 seal、原路径和跨进程锁。竞争者不能在原路径新增嵌套目录，单文件
+   seal 也不存在目录项新增窗口；异常回滚且写入稳定脱敏 failure 取证。
 
 通用 `DataRepository` 与 `DataSqliteUnitOfWorkFactory` 已删除全部 assessment 写方法和
 `assessment_persistence_key` 参数。公共入口不接受 `VerifiedAssessmentEvidence`、DTO、receipt、
 seal 或调用方 key；内部 insert 只存在于专用 adapter。架构边界检查禁止其他源码模块导入私有
 assessment DTO/receipt/insert 名称。不存在实际 evidence directory 时，不存在应用级写入路径。
 
-数据库行除既有 assessment manifest SHA 和相对路径外，还保存规范
-`signer_profiles_json` 与 `result_attestation_sha256s_json`。数据中心仍只读取已经持久化的
-assessment 结果。普通 `0011` migration 增加 S1-07A insert gate，只接受
-`SYNTHETIC/BLOCKED_EXTERNAL_VALIDATION` 和精确 `["SYNTHETIC"]` signer 摘要，并禁止 assessment
-行 UPDATE/DELETE；直接 SQL REAL/PRODUCTION 插入会由 SQLite 拒绝。Alembic 唯一 head 为
-`20260729_0011`；`0010 → 0011 → 0010 → 0011` 支持 upgrade/downgrade/upgrade。
+`0012` trigger 调用只安装在专用 adapter 所持数据库连接上的 UDF。gate 只能消费一次，绑定
+精确行、`SEALED_VERIFIED_V1`、seal 相对路径及 SHA，并在 10 秒内有效；跨连接、事务结束、
+异常回滚、重复或过期调用均返回拒绝。普通 SQLite/SQLAlchemy 连接没有 gate 或只有已 disarm
+gate，因此 REAL/PRODUCTION、SYNTHETIC/BLOCKED、无目录及伪造 SHA 的合法外形 INSERT 都失败。
+
+由于 0010/0011 曾存在旁路，`0012` 将所有既有行逐列原样复制到不可 INSERT/UPDATE/DELETE 的
+`source_candidate_assessment_quarantine`，标记 `PRE_R5_UNVERIFIED_WRITE_PATH`，再从活跃表
+移除；不静默删除、不改写 REAL/SYNTHETIC，也不参与 DataCenter 最新状态。存在活跃或隔离行时
+禁止降级，避免丢失信任凭证；空表支持 `0011 → 0012 → 0011 → 0012`。唯一 Alembic head 为
+`20260729_0012`。
+
+通用 repository/UoW 仍只有 assessment 读取能力。活跃读取只考虑 `SEALED_VERIFIED_V1`，
+并要求注入 `SealedAssessmentReadVerifier`，逐次核对 seal 文件 SHA、安全解包深验结果、
+数据库 assessment、signer 和 attestation 摘要；缺 verifier、缺 seal 或任一不一致均失败关闭。
+DataCenter 将该错误稳定映射为读取完整性失败，不展示为有效来源 assessment。
 
 ### 持久 authorization claim
 
@@ -180,10 +194,12 @@ S1-07A 不包含 provider runner 或 CLI REAL signer。
 - R4 攻击集覆盖通用 UoW key 参数、私有 DTO/receipt/低层方法、无目录与手工 evidence、
   锁内第二次 verify 后、SQL flush 前、commit 前的 manifest/attestation/Canonical 替换、
   合法 SYNTHETIC/BLOCKED 保存和直接 SQL REAL 插入；`15 passed`。
-- validation、R3/R4 persistence、assessment repository、data center、0010/0011 migration、
-  Stage 1 文档定向组合：`228 passed`；Ruff 与专用 adapter mypy 通过。
-- 完整质量门第一次运行停在 Ruff format check（3 个文件需机械格式化）；格式化后
-  `scripts/quality.ps1` 完整通过。
-- 最终离线 pytest：`1086 passed, 2 skipped, 3 deselected`。
+- R5 独立攻击集覆盖真实子进程普通/嵌套新增、原路径重建、manifest/attestation/Canonical/
+  Quality 替换删除重命名、SQLite/SQLAlchemy 直插、无 gate/跨连接/事务后/异常后/过期复用、
+  seal 篡改读取、0010 REAL/SYNTHETIC/混合历史隔离、隔离后降级阻断和空表升降级；`18 passed`。
+- validation、R3/R4/R5 persistence、assessment repository、DataCenter、0010/0011/0012
+  migration、架构和 Stage 1 文档定向组合：`252 passed`。
+- `scripts/quality.ps1` 完整通过。
+- 最终离线 pytest：`1105 passed, 2 skipped, 3 deselected`。
 - 前端单测：`17 passed`；生产构建通过；Playwright：`1 passed`。
 - Ruff、mypy、锁文件、架构边界、Markdown 链接和 `git diff --check` 全部通过。

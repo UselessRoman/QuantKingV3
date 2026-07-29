@@ -15,6 +15,7 @@ _ASSESSMENT_PERSISTENCE_INTERNALS = frozenset(
         "_persist_verified_source_assessment",
         "_record_receipt",
         "_record_receipt_is_valid",
+        "assessment_persistence_key",
     }
 )
 
@@ -143,6 +144,32 @@ def check_boundaries(root: Path) -> list[Violation]:
                         display,
                         node.lineno,
                         "assessment persistence internal",
+                        "data/adapters/persistence/assessment.py only",
+                    )
+                )
+
+        assessment_adapter = parts == (
+            "data",
+            "adapters",
+            "persistence",
+            "assessment.py",
+        )
+        for node in ast.walk(tree):
+            forbidden_assessment_write = (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "SourceCandidateAssessmentRow"
+            ) or (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and "INSERT INTO SOURCE_CANDIDATE_ASSESSMENTS" in node.value.upper()
+            )
+            if forbidden_assessment_write and not assessment_adapter:
+                violations.append(
+                    Violation(
+                        display,
+                        node.lineno,
+                        "assessment persistence write",
                         "data/adapters/persistence/assessment.py only",
                     )
                 )

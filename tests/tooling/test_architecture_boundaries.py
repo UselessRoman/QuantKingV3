@@ -106,3 +106,19 @@ def test_assessment_internal_insert_and_dto_imports_are_forbidden(tmp_path: Path
 
     assert result.returncode == 1
     assert "assessment persistence internal" in result.stdout
+
+
+def test_assessment_sql_and_row_construction_are_adapter_only(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "data/service.py",
+        "from quantking.data.adapters.persistence.models import "
+        "SourceCandidateAssessmentRow\n"
+        "row = SourceCandidateAssessmentRow()\n"
+        "statement = 'INSERT INTO source_candidate_assessments VALUES (?)'\n",
+    )
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 1
+    assert "assessment persistence write" in result.stdout

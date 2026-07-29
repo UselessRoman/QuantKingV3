@@ -22,7 +22,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Self
+from typing import Protocol, Self
 
 from sqlalchemy import Engine, and_, delete, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -114,6 +114,12 @@ class OverrideApplicationFailureState:
     override_status: SourceOverrideStatus
     child_status: DatasetVersionStatus
     failure_message: str
+
+
+class _AssessmentReadVerifier(Protocol):
+    def verify_persisted_row(
+        self, row: SourceCandidateAssessmentRow
+    ) -> SourceCandidateAssessment: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -672,8 +678,14 @@ def _assessment_domain(row: SourceCandidateAssessmentRow) -> SourceCandidateAsse
 class DataRepository:
     """Repository scoped to one SQLAlchemy session and one short transaction."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        *,
+        assessment_read_verifier: _AssessmentReadVerifier | None = None,
+    ) -> None:
         self._session = session
+        self._assessment_read_verifier = assessment_read_verifier
 
     # -- batches -----------------------------------------------------------
 
@@ -1876,7 +1888,7 @@ class DataRepository:
         row = self._session.get(SourceCandidateAssessmentRow, assessment_id)
         if row is None:
             raise InvalidIdError("source candidate assessment does not exist")
-        return _assessment_domain(row)
+        return self._verified_assessment_row(row)
 
     def list_source_candidate_assessments(
         self,
@@ -1896,7 +1908,10 @@ class DataRepository:
             statement = statement.where(SourceCandidateAssessmentRow.dataset == dataset.value)
         if status is not None:
             statement = statement.where(SourceCandidateAssessmentRow.status == status.value)
-        return [_assessment_domain(item) for item in self._session.scalars(statement)]
+        statement = statement.where(
+            SourceCandidateAssessmentRow.persistence_trust_status == "SEALED_VERIFIED_V1"
+        )
+        return [self._verified_assessment_row(item) for item in self._session.scalars(statement)]
 
     def find_latest_source_candidate_assessment(
         self,
@@ -1910,6 +1925,7 @@ class DataRepository:
             .where(
                 SourceCandidateAssessmentRow.source == source,
                 SourceCandidateAssessmentRow.dataset == dataset.value,
+                SourceCandidateAssessmentRow.persistence_trust_status == "SEALED_VERIFIED_V1",
             )
             .order_by(
                 SourceCandidateAssessmentRow.created_at.desc(),
@@ -1917,7 +1933,14 @@ class DataRepository:
             )
             .limit(1)
         )
-        return _assessment_domain(row) if row is not None else None
+        return self._verified_assessment_row(row) if row is not None else None
+
+    def _verified_assessment_row(
+        self, row: SourceCandidateAssessmentRow
+    ) -> SourceCandidateAssessment:
+        if self._assessment_read_verifier is None:
+            raise InvalidDataTransitionError("source assessment evidence verifier is unavailable")
+        return self._assessment_read_verifier.verify_persisted_row(row)
 
     # -- audit (delegates to the shared audit_records table) --------------
 
@@ -1970,14 +1993,23 @@ class DataRepository:
 class DataSqliteUnitOfWork:
     """Fresh session per call; exceptions always roll back."""
 
-    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        *,
+        assessment_read_verifier: _AssessmentReadVerifier | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._assessment_read_verifier = assessment_read_verifier
         self._session: Session | None = None
         self.data: DataRepository
 
     def __enter__(self) -> Self:
         self._session = self._session_factory()
-        self.data = DataRepository(self._session)
+        self.data = DataRepository(
+            self._session,
+            assessment_read_verifier=self._assessment_read_verifier,
+        )
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -2001,8 +2033,17 @@ class DataSqliteUnitOfWork:
 class DataSqliteUnitOfWorkFactory:
     """Callable unit-of-work factory safe to share within one process."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        assessment_read_verifier: _AssessmentReadVerifier | None = None,
+    ) -> None:
         self._session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        self._assessment_read_verifier = assessment_read_verifier
 
     def __call__(self) -> DataSqliteUnitOfWork:
-        return DataSqliteUnitOfWork(self._session_factory)
+        return DataSqliteUnitOfWork(
+            self._session_factory,
+            assessment_read_verifier=self._assessment_read_verifier,
+        )

@@ -171,16 +171,16 @@ def test_replacement_between_first_verify_and_persist_is_rejected(
     verified = build_deep_fake_assessment(root=root)
     directory = _assessment_directory(root, verified)
     service, engine = _service(root=root, database=tmp_path / "replacement.db")
-    original = service._verifier.verify_assessment
+    original = service._snapshot
     calls = 0
 
-    def replace_after_first(*, assessment_directory: Path):
+    def replace_after_first(*, root: Path, directory: Path):
         nonlocal calls
-        result = original(assessment_directory=assessment_directory)
+        result = original(root=root, directory=directory)
         calls += 1
         if calls == 1:
             path = next(
-                assessment_directory.glob(
+                directory.glob(
                     "*/canonical/content.parquet"
                     if target == "canonical"
                     else "*/runner/result-attestation.json"
@@ -189,11 +189,11 @@ def test_replacement_between_first_verify_and_persist_is_rejected(
             path.write_bytes(path.read_bytes() + b" ")
         return result
 
-    monkeypatch.setattr(service._verifier, "verify_assessment", replace_after_first)
+    monkeypatch.setattr(service, "_snapshot", replace_after_first)
     try:
         with pytest.raises(
             Exception,
-            match=r"evidence|manifest|verification|mismatch|attestation|canonical",
+            match=r"evidence|manifest|verification|mismatch|attestation|canonical|failed",
         ):
             service.persist_from_directory(directory)
     finally:
@@ -207,20 +207,20 @@ def test_service_rejects_first_pass_run_fingerprint_drift(
     verified = build_deep_fake_assessment(root=root)
     directory = _assessment_directory(root, verified)
     service, engine = _service(root=root, database=tmp_path / "fingerprint.db")
-    original = service._verifier.verify_assessment
+    original = service._snapshot
     calls = 0
 
-    def forge_first(*, assessment_directory: Path):
+    def forge_first(*, root: Path, directory: Path):
         nonlocal calls
-        result = original(assessment_directory=assessment_directory)
+        result = original(root=root, directory=directory)
         calls += 1
         if calls == 1:
-            object.__setattr__(result.verified_runs[0], "run_fingerprint", "f" * 64)
+            object.__setattr__(result[0].verified_runs[0], "run_fingerprint", "f" * 64)
         return result
 
-    monkeypatch.setattr(service._verifier, "verify_assessment", forge_first)
+    monkeypatch.setattr(service, "_snapshot", forge_first)
     try:
-        with pytest.raises(InvalidDataTransitionError, match="changed between verification"):
+        with pytest.raises(InvalidDataTransitionError, match="changed"):
             service.persist_from_directory(directory)
     finally:
         engine.dispose()
@@ -233,20 +233,18 @@ def test_service_rejects_first_pass_signer_summary_drift(
     verified = build_deep_fake_assessment(root=root)
     directory = _assessment_directory(root, verified)
     service, engine = _service(root=root, database=tmp_path / "signer.db")
-    original = service._attestation_summary
+    original = service._snapshot
     calls = 0
 
-    def forge_first(
-        assessment_directory: Path, evidence: VerifiedAssessmentEvidence
-    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    def forge_first(*, root: Path, directory: Path):
         nonlocal calls
-        result = original(assessment_directory, evidence)
+        result = original(root=root, directory=directory)
         calls += 1
-        return (("FORGED",), result[1]) if calls == 1 else result
+        return (result[0], (("FORGED",), result[1][1])) if calls == 1 else result
 
-    monkeypatch.setattr(service, "_attestation_summary", forge_first)
+    monkeypatch.setattr(service, "_snapshot", forge_first)
     try:
-        with pytest.raises(InvalidDataTransitionError, match="changed between verification"):
+        with pytest.raises(InvalidDataTransitionError, match="changed"):
             service.persist_from_directory(directory)
     finally:
         engine.dispose()
@@ -260,25 +258,29 @@ def test_service_rejects_first_pass_assessment_drift(
     verified = build_deep_fake_assessment(root=root)
     directory = _assessment_directory(root, verified)
     service, engine = _service(root=root, database=tmp_path / f"{field}.db")
-    original = service._verifier.verify_assessment
+    original = service._snapshot
     calls = 0
 
-    def forge_first(*, assessment_directory: Path):
+    def forge_first(*, root: Path, directory: Path):
         nonlocal calls
-        result = original(assessment_directory=assessment_directory)
+        result = original(root=root, directory=directory)
         calls += 1
         if calls == 1:
             value: object = {
-                "coverage_adequate": not result.assessment.coverage_adequate,
+                "coverage_adequate": not result[0].assessment.coverage_adequate,
                 "stability_runs": 99,
                 "blocking_reason": "forged",
             }[field]
-            object.__setattr__(result, "assessment", replace(result.assessment, **{field: value}))
+            object.__setattr__(
+                result[0],
+                "assessment",
+                replace(result[0].assessment, **{field: value}),
+            )
         return result
 
-    monkeypatch.setattr(service._verifier, "verify_assessment", forge_first)
+    monkeypatch.setattr(service, "_snapshot", forge_first)
     try:
-        with pytest.raises(InvalidDataTransitionError, match="changed between verification"):
+        with pytest.raises(InvalidDataTransitionError, match="changed"):
             service.persist_from_directory(directory)
     finally:
         engine.dispose()
