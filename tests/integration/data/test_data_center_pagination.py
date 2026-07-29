@@ -13,11 +13,6 @@ from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
 )
-from quantking.data.assessment.models import (
-    AssessmentStatus,
-    EvidenceKind,
-    SourceCandidateAssessment,
-)
 from quantking.data.center import DataCenterQueryService
 from quantking.data.models import (
     BatchFailureInfo,
@@ -33,7 +28,12 @@ from quantking.data.models import (
     transition_batch,
     transition_dataset_version,
 )
-from quantking.data.validation.testing import verified_synthetic_assessment
+from quantking.data.validation.authorization import (
+    FakeRunnerTrustStore,
+    SignerTrustPolicy,
+)
+from quantking.data.validation.persistence import VerifiedSourceAssessmentService
+from quantking.data.validation.testing import build_deep_fake_assessment
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     initialize_database,
@@ -132,43 +132,27 @@ def test_latest_source_assessment_is_selected_in_sql_by_time_and_stable_id(
     initialize_database(database)
     engine = create_data_engine(database, busy_timeout_ms=250)
     factory = DataSqliteUnitOfWorkFactory(engine)
-    base = datetime(2026, 7, 28, tzinfo=UTC)
-    assessments = [
-        SourceCandidateAssessment(
-            assessment_id=new_entity_id("data_assessment"),
-            source="BAOSTOCK",
-            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-            evidence_kind=EvidenceKind.SYNTHETIC,
-            semantic_contract_verified=True,
-            schema_unit_verified=True,
-            coverage_adequate=True,
-            quality_passed=True,
-            fixed_sample_differences_adequate=True,
-            stability_runs=index,
-            status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
-            blocking_reason="external validation required",
-            assessment_config_version="assessment.v1",
-            sample_spec_version="s1-07.fixed-sample.v1",
-            rule_version="rules.v1",
-            evidence_relative_path=f"assessments/{index}.json",
-            evidence_sha256=f"{index + 1:x}".rjust(64, "0"),
-            created_at=UtcTimestamp(base + timedelta(seconds=index)),
-        )
-        for index in range(2)
-    ]
-    verified = tuple(verified_synthetic_assessment(item) for item in assessments)
-    with factory() as uow:
-        for evidence in verified:
-            uow.data.save_source_candidate_assessment(evidence)
-        uow.commit()
+    root = tmp_path / "validation"
+    verified = tuple(
+        build_deep_fake_assessment(root=root, assessment_index=index) for index in (20, 21)
+    )
+    service = VerifiedSourceAssessmentService(
+        validation_root=root,
+        signer=FakeRunnerTrustStore(),
+        signer_trust_policy=SignerTrustPolicy.synthetic_only(),
+        uow_factory=factory,
+    )
+    saved = tuple(
+        service.persist((root / evidence.evidence_relative_path).parent) for evidence in verified
+    )
 
     with factory() as uow:
         latest = uow.data.find_latest_source_candidate_assessment(
-            source="BAOSTOCK",
-            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            source="XTQUANT",
+            dataset=DatasetKind.EXCHANGE_CALENDAR,
         )
 
-    assert latest == verified[-1].assessment
+    assert latest == saved[-1]
     engine.dispose()
 
 

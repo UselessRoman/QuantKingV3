@@ -147,7 +147,8 @@ def build_deep_fake_run(
         "canonical/content.parquet": (parquet_bytes, row_count),
     }
 
-    raw_root = root / f"_fake-raw-{run_index}"
+    lane_key = assessment.value.hex
+    raw_root = root / f"_fake-raw-{lane_key}-{run_index}"
     raw_dir = RawBatchPublisher(data_root=raw_root).publish(
         RawBatchPublishRequest(
             source=source,
@@ -162,7 +163,7 @@ def build_deep_fake_run(
     )
     files.update(_collect(raw_dir, prefix=f"raw-root/{raw_dir.relative_to(raw_root).as_posix()}"))
 
-    quality_root = root / f"_fake-quality-{run_index}"
+    quality_root = root / f"_fake-quality-{lane_key}-{run_index}"
     quality = QualityRunArtifact(
         run_id=_id("data_quality", run_index, lane=6),
         version_id=_id("data_version", run_index, lane=7),
@@ -253,7 +254,7 @@ def build_deep_fake_run(
     if attack == "missing_request":
         files.pop("request/manifest.json")
     if attack == "replace_raw_after_attestation":
-        replacement_root = root / f"_fake-raw-replacement-{run_index}"
+        replacement_root = root / f"_fake-raw-replacement-{lane_key}-{run_index}"
         replacement_dir = RawBatchPublisher(data_root=replacement_root).publish(
             RawBatchPublishRequest(
                 source=source,
@@ -282,7 +283,7 @@ def build_deep_fake_run(
         )
         files["canonical/content.parquet"] = (replacement_bytes, replacement_count)
     elif attack == "replace_quality_after_attestation":
-        replacement_root = root / f"_fake-quality-replacement-{run_index}"
+        replacement_root = root / f"_fake-quality-replacement-{lane_key}-{run_index}"
         replacement_quality = replace(quality, run_id=_id("data_quality", run_index, lane=9))
         replacement_dir = QualityArtifactWriter(artifacts_root=replacement_root).write(
             outcome=replacement_quality, row_evidence_tables={}
@@ -326,8 +327,9 @@ def build_deep_fake_assessment(
     root: Path,
     drift: str | None = None,
     independence_attack: str | None = None,
+    assessment_index: int = 2,
 ) -> VerifiedAssessmentEvidence:
-    assessment_id = _id("data_assessment", 2, lane=2)
+    assessment_id = _id("data_assessment", assessment_index, lane=2)
     common_invocation = _id("data_invocation", 99, lane=3)
     common_session = _id("data_session", 99, lane=4)
     common_start = UtcTimestamp(datetime(2026, 7, 29, 0, 1, tzinfo=UTC))
@@ -346,8 +348,14 @@ def build_deep_fake_assessment(
                     common_invocation if independence_attack == "same_invocation" else None
                 ),
                 session_id=(common_session if independence_attack == "same_session" else None),
-                started_at=(common_start if independence_attack == "same_timestamps" else None),
                 ended_at=(common_end if independence_attack == "same_timestamps" else None),
+                started_at=(
+                    common_start
+                    if independence_attack == "same_timestamps"
+                    else UtcTimestamp(
+                        datetime(2026, 7, 29, 0, assessment_index, index * 2, tzinfo=UTC)
+                    )
+                ),
             )
         )
     writer = ValidationEvidenceWriter(

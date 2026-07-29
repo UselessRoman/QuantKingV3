@@ -219,7 +219,7 @@ def test_missing_runner_is_stable_sanitized_and_does_not_load_sdk(tmp_path: Path
             authorization=authorization,
             authorization_verifier=authority,
             invocation_id=new_entity_id("data_invocation"),
-            authorization_claim_store=AuthorizationClaimStore(),
+            authorization_claim_store=AuthorizationClaimStore(claim_root=tmp_path / "claims"),
         )
     assert captured.value.code == "RUNNER_UNAVAILABLE"
     assert str(captured.value) == "provider runner is not installed; assessment remains blocked"

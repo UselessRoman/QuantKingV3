@@ -348,4 +348,6 @@ class SourceCandidateAssessmentRow(Base):
     rule_version: Mapped[str] = mapped_column(String(128), nullable=False)
     evidence_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
     evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    signer_profiles_json: Mapped[str] = mapped_column(Text, nullable=False)
+    result_attestation_sha256s_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = mapped_column(String(40), nullable=False)

@@ -5,17 +5,18 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from enum import StrEnum
 from pathlib import Path
-from threading import Lock
 from types import MappingProxyType
 from typing import Protocol
 
 from quantking.common.ids import EntityId, new_entity_id, parse_entity_id
+from quantking.common.paths import is_reparse_point
 from quantking.common.time import UtcTimestamp, utc_now
 from quantking.data.models import DatasetKind
 
@@ -186,11 +187,12 @@ class AuthorizationClaimError(Exception):
 
 
 class AuthorizationClaimStore:
-    """Process-local atomic claim registry; future runners may replace its storage port."""
+    """Cross-process immutable claim store using atomic exclusive file creation."""
 
-    def __init__(self) -> None:
-        self._lock = Lock()
-        self._claims: dict[EntityId, EntityId] = {}
+    def __init__(self, *, claim_root: Path) -> None:
+        if not isinstance(claim_root, Path) or not claim_root.is_absolute():
+            raise ValueError("claim_root must be an absolute Path")
+        self._root = claim_root
 
     def claim(
         self,
@@ -215,10 +217,55 @@ class AuthorizationClaimStore:
             at=at,
         ):
             raise AuthorizationClaimError("AUTHORIZATION_INVALID_OR_EXPIRED")
-        with self._lock:
-            if authorization.authorization_id in self._claims:
-                raise AuthorizationClaimError("AUTHORIZATION_ALREADY_CONSUMED")
-            self._claims[authorization.authorization_id] = invocation_id
+        root = _prepare_claim_root(self._root)
+        claim_path = root / f"{authorization.authorization_id.value.hex}.json"
+        if is_reparse_point(claim_path):
+            raise AuthorizationClaimError("AUTHORIZATION_CLAIM_STORE_UNSAFE")
+        payload = _canonical(
+            {
+                "authorization_id": str(authorization.authorization_id),
+                "claimed_at": at.to_iso(),
+                "dataset": dataset.value,
+                "expires_at": authorization.expires_at.to_iso(),
+                "invocation_id": str(invocation_id),
+                "output_root": str(output_root.resolve(strict=False)),
+                "sample_sha256": sample_sha256,
+                "source": source,
+                "status": "CLAIMED",
+            }
+        )
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        try:
+            descriptor = os.open(claim_path, flags, 0o600)
+        except FileExistsError:
+            raise AuthorizationClaimError("AUTHORIZATION_ALREADY_CONSUMED") from None
+        except OSError:
+            raise AuthorizationClaimError("AUTHORIZATION_CLAIM_PERSISTENCE_FAILED") from None
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                view = view[written:]
+            os.fsync(descriptor)
+        except OSError:
+            raise AuthorizationClaimError("AUTHORIZATION_CLAIM_PERSISTENCE_FAILED") from None
+        finally:
+            os.close(descriptor)
+
+
+def _prepare_claim_root(root: Path) -> Path:
+    current = Path(root.anchor)
+    for part in root.parts[1:]:
+        current /= part
+        if current.exists() and is_reparse_point(current):
+            raise AuthorizationClaimError("AUTHORIZATION_CLAIM_STORE_UNSAFE")
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        raise AuthorizationClaimError("AUTHORIZATION_CLAIM_PERSISTENCE_FAILED") from None
+    if not root.is_dir() or is_reparse_point(root):
+        raise AuthorizationClaimError("AUTHORIZATION_CLAIM_STORE_UNSAFE")
+    return root
 
 
 class SignerProfile(StrEnum):

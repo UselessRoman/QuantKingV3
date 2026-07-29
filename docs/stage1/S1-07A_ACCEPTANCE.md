@@ -1,12 +1,12 @@
-# S1-07A-R2 runner 信任、覆盖、质量与授权修复交接
+# S1-07A-R3 assessment 来源与持久授权修复交接
 
-状态：S1-07A-R2 修复已提交、等待主验收；24 个单元仍为
+状态：S1-07A-R3 修复已提交、等待主验收；24 个单元仍为
 BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。
 
 ## 范围与基线
 
-- Stage：Stage 1 / S1-07A-R2。
-- R2 基线：`a1143af1a97ecdbe5621f0cfc4ec8311291d0376`。
+- Stage：Stage 1 / S1-07A-R3。
+- R3 基线：`baf681c3bd3a856cf20713806f8fed828a961fc5`。
 - 只修复 provider-neutral REAL 可信链、稳定运行合同、逐次授权边界、持久化复验和离线测试门。
 - 没有迁移数据、发布 `DatasetVersion`、创建 `SourceOverride`、启用 auto-switch 或开始
   S1-08/Stage 2。
@@ -16,12 +16,12 @@ BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。
 命令：
 
 ```powershell
-uv run --offline --frozen pytest tests/data/validation/test_s1_07a_r2_attacks.py -q -p no:cacheprovider
+uv run --offline --frozen pytest tests/data/validation/test_s1_07a_r3_claims.py tests/integration/data/test_s1_07a_r3_persistence.py -q -p no:cacheprovider
 ```
 
-R2 首次结果为 `29 failed`。根因为 REAL 身份仍可由 verifier 布尔属性提升、runner
-attestation 未绑定最终产物、coverage 只要求每 case 至少一行、质量门接受自定义 PASSED
-规则、授权没有原子一次性消费，以及仓储只对 PRODUCTION_READY 做完整重推导。
+R3 首次结果为 `15 failed, 1 skipped`。根因为低层仓储仍直接接受调用方构造的
+`VerifiedAssessmentEvidence`，没有从 evidence directory 重新读取；authorization claim
+仍是每个 Python store 实例各自持有的内存字典，无法跨实例、跨进程或重启保留。
 
 ## 固定样本 v2
 
@@ -54,6 +54,40 @@ attestation 未绑定最终产物、coverage 只要求每 case 至少一行、�
 
 ## 合同与安全门
 
+### Assessment 持久化来源
+
+唯一可信入口为 `VerifiedSourceAssessmentService.persist(assessment_directory)`：
+
+1. 将绝对 assessment directory 约束在受控 `validation_root` 下；
+2. 使用受控 signer 和 `SignerTrustPolicy` 深验 `_assessment`、全部 runs、Raw、Canonical、
+   Quality、DifferenceReport、coverage、fingerprint 和 result attestation；
+3. 读取 signer profile 与逐 run attestation SHA 摘要；
+4. 立即第二次完整复验并比较 assessment、runs、gate、fingerprint 和摘要；
+5. 使用进程内随机 capability 对 assessment manifest、路径、signer 和 attestation 摘要签发
+   HMAC receipt，仅把第二次复验产生的内部 DTO 交给携带同一 capability 的 UoW，随即提交。
+
+`DataRepository.save_source_candidate_assessment()` 公共入口已删除。低层适配器只保留内部
+`_persist_verified_source_assessment()`，其输入是应用服务内部 DTO；手工 evidence、导入
+`_VERIFICATION_SEAL` 或私有 DTO 但没有本次 service receipt、不存在或越界目录、reparse
+point、manifest/COMPLETE/SHA 篡改，以及两次复验间产物替换均不能进入仓储。
+
+数据库行除既有 assessment manifest SHA 和相对路径外，还保存规范
+`signer_profiles_json` 与 `result_attestation_sha256s_json`。数据中心仍只读取已经持久化的
+assessment 结果。Alembic 唯一 head 为 `20260729_0010`；迁移支持 upgrade/downgrade/upgrade。
+
+### 持久 authorization claim
+
+`AuthorizationClaimStore` 现在要求受控绝对 `claim_root`，每个 authorization_id 映射到固定
+文件名，并以 `O_CREAT | O_EXCL` 单次原子创建。claim 文件绑定 authorization/invocation、
+source、dataset、output_root、sample SHA、claimed_at、expires_at 和 `CLAIMED` 状态；不保存
+授权签名、密钥、token 或供应商 payload。文件创建成功即永久消费，不因 runner import 或
+execute 失败删除。
+
+新 store 实例、独立进程和 runtime 重启都通过同一个不可覆盖 claim 文件识别已消费授权；
+并发竞争恰好一个成功，其余稳定返回 `AUTHORIZATION_ALREADY_CONSUMED`。claim 根任一祖先为
+symlink/junction/reparse point 时返回 `AUTHORIZATION_CLAIM_STORE_UNSAFE`。S1-07A 正式 CLI
+仍为 `AUTHORIZATION_RUNTIME_UNAVAILABLE`。
+
 - writer 信封只保存 run/request/version/时间等不可变事实，不接受或写入调用方
   `evidence_kind`/gate/content SHA/quality verdict。
 - verifier 从规范 request manifest 与完整固定 case 集、受管理 Raw verifier、严格 Canonical
@@ -81,8 +115,8 @@ attestation 未绑定最终产物、coverage 只要求每 case 至少一行、�
   和原子 rename；相同 ID/相同字节为 no-op，不同内容冲突。
 - verifier 拒绝 manifest、COMPLETE、文件集合、文件 SHA、路径和 lineage 篡改，以及
   symlink/junction/reparse point 和路径逃逸。
-- SQLite assessment 保存入口只接受深层验证签发的 `VerifiedAssessmentEvidence`，并在保存前
-  重新推导生产状态、核对统一 fingerprint、证据路径/SHA和样本资格；Python seal 不是唯一边界。
+- assessment 只能由目录权威应用服务保存；内部 repository DTO 仍重新推导状态、核对统一
+  fingerprint、证据路径/SHA、样本资格及 signer/attestation receipt。Python seal 不是可信入口。
 - `plan`、`--help`、import、`status`、`verify` 不导入供应商 SDK。`execute` 的固定
   acknowledgement 只作交互确认；必须先原子 claim 逐次授权的
   authorization_id/source/dataset/output_root/sample SHA/有效期，并绑定唯一 invocation_id，
@@ -131,10 +165,17 @@ S1-07A 不包含 provider runner 或 CLI REAL signer。
 
 - XTQuant/BaoStock/AKShare/Tushare SDK：均未为 S1-07A 加载或新增依赖；没有可报告的本次
   真实执行 SDK 版本。任何 S1-07B/C plan 必须先显示并冻结精确版本。
-- R2 攻击测试：Fake signer 提升、attestation 后三类产物替换、六类 coverage 首/中/尾缺口、
-  质量规则缺少/额外/重复/自定义、授权重复与并发竞争均通过；仓储对 blocked gate、
-  stability 和 reason 漂移也在保存前拒绝。
-- R2 攻击集：`32 passed`；定向 validation/repository/Stage 1 文档回归：`157 passed`。
+- R2 回归继续覆盖 Fake signer、结果 attestation、六类 coverage、精确质量目录和 fixed
+  sample v2；S1-07A 仍没有 REAL signer。
+- R3 攻击测试覆盖手工/seal evidence、路径与 reparse、文件及 verify/persist 间替换、
+  合法 SYNTHETIC/BLOCKED 保存，以及两线程、两实例、两进程、重启和 runner 失败后永久消费。
+- R3 攻击集：`22 passed`；validation：`80 passed`；assessment/data-center/migration：
+  `20 passed`；Stage 1 文档：`71 passed`。
+- 首次完整质量门因新增 migration head 未同步 runtime/历史 head 回归常量而有 `11 failed`；
+  修复后失败子集 `100 passed`，最终完整 `scripts/quality.ps1` 通过。
+- 最终离线 pytest：`1074 passed, 2 skipped, 3 deselected`；Ruff、mypy、架构边界、Markdown
+  链接、前端 typecheck/`17 passed` 单测/production build/`1 passed` E2E 和
+  `git diff --check` 全部通过。
 - `scripts/quality.ps1`：通过。
 - 离线 pytest：`1055 passed, 2 skipped, 3 deselected`。
 - 前端单测：`17 passed`；生产构建通过；Playwright：`1 passed`。

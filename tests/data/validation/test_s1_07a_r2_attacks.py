@@ -265,7 +265,7 @@ def test_authorization_claim_is_atomic_and_one_time(tmp_path: Path) -> None:
         output_root=tmp_path,
         sample_sha256=load_packaged_fixed_sample().sample_spec_sha256,
     )
-    store = AuthorizationClaimStore()
+    store = AuthorizationClaimStore(claim_root=tmp_path / "claims")
     first = new_entity_id("data_invocation")
     store.claim(
         authorization,
@@ -306,7 +306,7 @@ def test_concurrent_authorization_claim_has_exactly_one_winner(tmp_path: Path) -
         output_root=tmp_path,
         sample_sha256=sample_sha,
     )
-    store = AuthorizationClaimStore()
+    store = AuthorizationClaimStore(claim_root=tmp_path / "claims")
 
     def claim() -> str:
         try:
@@ -350,7 +350,7 @@ def test_execute_consumes_authorization_even_when_runner_is_unavailable(
         output_root=tmp_path,
         sample_sha256=load_packaged_fixed_sample().sample_spec_sha256,
     )
-    store = AuthorizationClaimStore()
+    store = AuthorizationClaimStore(claim_root=tmp_path / "claims")
     arguments = {
         "source": "XTQUANT",
         "dataset": DatasetKind.EXCHANGE_CALENDAR,

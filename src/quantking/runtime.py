@@ -59,7 +59,7 @@ from quantking.web.app import create_app
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = _REPOSITORY_ROOT / "configs" / "default.toml"
 EOD_CODE_VERSION = "s1-05-r5"
-EXPECTED_DATABASE_REVISION = "20260722_0009"
+EXPECTED_DATABASE_REVISION = "20260729_0010"
 WORKER_LEASE_TIMEOUT = timedelta(minutes=2)
 
 

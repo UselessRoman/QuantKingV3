@@ -10,7 +10,8 @@
 - `src/quantking/data/override/`（SourceOverride 应用服务）
 - `src/quantking/data/models.py`（框架无关领域对象）
 - 迁移 `20260716_0004`（质量门触发器）、`20260716_0005`（差异报告双方绑定）与
-  `20260722_0009`（精确审批范围冻结）
+  `20260722_0009`（精确审批范围冻结）；当前唯一 head 为 `20260729_0010`
+  （assessment signer/result-attestation receipt）
 
 文档不得替代源码与契约测试。合成数据不能标生产可用。
 
