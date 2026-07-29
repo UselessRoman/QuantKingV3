@@ -35,7 +35,7 @@ def test_writer_is_idempotent_and_conflicts_on_reused_run_id(tmp_path: Path) -> 
         _synthetic_bundle(tmp_path, run_text="different")
 
 
-@pytest.mark.parametrize("target", ("manifest.json", "COMPLETE", "raw/payload.json"))
+@pytest.mark.parametrize("target", ("manifest.json", "COMPLETE", "raw_payload"))
 def test_verifier_rejects_manifest_complete_or_file_tampering(tmp_path: Path, target: str) -> None:
     from quantking.data.validation.artifacts import (
         ValidationEvidenceVerificationError,
@@ -43,7 +43,11 @@ def test_verifier_rejects_manifest_complete_or_file_tampering(tmp_path: Path, ta
     )
 
     directory, _verified = _synthetic_bundle(tmp_path)
-    path = directory / target
+    path = (
+        next(directory.glob("raw-root/raw/*/*/*/payload.json"))
+        if target == "raw_payload"
+        else directory / target
+    )
     if target == "COMPLETE":
         path.write_text('{"manifest_sha256":"' + "0" * 64 + '"}', encoding="utf-8")
     elif target == "manifest.json":

@@ -30,6 +30,10 @@ _STATUS_PHRASES = (
     "Stage 0 已完成；Stage 1 已获实施授权并进行中，但尚未完成",
     "Stage 0 已完成；Stage 1 已获实施授权并进行中，但尚未完成。",
 )
+_S1_07A_R1_STATUS = (
+    "S1-07A-R1 修复已提交、等待主验收；24 个单元仍为 "
+    "BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。"
+)
 
 
 def _read(path: Path) -> str:
@@ -46,6 +50,19 @@ class TestStage1DocsExist:
         assert any(phrase in text for phrase in _STATUS_PHRASES), (
             "Stage 1 README must state the canonical authorized-in-progress status"
         )
+
+    @pytest.mark.parametrize(
+        "path",
+        (
+            _STAGE1_DIR / "README.md",
+            _STAGE1_DIR / "TASKS.md",
+            _STAGE1_DIR / "ACCEPTANCE.md",
+            _STAGE1_DIR / "DATA_CONTRACTS.md",
+            _REPO_ROOT / "docs" / "ARCHITECTURE.md",
+        ),
+    )
+    def test_s1_07a_r1_status_is_canonical(self, path: Path) -> None:
+        assert _S1_07A_R1_STATUS in " ".join(_read(path).split())
 
     def test_stage1_readme_does_not_claim_accepted(self) -> None:
         text = _read(_STAGE1_DIR / "README.md")

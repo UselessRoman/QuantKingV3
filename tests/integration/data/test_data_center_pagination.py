@@ -148,7 +148,7 @@ def test_latest_source_assessment_is_selected_in_sql_by_time_and_stable_id(
             status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
             blocking_reason="external validation required",
             assessment_config_version="assessment.v1",
-            sample_spec_version="sample.v1",
+            sample_spec_version="s1-07.fixed-sample.v1",
             rule_version="rules.v1",
             evidence_relative_path=f"assessments/{index}.json",
             evidence_sha256=f"{index + 1:x}".rjust(64, "0"),

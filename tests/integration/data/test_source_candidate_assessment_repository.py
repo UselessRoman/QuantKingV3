@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from quantking.common.errors import InvalidDataTransitionError
 from quantking.common.ids import new_entity_id
 from quantking.common.time import utc_now
 from quantking.data.adapters.persistence.sqlite import (
@@ -18,6 +19,7 @@ from quantking.data.assessment.models import (
     SourceCandidateAssessment,
 )
 from quantking.data.models import DatasetKind
+from quantking.data.validation.samples import SampleEligibility
 from quantking.data.validation.testing import verified_synthetic_assessment
 from quantking.jobs.adapters.persistence.sqlite import initialize_database
 
@@ -41,7 +43,7 @@ def test_source_candidate_assessment_round_trip_and_dataset_filter(tmp_path: Pat
         status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
         blocking_reason="real external validation is required",
         assessment_config_version="assessment.v1",
-        sample_spec_version="sample.v1",
+        sample_spec_version="s1-07.fixed-sample.v1",
         rule_version="comparison-thresholds.v1",
         evidence_relative_path="assessments/baostock/daily.json",
         evidence_sha256="a" * 64,
@@ -86,7 +88,7 @@ def test_repository_rejects_unverified_assessment(tmp_path: Path) -> None:
         status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
         blocking_reason="verified evidence required",
         assessment_config_version="assessment.v1",
-        sample_spec_version="sample.v1",
+        sample_spec_version="s1-07.fixed-sample.v1",
         rule_version="quality-rules.v1",
         evidence_relative_path="assessments/unverified.json",
         evidence_sha256="f" * 64,
@@ -95,5 +97,49 @@ def test_repository_rejects_unverified_assessment(tmp_path: Path) -> None:
     try:
         with factory() as uow, pytest.raises(TypeError, match="VerifiedAssessmentEvidence"):
             uow.data.save_source_candidate_assessment(assessment)  # type: ignore[arg-type]
+    finally:
+        engine.dispose()
+
+
+def test_repository_rederives_status_and_rejects_forged_production_evidence(
+    tmp_path: Path,
+) -> None:
+    from quantking.data.validation.testing import build_deep_fake_assessment
+
+    validation_root = tmp_path / "validation"
+    verified = build_deep_fake_assessment(root=validation_root)
+    forged = SourceCandidateAssessment(
+        assessment_id=verified.assessment.assessment_id,
+        source=verified.assessment.source,
+        dataset=verified.assessment.dataset,
+        evidence_kind=EvidenceKind.REAL,
+        semantic_contract_verified=True,
+        schema_unit_verified=True,
+        coverage_adequate=True,
+        quality_passed=True,
+        fixed_sample_differences_adequate=True,
+        stability_runs=3,
+        status=AssessmentStatus.PRODUCTION_READY,
+        blocking_reason=None,
+        assessment_config_version=verified.assessment.assessment_config_version,
+        sample_spec_version=verified.assessment.sample_spec_version,
+        rule_version=verified.assessment.rule_version,
+        evidence_relative_path=verified.evidence_relative_path,
+        evidence_sha256=verified.evidence_manifest_sha256,
+        created_at=verified.assessment.created_at,
+    )
+    object.__setattr__(verified, "assessment", forged)
+    object.__setattr__(verified, "sample_eligibility", SampleEligibility.PRODUCTION_ELIGIBLE)
+
+    database = tmp_path / "forged-assessment.db"
+    initialize_database(database)
+    engine = create_data_engine(database, busy_timeout_ms=250)
+    factory = DataSqliteUnitOfWorkFactory(engine)
+    try:
+        with (
+            factory() as uow,
+            pytest.raises(InvalidDataTransitionError, match="controlled fixed sample"),
+        ):
+            uow.data.save_source_candidate_assessment(verified)
     finally:
         engine.dispose()

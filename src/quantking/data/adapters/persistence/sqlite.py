@@ -78,6 +78,8 @@ from quantking.data.models import (
     transition_override,
 )
 from quantking.data.validation.models import VerifiedAssessmentEvidence
+from quantking.data.validation.samples import load_packaged_fixed_sample
+from quantking.data.validation.service import assess_verified_runs, common_fingerprint
 from quantking.jobs.adapters.persistence.models import AuditRecordRow
 from quantking.jobs.adapters.persistence.sqlite import (
     create_sqlite_engine as _create_jobs_engine,
@@ -1885,6 +1887,46 @@ class DataRepository:
         ):
             raise InvalidDataTransitionError(
                 "source assessment does not bind the verified evidence artifact"
+            )
+        expected = assess_verified_runs(
+            verified_runs=evidence.verified_runs,
+            evidence_relative_path=evidence.evidence_relative_path,
+            evidence_sha256=evidence.evidence_manifest_sha256,
+            created_at=assessment.created_at,
+            sample_eligibility=evidence.sample_eligibility,
+        )
+        controlled_sample = load_packaged_fixed_sample()
+        if (
+            evidence.sample_eligibility is not controlled_sample.eligibility
+            or assessment.sample_spec_version != controlled_sample.sample_spec_version
+            or any(
+                run.sample_spec_sha256 != controlled_sample.sample_spec_sha256
+                or run.versions.sample_spec_version != controlled_sample.sample_spec_version
+                for run in evidence.verified_runs
+            )
+        ):
+            raise InvalidDataTransitionError(
+                "source assessment does not bind the controlled fixed sample"
+            )
+        if assessment.status is AssessmentStatus.PRODUCTION_READY and expected != assessment:
+            raise InvalidDataTransitionError(
+                "source assessment is not the deterministic result of verified runs"
+            )
+        if (
+            assessment.evidence_kind is EvidenceKind.SYNTHETIC
+            and assessment.status is not AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION
+        ):
+            raise InvalidDataTransitionError("synthetic assessment must remain blocked")
+        if evidence.common_run_fingerprint != common_fingerprint(evidence.verified_runs):
+            raise InvalidDataTransitionError("source assessment run fingerprint mismatch")
+        if assessment.status is AssessmentStatus.PRODUCTION_READY and any(
+            run.raw_manifest_sha256 is None
+            or run.canonical_content_sha256 is None
+            or run.quality_manifest_sha256 is None
+            for run in evidence.verified_runs
+        ):
+            raise InvalidDataTransitionError(
+                "production assessment lacks deeply verified evidence lineage"
             )
         values = _assessment_row_values(assessment)
         row = self._session.get(SourceCandidateAssessmentRow, str(assessment.assessment_id))

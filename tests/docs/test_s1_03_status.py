@@ -30,8 +30,8 @@ def test_s1_06_acceptance_does_not_authorize_external_work() -> None:
     assert "S1-06" in tasks
     assert "413805074b3a82c2d2a090d2b73c854a238e2e19" in tasks
     assert "完成主验收" in tasks
-    assert "S1-07A 离线验证框架已提交、等待主验收" in tasks
-    assert "真实 XTQuant、备用源和旧数据读取尚未执行" in tasks
+    assert "S1-07A-R1 修复已提交、等待主验收" in tasks
+    assert "S1-07B/C/D、S1-08 未开始、未获授权" in tasks
     assert "S1-08 未开始、未获授权" in tasks
     contracts = _read("docs/stage1/DATA_CONTRACTS.md")
     assert "真实 XTQuant 样本验证仍须逐项授权" in contracts

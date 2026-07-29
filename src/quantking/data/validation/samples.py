@@ -31,6 +31,11 @@ class SamplePurpose(StrEnum):
     BENCHMARK = "BENCHMARK"
 
 
+class SampleEligibility(StrEnum):
+    FRAMEWORK_ONLY = "FRAMEWORK_ONLY"
+    PRODUCTION_ELIGIBLE = "PRODUCTION_ELIGIBLE"
+
+
 @dataclass(frozen=True, slots=True)
 class SampleReference:
     authority: str
@@ -131,6 +136,8 @@ class FixedSampleCase:
 class FixedSampleSpec:
     sample_spec_version: str
     cases: tuple[FixedSampleCase, ...]
+    eligibility: SampleEligibility
+    missing_authoritative_purposes: tuple[str, ...]
     sample_spec_sha256: str
 
     def __post_init__(self) -> None:
@@ -140,12 +147,27 @@ class FixedSampleSpec:
         if not cases or len({item.case_id for item in cases}) != len(cases):
             raise ValueError("sample cases must be non-empty and unique by case_id")
         object.__setattr__(self, "cases", cases)
+        if not isinstance(self.eligibility, SampleEligibility):
+            raise TypeError("eligibility must be a SampleEligibility")
+        missing = tuple(sorted(self.missing_authoritative_purposes))
+        if len(set(missing)) != len(missing):
+            raise ValueError("missing_authoritative_purposes must be unique")
+        allowed = {item.value for item in SamplePurpose}
+        if not set(missing).issubset(allowed):
+            raise ValueError("missing_authoritative_purposes contains an unknown purpose")
+        if self.eligibility is SampleEligibility.PRODUCTION_ELIGIBLE and missing:
+            raise ValueError("production-eligible sample cannot have missing purposes")
+        if self.eligibility is SampleEligibility.FRAMEWORK_ONLY and not missing:
+            raise ValueError("framework-only sample must declare missing authoritative purposes")
+        object.__setattr__(self, "missing_authoritative_purposes", missing)
         if self.compute_sha256() != self.sample_spec_sha256:
             raise ValueError("sample_spec_sha256 does not bind the canonical sample content")
 
     def _unsigned_payload(self) -> dict[str, object]:
         return {
             "cases": [case.to_dict() for case in self.cases],
+            "eligibility": self.eligibility.value,
+            "missing_authoritative_purposes": list(self.missing_authoritative_purposes),
             "sample_spec_version": self.sample_spec_version,
         }
 
@@ -156,6 +178,10 @@ class FixedSampleSpec:
         payload = self._unsigned_payload()
         payload["sample_spec_sha256"] = self.sample_spec_sha256
         return _canonical_json(payload)
+
+    @property
+    def fixed_sample_gate_eligible(self) -> bool:
+        return self.eligibility is SampleEligibility.PRODUCTION_ELIGIBLE
 
 
 def _canonical_json(value: object) -> str:
@@ -196,9 +222,14 @@ def fixed_sample_from_dict(payload: Mapping[str, object]) -> FixedSampleSpec:
                 ),
             )
         )
+    missing = payload.get("missing_authoritative_purposes")
+    if not isinstance(missing, list):
+        raise ValueError("missing_authoritative_purposes must be a JSON array")
     return FixedSampleSpec(
         sample_spec_version=str(payload["sample_spec_version"]),
         cases=tuple(cases),
+        eligibility=SampleEligibility(str(payload["eligibility"])),
+        missing_authoritative_purposes=tuple(str(item) for item in missing),
         sample_spec_sha256=str(payload["sample_spec_sha256"]),
     )
 
@@ -217,6 +248,7 @@ def load_packaged_fixed_sample() -> FixedSampleSpec:
 __all__ = [
     "FixedSampleCase",
     "FixedSampleSpec",
+    "SampleEligibility",
     "SamplePurpose",
     "SampleReference",
     "fixed_sample_from_dict",

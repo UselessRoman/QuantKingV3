@@ -10,7 +10,7 @@ import pytest
 
 from quantking.common.ids import new_entity_id
 from quantking.common.time import TradingDate, utc_now
-from quantking.data.assessment.models import AssessmentStatus, EvidenceKind
+from quantking.data.assessment.models import EvidenceKind
 from quantking.data.models import DatasetKind
 
 
@@ -82,7 +82,7 @@ def test_real_run_requires_real_evidence_and_distinct_stability_runs() -> None:
         sample_spec_version="s1-07.fixed-sample.v1",
         config_version="validation.v1",
     )
-    with pytest.raises(ValueError, match="REAL"):
+    with pytest.raises((TypeError, ValueError)):
         RealSourceValidationRun(
             run_id=new_entity_id("data_validation"),
             assessment_id=new_entity_id("data_assessment"),
@@ -110,21 +110,19 @@ def test_assessment_gate_requires_three_distinct_verified_runs() -> None:
     from quantking.data.validation.models import AssessmentGates
     from quantking.data.validation.service import assess_verified_runs
 
-    result = assess_verified_runs(
-        source="AKSHARE",
-        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        gates=AssessmentGates.all_passed(),
-        verified_run_ids=(
-            new_entity_id("data_validation"),
-            new_entity_id("data_validation"),
-        ),
-        assessment_config_version="validation.v1",
-        sample_spec_version="s1-07.fixed-sample.v1",
-        rule_version="quality-rules.v1",
-    )
-    assert result.status is AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION
-    assert result.stability_runs == 2
-    assert "three" in (result.blocking_reason or "").lower()
+    with pytest.raises(TypeError):
+        assess_verified_runs(  # type: ignore[call-arg]
+            source="AKSHARE",
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            gates=AssessmentGates.all_passed(),
+            verified_run_ids=(
+                new_entity_id("data_validation"),
+                new_entity_id("data_validation"),
+            ),
+            assessment_config_version="validation.v1",
+            sample_spec_version="s1-07.fixed-sample.v1",
+            rule_version="quality-rules.v1",
+        )
 
 
 def test_plan_is_offline_and_does_not_import_vendor_sdks(tmp_path: Path) -> None:

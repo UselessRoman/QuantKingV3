@@ -1,4 +1,4 @@
-"""Immutable validation evidence writer and strict verifier."""
+"""Immutable writer and deep verifier for source-validation evidence."""
 
 from __future__ import annotations
 
@@ -7,11 +7,14 @@ import os
 from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
 
-from quantking.common.ids import parse_entity_id
+from quantking.common.ids import EntityId, parse_entity_id
 from quantking.common.paths import is_reparse_point, resolve_under
 from quantking.common.time import UtcTimestamp
+from quantking.data.adapters.validation_content import (
+    verify_canonical_evidence,
+    verify_quality_row_evidence,
+)
 from quantking.data.adapters.warehouse.manifest import (
     WAREHOUSE_COMPLETE_FILENAME,
     WAREHOUSE_MANIFEST_FILENAME,
@@ -19,8 +22,19 @@ from quantking.data.adapters.warehouse.manifest import (
     path_safe_id,
     validate_managed_relative,
 )
+from quantking.data.adapters.warehouse.verifier import verify_raw_directory
 from quantking.data.assessment.models import EvidenceKind
-from quantking.data.models import DatasetKind
+from quantking.data.comparison.verifier import DifferenceReportVerifier
+from quantking.data.models import DatasetKind, QualityRunStatus
+from quantking.data.quality.models import (
+    QualityOutcomeResult,
+    QualityRunArtifact,
+    RuleOutcomeStatus,
+)
+from quantking.data.validation.authorization import (
+    RunnerAttestationVerifier,
+    RunnerInvocationAttestation,
+)
 from quantking.data.validation.models import (
     _VERIFICATION_SEAL,
     AssessmentGates,
@@ -29,10 +43,18 @@ from quantking.data.validation.models import (
     ValidationRunEvidence,
     ValidationVersions,
     VerifiedAssessmentEvidence,
+    VerifiedValidationRun,
 )
-from quantking.data.validation.service import assess_verified_runs
+from quantking.data.validation.request import compute_run_fingerprint, verify_request_manifest
+from quantking.data.validation.samples import SampleEligibility, load_packaged_fixed_sample
+from quantking.data.validation.service import (
+    aggregate_gates,
+    assess_verified_runs,
+    common_fingerprint,
+)
 
-_MANIFEST_SCHEMA = "source-validation-manifest.v1"
+_RUN_SCHEMA = "source-validation-envelope.v2"
+_ASSESSMENT_SCHEMA = "source-assessment-manifest.v2"
 
 
 class ValidationEvidenceConflictError(Exception):
@@ -40,7 +62,7 @@ class ValidationEvidenceConflictError(Exception):
 
 
 class ValidationEvidenceVerificationError(Exception):
-    """Validation evidence failed strict structural or cryptographic verification."""
+    """Evidence failed structural or cryptographic verification."""
 
 
 def _canonical(value: object) -> bytes:
@@ -61,25 +83,20 @@ def _validate_root(root: Path) -> Path:
 def _run_payload(run: ValidationRunEvidence) -> dict[str, object]:
     return {
         "assessment_id": str(run.assessment_id),
-        "canonical_content_sha256": run.canonical_content_sha256,
+        "authorization_id": str(run.authorization_id),
         "dataset": run.dataset.value,
         "difference_report_id": (
             str(run.difference_report_id) if run.difference_report_id is not None else None
         ),
-        "difference_report_sha256": run.difference_report_sha256,
         "ended_at": run.ended_at.to_iso(),
-        "evidence_kind": run.evidence_kind.value,
         "failure": (
             {"category": run.failure.category, "retryable": run.failure.retryable}
             if run.failure is not None
             else None
         ),
-        "gates": run.gates.to_dict(),
-        "quality_manifest_sha256": run.quality_manifest_sha256,
-        "quality_run_id": str(run.quality_run_id),
-        "raw_manifest_relative_path": run.raw_manifest_relative_path,
-        "raw_manifest_sha256": run.raw_manifest_sha256,
+        "invocation_id": str(run.invocation_id),
         "request_sha256": run.request_sha256,
+        "run_fingerprint": run.run_fingerprint,
         "run_id": str(run.run_id),
         "sample_spec_sha256": run.sample_spec_sha256,
         "source": run.source,
@@ -89,14 +106,20 @@ def _run_payload(run: ValidationRunEvidence) -> dict[str, object]:
 
 
 class ValidationEvidenceWriter:
-    """Write one run via sibling ``.incomplete`` and atomic completion."""
+    """Write caller facts and opaque files; never accept or persist verdicts."""
 
-    def __init__(self, *, validation_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        validation_root: Path,
+        runner_attestation_verifier: RunnerAttestationVerifier | None = None,
+    ) -> None:
         self._root = _validate_root(validation_root)
+        self._runner_trust = runner_attestation_verifier
 
     def write(self, *, run: ValidationRunEvidence, files: Mapping[str, tuple[bytes, int]]) -> Path:
-        if run.evidence_kind is EvidenceKind.REAL and not isinstance(run, RealSourceValidationRun):
-            raise TypeError("REAL evidence requires RealSourceValidationRun")
+        if not isinstance(run, ValidationRunEvidence):
+            raise TypeError("writer only accepts an unverified ValidationRunEvidence envelope")
         normalized: list[tuple[str, bytes, int]] = []
         for relative, item in files.items():
             validate_managed_relative(relative, field="validation evidence file")
@@ -122,19 +145,17 @@ class ValidationEvidenceWriter:
         ]
         unsigned = {
             "files": file_manifest,
-            "manifest_schema_version": _MANIFEST_SCHEMA,
+            "manifest_schema_version": _RUN_SCHEMA,
             **_run_payload(run),
         }
         manifest_sha = compute_sha256(_canonical(unsigned))
-        signed = {**unsigned, "manifest_sha256": manifest_sha}
-        manifest_bytes = _canonical(signed)
+        manifest_bytes = _canonical({**unsigned, "manifest_sha256": manifest_sha})
         complete_bytes = _canonical({"manifest_sha256": manifest_sha})
         directory = self._directory(run)
         if directory.exists():
             if (directory / WAREHOUSE_MANIFEST_FILENAME).read_bytes() == manifest_bytes and (
                 directory / WAREHOUSE_COMPLETE_FILENAME
             ).read_bytes() == complete_bytes:
-                ValidationEvidenceVerifier(validation_root=self._root).verify(directory=directory)
                 return directory
             raise ValidationEvidenceConflictError(
                 "validation run ID already exists with different content"
@@ -150,12 +171,11 @@ class ValidationEvidenceWriter:
             (incomplete / WAREHOUSE_COMPLETE_FILENAME).write_bytes(complete_bytes)
             os.replace(incomplete, directory)
         except Exception:
-            # Failure evidence is retained in the .incomplete directory; callers may
-            # inspect a stable failure category without exposing exception text.
             if incomplete.exists():
-                failure = _canonical({"category": "EVIDENCE_WRITE_FAILURE", "retryable": False})
                 with suppress(OSError):
-                    (incomplete / "failure.json").write_bytes(failure)
+                    (incomplete / "failure.json").write_bytes(
+                        _canonical({"category": "EVIDENCE_WRITE_FAILURE", "retryable": False})
+                    )
             raise
         return directory
 
@@ -175,180 +195,391 @@ class ValidationEvidenceWriter:
         return candidate
 
     def finalize_assessment(self, *, assessment_directory: Path) -> VerifiedAssessmentEvidence:
-        """Publish an immutable aggregate over independently completed run directories."""
-        verifier = ValidationEvidenceVerifier(validation_root=self._root)
-        runs = _verified_child_runs(verifier, assessment_directory)
+        verifier = ValidationEvidenceVerifier(
+            validation_root=self._root,
+            runner_attestation_verifier=self._runner_trust,
+        )
+        runs = tuple(
+            verifier.verify_run(directory=child)
+            for child in sorted(assessment_directory.iterdir(), key=lambda item: item.name)
+            if child.is_dir()
+            and not child.name.startswith("_assessment")
+            and not child.name.endswith(".incomplete")
+        )
         if not runs:
             raise ValueError("assessment requires at least one completed validation run")
         first = runs[0]
-        gates = _aggregate_gates(tuple(item.verified_runs[0].gates for item in runs))
+        gates = aggregate_gates(runs)
         unsigned = {
-            "assessment_id": str(first.assessment.assessment_id),
-            "dataset": first.assessment.dataset.value,
-            "evidence_kind": first.assessment.evidence_kind.value,
+            "assessment_id": str(first.assessment_id),
+            "dataset": first.dataset.value,
             "gates": gates.to_dict(),
-            "manifest_schema_version": "source-assessment-manifest.v1",
+            "manifest_schema_version": _ASSESSMENT_SCHEMA,
+            "run_fingerprint": common_fingerprint(runs),
             "runs": [
                 {
-                    "directory": item.evidence_relative_path.rsplit("/", 1)[1],
-                    "manifest_sha256": item.evidence_manifest_sha256,
-                    "run_id": str(item.verified_runs[0].run_id),
+                    "directory": path_safe_id(str(run.run_id)),
+                    "manifest_sha256": json.loads(
+                        (
+                            assessment_directory / path_safe_id(str(run.run_id)) / "manifest.json"
+                        ).read_bytes()
+                    )["manifest_sha256"],
+                    "run_id": str(run.run_id),
                 }
-                for item in runs
+                for run in runs
             ],
-            "source": first.assessment.source,
-            "versions": {
-                "assessment_config_version": first.assessment.assessment_config_version,
-                "rule_version": first.assessment.rule_version,
-                "sample_spec_version": first.assessment.sample_spec_version,
-            },
+            "sample_eligibility": load_packaged_fixed_sample().eligibility.value,
+            "source": first.source,
         }
         manifest_sha = compute_sha256(_canonical(unsigned))
-        signed = _canonical({**unsigned, "manifest_sha256": manifest_sha})
-        complete = _canonical({"manifest_sha256": manifest_sha})
+        manifest_bytes = _canonical({**unsigned, "manifest_sha256": manifest_sha})
+        complete_bytes = _canonical({"manifest_sha256": manifest_sha})
         directory = assessment_directory / "_assessment"
         if directory.exists():
-            if (directory / WAREHOUSE_MANIFEST_FILENAME).read_bytes() == signed and (
-                directory / WAREHOUSE_COMPLETE_FILENAME
-            ).read_bytes() == complete:
-                return verifier.verify_assessment(assessment_directory=assessment_directory)
-            raise ValidationEvidenceConflictError(
-                "assessment is already finalized with different run evidence"
-            )
+            if (directory / "manifest.json").read_bytes() != manifest_bytes:
+                raise ValidationEvidenceConflictError(
+                    "assessment is already finalized with different run evidence"
+                )
+            return verifier.verify_assessment(assessment_directory=assessment_directory)
         incomplete = assessment_directory / "_assessment.incomplete"
         incomplete.mkdir(parents=False, exist_ok=False)
-        (incomplete / WAREHOUSE_MANIFEST_FILENAME).write_bytes(signed)
-        (incomplete / WAREHOUSE_COMPLETE_FILENAME).write_bytes(complete)
+        (incomplete / "manifest.json").write_bytes(manifest_bytes)
+        (incomplete / "COMPLETE").write_bytes(complete_bytes)
         os.replace(incomplete, directory)
         return verifier.verify_assessment(assessment_directory=assessment_directory)
 
 
 class ValidationEvidenceVerifier:
-    def __init__(self, *, validation_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        validation_root: Path,
+        runner_attestation_verifier: RunnerAttestationVerifier | None = None,
+    ) -> None:
         self._root = _validate_root(validation_root)
+        self._runner_trust = runner_attestation_verifier
 
     def verify(self, *, directory: Path) -> VerifiedAssessmentEvidence:
+        run = self.verify_run(directory=directory)
+        manifest = json.loads((directory / "manifest.json").read_bytes())
+        sha = str(manifest["manifest_sha256"])
+        relative = directory.relative_to(self._root).as_posix()
+        assessment = assess_verified_runs(
+            verified_runs=(run,),
+            evidence_relative_path=relative,
+            evidence_sha256=sha,
+            created_at=run.ended_at,
+            sample_eligibility=run.sample_eligibility,
+        )
+        return VerifiedAssessmentEvidence(
+            assessment=assessment,
+            verified_runs=(run,),
+            evidence_manifest_sha256=sha,
+            evidence_relative_path=relative,
+            common_run_fingerprint=run.run_fingerprint,
+            sample_eligibility=run.sample_eligibility,
+            _seal=_VERIFICATION_SEAL,
+        )
+
+    def verify_run(self, *, directory: Path) -> VerifiedValidationRun:
+        manifest, _embedded, files = self._verify_outer(directory)
+        envelope = self._parse_envelope(manifest)
+        sample = load_packaged_fixed_sample()
+        session_id = EntityId("data_session", envelope.invocation_id.value)
+        gates = AssessmentGates.none_passed()
+        identity = EvidenceKind.SYNTHETIC
+        raw_path: str | None = None
+        raw_sha: str | None = None
+        canonical_sha: str | None = None
+        quality_id: EntityId | None = None
+        quality_sha: str | None = None
+        difference_sha: str | None = None
+        reason: str | None = None
+        verification_succeeded = False
         try:
-            relative_directory = directory.relative_to(self._root)
-            resolved = resolve_under(self._root, relative_directory)
-            if not resolved.is_dir():
-                raise OSError
-        except (OSError, ValueError) as error:
+            request = verify_request_manifest(
+                files["request/manifest.json"],
+                source=envelope.source,
+                dataset=envelope.dataset,
+                controlled_sample=sample,
+            )
+            if (
+                request.request_sha256 != envelope.request_sha256
+                or sample.sample_spec_sha256 != envelope.sample_spec_sha256
+                or sample.sample_spec_version != envelope.versions.sample_spec_version
+            ):
+                raise ValueError("controlled request/sample binding mismatch")
+            expected_fingerprint = compute_run_fingerprint(
+                source=envelope.source,
+                dataset=envelope.dataset,
+                request_sha256=request.request_sha256,
+                sample_sha256=sample.sample_spec_sha256,
+                versions=envelope.versions.to_dict(),
+            )
+            if expected_fingerprint != envelope.run_fingerprint:
+                raise ValueError("run fingerprint mismatch")
+            attestation = RunnerInvocationAttestation.from_bytes(files["runner/attestation.json"])
+            session_id = attestation.session_id
+            if (
+                self._runner_trust is None
+                or not self._runner_trust.verify(attestation)
+                or attestation.run_id != envelope.run_id
+                or attestation.invocation_id != envelope.invocation_id
+                or attestation.authorization_id != envelope.authorization_id
+                or attestation.source != envelope.source
+                or attestation.dataset is not envelope.dataset
+                or attestation.request_sha256 != envelope.request_sha256
+                or attestation.run_fingerprint != envelope.run_fingerprint
+                or attestation.started_at != envelope.started_at
+                or attestation.ended_at != envelope.ended_at
+            ):
+                raise ValueError("runner invocation attestation is untrusted or unbound")
+
+            raw_manifests = [
+                path
+                for path in directory.glob("raw-root/raw/*/*/*/manifest.json")
+                if path.is_file()
+            ]
+            if len(raw_manifests) != 1:
+                raise ValueError("exactly one managed Raw manifest is required")
+            raw_dir = raw_manifests[0].parent
+            raw_verified = verify_raw_directory(raw_dir, data_root=directory / "raw-root")
+            raw_manifest = raw_verified.manifest
+            if (
+                raw_manifest["source"] != envelope.source
+                or raw_manifest["dataset"] != envelope.dataset.value
+                or raw_manifest["adapter_version"] != envelope.versions.adapter_version
+                or raw_manifest["code_version"] != envelope.versions.code_version
+                or raw_manifest["request_params"]
+                != {
+                    "request_sha256": envelope.request_sha256,
+                    "run_id": str(envelope.run_id),
+                }
+            ):
+                raise ValueError("Raw lineage does not bind the run/request")
+            raw_path = raw_manifests[0].relative_to(directory).as_posix()
+            raw_sha = raw_verified.manifest_sha
+
+            canonical_path = directory / "canonical" / "content.parquet"
+            canonical = verify_canonical_evidence(path=canonical_path, dataset=envelope.dataset)
+            canonical_sha = canonical.content_sha256
+            coverage = _fixed_sample_coverage(list(canonical.rows), request.cases)
+            quality_id, quality_sha = _verify_quality(
+                directory / "quality-root",
+                expected_rule=envelope.versions.rule_version,
+                expected_schema=envelope.versions.schema_version,
+                expected_content_sha=canonical_sha,
+            )
+            semantic = True
+            schema_ok = True
+            quality_ok = True
+
+            difference_ok = False
+            if envelope.difference_report_id is not None:
+                report = DifferenceReportVerifier(
+                    artifacts_root=directory / "difference-root"
+                ).verify(report_id=envelope.difference_report_id)
+                difference_sha = report.manifest_sha256
+                difference_ok = (
+                    report.dataset == envelope.dataset.value
+                    and report.sample_spec_sha256 == sample.sample_spec_sha256
+                    and report.threshold_rule_version == envelope.versions.threshold_version
+                    and canonical_sha
+                    in {report.primary_content_sha256, report.fallback_content_sha256}
+                )
+            difference_ok = (
+                difference_ok and sample.eligibility is SampleEligibility.PRODUCTION_ELIGIBLE
+            )
+            gates = AssessmentGates(
+                semantic_contract_verified=semantic,
+                schema_unit_verified=schema_ok,
+                coverage_adequate=coverage,
+                quality_passed=quality_ok,
+                fixed_sample_differences_adequate=difference_ok,
+            )
+            verification_succeeded = True
+            identity = (
+                EvidenceKind.REAL
+                if self._runner_trust.establishes_real_identity
+                else EvidenceKind.SYNTHETIC
+            )
+            if identity is EvidenceKind.SYNTHETIC:
+                reason = "SYNTHETIC_RUNNER"
+        except Exception:
+            reason = "VERIFICATION_FAILED"
+            gates = AssessmentGates.none_passed()
+            identity = EvidenceKind.SYNTHETIC
+
+        run_type = (
+            RealSourceValidationRun if identity is EvidenceKind.REAL else VerifiedValidationRun
+        )
+        return run_type(
+            run_id=envelope.run_id,
+            assessment_id=envelope.assessment_id,
+            invocation_id=envelope.invocation_id,
+            session_id=session_id,
+            authorization_id=envelope.authorization_id,
+            source=envelope.source,
+            dataset=envelope.dataset,
+            versions=envelope.versions,
+            request_sha256=envelope.request_sha256,
+            sample_spec_sha256=envelope.sample_spec_sha256,
+            run_fingerprint=envelope.run_fingerprint,
+            evidence_kind=identity,
+            gates=gates,
+            raw_manifest_relative_path=raw_path,
+            raw_manifest_sha256=raw_sha,
+            canonical_content_sha256=canonical_sha,
+            quality_run_id=quality_id,
+            quality_manifest_sha256=quality_sha,
+            difference_report_id=envelope.difference_report_id if difference_sha else None,
+            difference_report_sha256=difference_sha,
+            sample_eligibility=sample.eligibility,
+            started_at=envelope.started_at,
+            ended_at=envelope.ended_at,
+            failure=(
+                envelope.failure
+                if verification_succeeded
+                else ValidationFailure("VERIFICATION_FAILED", False)
+            ),
+            verification_reason=reason,
+            _seal=_VERIFICATION_SEAL,
+        )
+
+    def verify_assessment(self, *, assessment_directory: Path) -> VerifiedAssessmentEvidence:
+        summary = assessment_directory / "_assessment"
+        manifest, embedded = _verify_summary(summary)
+        declared = manifest["runs"]
+        if not isinstance(declared, list) or not declared:
+            raise ValidationEvidenceVerificationError("assessment runs are invalid")
+        runs: list[VerifiedValidationRun] = []
+        for entry in declared:
+            if not isinstance(entry, dict) or set(entry) != {
+                "directory",
+                "manifest_sha256",
+                "run_id",
+            }:
+                raise ValidationEvidenceVerificationError("assessment run entry is invalid")
+            directory = assessment_directory / str(entry["directory"])
+            run_manifest = json.loads((directory / "manifest.json").read_bytes())
+            if (
+                run_manifest.get("manifest_sha256") != entry["manifest_sha256"]
+                or run_manifest.get("run_id") != entry["run_id"]
+            ):
+                raise ValidationEvidenceVerificationError("assessment run lineage mismatch")
+            runs.append(self.verify_run(directory=directory))
+        run_tuple = tuple(runs)
+        sample = load_packaged_fixed_sample()
+        if (
+            manifest["run_fingerprint"] != common_fingerprint(run_tuple)
+            or manifest["sample_eligibility"] != sample.eligibility.value
+            or manifest["gates"] != aggregate_gates(run_tuple).to_dict()
+        ):
+            raise ValidationEvidenceVerificationError(
+                "assessment summary does not match deep-verified runs"
+            )
+        relative = summary.relative_to(self._root).as_posix()
+        assessment = assess_verified_runs(
+            verified_runs=run_tuple,
+            evidence_relative_path=relative,
+            evidence_sha256=embedded,
+            created_at=max((run.ended_at for run in run_tuple), key=lambda item: item.value),
+            sample_eligibility=sample.eligibility,
+        )
+        if (
+            manifest["assessment_id"] != str(assessment.assessment_id)
+            or manifest["source"] != assessment.source
+            or manifest["dataset"] != assessment.dataset.value
+        ):
+            raise ValidationEvidenceVerificationError("assessment identity mismatch")
+        return VerifiedAssessmentEvidence(
+            assessment=assessment,
+            verified_runs=run_tuple,
+            evidence_manifest_sha256=embedded,
+            evidence_relative_path=relative,
+            common_run_fingerprint=common_fingerprint(run_tuple),
+            sample_eligibility=sample.eligibility,
+            _seal=_VERIFICATION_SEAL,
+        )
+
+    def _verify_outer(self, directory: Path) -> tuple[dict[str, object], str, dict[str, bytes]]:
+        try:
+            resolved = resolve_under(self._root, directory.relative_to(self._root))
+        except Exception as error:
             raise ValidationEvidenceVerificationError(
                 "validation directory is outside the managed root"
             ) from error
-        if is_reparse_point(directory):
-            raise ValidationEvidenceVerificationError("validation directory is a symlink/junction")
-        manifest_bytes = self._read(directory / WAREHOUSE_MANIFEST_FILENAME)
-        complete_bytes = self._read(directory / WAREHOUSE_COMPLETE_FILENAME)
+        if not resolved.is_dir() or is_reparse_point(resolved):
+            raise ValidationEvidenceVerificationError("validation directory is unsafe")
+        manifest_bytes = _read_file(directory / "manifest.json")
+        complete_bytes = _read_file(directory / "COMPLETE")
         try:
             manifest = json.loads(manifest_bytes)
             complete = json.loads(complete_bytes)
         except json.JSONDecodeError as error:
-            raise ValidationEvidenceVerificationError(
-                "manifest or COMPLETE is invalid JSON"
-            ) from error
-        if not isinstance(manifest, dict) or not isinstance(complete, dict):
-            raise ValidationEvidenceVerificationError("manifest and COMPLETE must be objects")
-        if manifest_bytes != _canonical(manifest):
-            raise ValidationEvidenceVerificationError("manifest is not canonical JSON")
-        embedded = manifest.get("manifest_sha256")
+            raise ValidationEvidenceVerificationError("manifest or COMPLETE is invalid") from error
+        if not isinstance(manifest, dict) or manifest_bytes != _canonical(manifest):
+            raise ValidationEvidenceVerificationError("manifest must be canonical JSON")
         unsigned = dict(manifest)
-        unsigned.pop("manifest_sha256", None)
+        embedded = unsigned.pop("manifest_sha256", None)
         if (
-            not isinstance(embedded, str)
+            manifest.get("manifest_schema_version") != _RUN_SCHEMA
+            or not isinstance(embedded, str)
             or compute_sha256(_canonical(unsigned)) != embedded
             or complete != {"manifest_sha256": embedded}
         ):
-            raise ValidationEvidenceVerificationError(
-                "manifest self-signature or COMPLETE mismatch"
-            )
-        if manifest.get("manifest_schema_version") != _MANIFEST_SCHEMA:
-            raise ValidationEvidenceVerificationError("unsupported validation manifest schema")
-        required_fields = {
+            raise ValidationEvidenceVerificationError("manifest self-SHA or COMPLETE mismatch")
+        expected_fields = {
             "assessment_id",
-            "canonical_content_sha256",
+            "authorization_id",
             "dataset",
             "difference_report_id",
-            "difference_report_sha256",
             "ended_at",
-            "evidence_kind",
             "failure",
             "files",
-            "gates",
+            "invocation_id",
             "manifest_schema_version",
             "manifest_sha256",
-            "quality_manifest_sha256",
-            "quality_run_id",
-            "raw_manifest_relative_path",
-            "raw_manifest_sha256",
             "request_sha256",
+            "run_fingerprint",
             "run_id",
             "sample_spec_sha256",
             "source",
             "started_at",
             "versions",
         }
-        if set(manifest) != required_fields:
-            raise ValidationEvidenceVerificationError(
-                "validation manifest fields do not match the schema"
-            )
-        raw_files = manifest.get("files")
-        if not isinstance(raw_files, list):
+        if set(manifest) != expected_fields:
+            raise ValidationEvidenceVerificationError("manifest fields do not match schema")
+        raw_entries = manifest["files"]
+        if not isinstance(raw_entries, list):
             raise ValidationEvidenceVerificationError("manifest files must be an array")
-        expected = {WAREHOUSE_MANIFEST_FILENAME, WAREHOUSE_COMPLETE_FILENAME}
-        files_by_path: dict[str, Mapping[str, object]] = {}
-        for raw in raw_files:
-            if not isinstance(raw, dict) or set(raw) != {
+        files: dict[str, bytes] = {}
+        expected = {"manifest.json", "COMPLETE"}
+        for entry in raw_entries:
+            if not isinstance(entry, dict) or set(entry) != {
                 "relative_path",
                 "row_count",
                 "sha256",
                 "size",
             }:
                 raise ValidationEvidenceVerificationError("invalid manifest file entry")
-            relative = str(raw["relative_path"])
+            relative = str(entry["relative_path"])
             try:
                 validate_managed_relative(relative, field="validation evidence file")
+                payload = _read_file(resolve_under(directory, relative))
             except Exception as error:
-                raise ValidationEvidenceVerificationError("unsafe manifest file path") from error
-            expected.add(relative)
-            files_by_path[relative] = raw
-            try:
-                absolute = resolve_under(directory, relative)
-            except Exception as error:
-                raise ValidationEvidenceVerificationError(
-                    "unsafe validation evidence path"
-                ) from error
-            payload = self._read(absolute)
+                raise ValidationEvidenceVerificationError("unsafe evidence file") from error
             if (
-                len(payload) != raw["size"]
-                or compute_sha256(payload) != raw["sha256"]
-                or not isinstance(raw["row_count"], int)
-                or isinstance(raw["row_count"], bool)
-                or raw["row_count"] < 0
+                relative in files
+                or len(payload) != entry["size"]
+                or compute_sha256(payload) != entry["sha256"]
+                or not isinstance(entry["row_count"], int)
+                or isinstance(entry["row_count"], bool)
+                or entry["row_count"] < 0
             ):
                 raise ValidationEvidenceVerificationError("validation evidence file mismatch")
-        raw_path = str(manifest["raw_manifest_relative_path"])
-        if (
-            raw_path not in files_by_path
-            or files_by_path[raw_path]["sha256"] != manifest["raw_manifest_sha256"]
-        ):
-            raise ValidationEvidenceVerificationError("raw manifest lineage mismatch")
-        if (
-            "canonical/content.json" not in files_by_path
-            or files_by_path["canonical/content.json"]["sha256"]
-            != manifest["canonical_content_sha256"]
-        ):
-            raise ValidationEvidenceVerificationError("Canonical content lineage mismatch")
-        if (
-            "quality/result.json" not in files_by_path
-            or files_by_path["quality/result.json"]["sha256"] != manifest["quality_manifest_sha256"]
-        ):
-            raise ValidationEvidenceVerificationError("quality result lineage mismatch")
-        if manifest["difference_report_id"] is not None:
-            difference = files_by_path.get("difference/manifest.json")
-            if difference is None or difference["sha256"] != manifest["difference_report_sha256"]:
-                raise ValidationEvidenceVerificationError("DifferenceReport lineage mismatch")
+            files[relative] = payload
+            expected.add(relative)
         actual = {
             item.relative_to(directory).as_posix()
             for item in directory.rglob("*")
@@ -356,275 +587,201 @@ class ValidationEvidenceVerifier:
         }
         if actual != expected:
             raise ValidationEvidenceVerificationError("validation evidence file set mismatch")
-        run = self._parse_run(manifest)
-        relative = directory.relative_to(self._root).as_posix()
-        assessment = assess_verified_runs(
-            source=run.source,
-            dataset=run.dataset,
-            gates=run.gates,
-            verified_run_ids=(run.run_id,),
-            assessment_config_version=run.versions.config_version,
-            sample_spec_version=run.versions.sample_spec_version,
-            rule_version=run.versions.rule_version,
-            evidence_kind=run.evidence_kind,
-            assessment_id=run.assessment_id,
-            evidence_relative_path=relative,
-            evidence_sha256=embedded,
-            created_at=run.ended_at,
-        )
-        return VerifiedAssessmentEvidence(
-            assessment=assessment,
-            verified_runs=(run,),
-            evidence_manifest_sha256=embedded,
-            evidence_relative_path=relative,
-            _seal=_VERIFICATION_SEAL,
-        )
-
-    def verify_assessment(self, *, assessment_directory: Path) -> VerifiedAssessmentEvidence:
-        summary = assessment_directory / "_assessment"
-        manifest_bytes = self._read(summary / WAREHOUSE_MANIFEST_FILENAME)
-        complete_bytes = self._read(summary / WAREHOUSE_COMPLETE_FILENAME)
-        try:
-            manifest = json.loads(manifest_bytes)
-            complete = json.loads(complete_bytes)
-        except json.JSONDecodeError as error:
-            raise ValidationEvidenceVerificationError(
-                "assessment manifest or COMPLETE is invalid JSON"
-            ) from error
-        if not isinstance(manifest, dict) or manifest_bytes != _canonical(manifest):
-            raise ValidationEvidenceVerificationError(
-                "assessment manifest must be a canonical JSON object"
-            )
-        embedded = manifest.get("manifest_sha256")
-        unsigned = dict(manifest)
-        unsigned.pop("manifest_sha256", None)
-        if (
-            manifest.get("manifest_schema_version") != "source-assessment-manifest.v1"
-            or not isinstance(embedded, str)
-            or compute_sha256(_canonical(unsigned)) != embedded
-            or complete != {"manifest_sha256": embedded}
-        ):
-            raise ValidationEvidenceVerificationError(
-                "assessment manifest self-signature or COMPLETE mismatch"
-            )
-        if set(manifest) != {
-            "assessment_id",
-            "dataset",
-            "evidence_kind",
-            "gates",
-            "manifest_schema_version",
-            "manifest_sha256",
-            "runs",
-            "source",
-            "versions",
-        }:
-            raise ValidationEvidenceVerificationError(
-                "assessment manifest fields do not match the schema"
-            )
-        if {
-            item.relative_to(summary).as_posix() for item in summary.rglob("*") if item.is_file()
-        } != {WAREHOUSE_MANIFEST_FILENAME, WAREHOUSE_COMPLETE_FILENAME}:
-            raise ValidationEvidenceVerificationError("assessment summary file set mismatch")
-        declared = manifest.get("runs")
-        if not isinstance(declared, list) or not declared:
-            raise ValidationEvidenceVerificationError("assessment runs must be a non-empty array")
-        verified: list[VerifiedAssessmentEvidence] = []
-        declared_directories = {
-            str(item.get("directory")) for item in declared if isinstance(item, dict)
-        }
-        actual_directories = {
-            child.name
-            for child in assessment_directory.iterdir()
-            if child.is_dir()
-            and child.name != "_assessment"
-            and not child.name.endswith(".incomplete")
-        }
-        if declared_directories != actual_directories:
-            raise ValidationEvidenceVerificationError(
-                "assessment run directory set does not match the manifest"
-            )
-        for item in declared:
-            if not isinstance(item, dict) or set(item) != {
-                "directory",
-                "manifest_sha256",
-                "run_id",
-            }:
-                raise ValidationEvidenceVerificationError("assessment run entry is invalid")
-            directory_name = str(item["directory"])
-            validate_managed_relative(directory_name, field="assessment run directory")
-            run_evidence = self.verify(directory=assessment_directory / directory_name)
-            run = run_evidence.verified_runs[0]
-            if (
-                str(run.run_id) != item["run_id"]
-                or run_evidence.evidence_manifest_sha256 != item["manifest_sha256"]
-            ):
-                raise ValidationEvidenceVerificationError("assessment run lineage mismatch")
-            verified.append(run_evidence)
-        first = verified[0]
-        runs = tuple(item.verified_runs[0] for item in verified)
-        if len({run.run_id for run in runs}) != len(runs):
-            raise ValidationEvidenceVerificationError("assessment run IDs must be distinct")
-        if any(
-            run.assessment_id != first.assessment.assessment_id
-            or run.source != first.assessment.source
-            or run.dataset != first.assessment.dataset
-            or run.evidence_kind is not first.assessment.evidence_kind
-            for run in runs
-        ):
-            raise ValidationEvidenceVerificationError(
-                "assessment runs do not bind one source x dataset cell"
-            )
-        gates = _aggregate_gates(tuple(run.gates for run in runs))
-        versions = manifest.get("versions")
-        if not isinstance(versions, dict):
-            raise ValidationEvidenceVerificationError("assessment versions are invalid")
-        first_run = runs[0]
-        expected_versions = {
-            "assessment_config_version": first_run.versions.config_version,
-            "rule_version": first_run.versions.rule_version,
-            "sample_spec_version": first_run.versions.sample_spec_version,
-        }
-        if versions != expected_versions or any(
-            run.versions.config_version != first_run.versions.config_version
-            or run.versions.rule_version != first_run.versions.rule_version
-            or run.versions.sample_spec_version != first_run.versions.sample_spec_version
-            for run in runs
-        ):
-            raise ValidationEvidenceVerificationError(
-                "assessment version lineage does not match verified runs"
-            )
-        assessment = assess_verified_runs(
-            source=first.assessment.source,
-            dataset=first.assessment.dataset,
-            gates=gates,
-            verified_run_ids=tuple(run.run_id for run in runs),
-            assessment_config_version=str(versions.get("assessment_config_version", "")),
-            sample_spec_version=str(versions.get("sample_spec_version", "")),
-            rule_version=str(versions.get("rule_version", "")),
-            evidence_kind=first.assessment.evidence_kind,
-            assessment_id=first.assessment.assessment_id,
-            evidence_relative_path=summary.relative_to(self._root).as_posix(),
-            evidence_sha256=embedded,
-            created_at=max((run.ended_at for run in runs), key=lambda item: item.value),
-        )
-        if (
-            manifest.get("assessment_id") != str(assessment.assessment_id)
-            or manifest.get("source") != assessment.source
-            or manifest.get("dataset") != assessment.dataset.value
-            or manifest.get("evidence_kind") != assessment.evidence_kind.value
-            or manifest.get("gates") != gates.to_dict()
-        ):
-            raise ValidationEvidenceVerificationError(
-                "assessment summary does not match verified runs"
-            )
-        return VerifiedAssessmentEvidence(
-            assessment=assessment,
-            verified_runs=runs,
-            evidence_manifest_sha256=embedded,
-            evidence_relative_path=summary.relative_to(self._root).as_posix(),
-            _seal=_VERIFICATION_SEAL,
-        )
+        return manifest, embedded, files
 
     @staticmethod
-    def _read(path: Path) -> bytes:
+    def _parse_envelope(manifest: Mapping[str, object]) -> ValidationRunEvidence:
         try:
-            if path.is_symlink() or not path.is_file():
-                raise OSError
-            return path.read_bytes()
-        except OSError as error:
-            raise ValidationEvidenceVerificationError(
-                "required evidence file is missing"
-            ) from error
-
-    @staticmethod
-    def _parse_run(manifest: Mapping[str, Any]) -> ValidationRunEvidence:
-        try:
-            versions = ValidationVersions(**manifest["versions"])
-            gates = AssessmentGates(**manifest["gates"])
-            raw_failure = manifest["failure"]
+            failure_raw = manifest["failure"]
             failure = (
-                ValidationFailure(
-                    category=str(raw_failure["category"]),
-                    retryable=raw_failure["retryable"],
+                None
+                if failure_raw is None
+                else ValidationFailure(
+                    category=str(failure_raw["category"]),  # type: ignore[index]
+                    retryable=bool(failure_raw["retryable"]),  # type: ignore[index]
                 )
-                if raw_failure is not None
-                else None
             )
-            difference_id = manifest["difference_report_id"]
-            evidence_kind = EvidenceKind(str(manifest["evidence_kind"]))
-            run_type = (
-                RealSourceValidationRun
-                if evidence_kind is EvidenceKind.REAL
-                else ValidationRunEvidence
-            )
-            return run_type(
+            difference = manifest["difference_report_id"]
+            return ValidationRunEvidence(
                 run_id=parse_entity_id(str(manifest["run_id"])),
                 assessment_id=parse_entity_id(str(manifest["assessment_id"])),
+                invocation_id=parse_entity_id(str(manifest["invocation_id"])),
+                authorization_id=parse_entity_id(str(manifest["authorization_id"])),
                 source=str(manifest["source"]),
                 dataset=DatasetKind(str(manifest["dataset"])),
-                evidence_kind=evidence_kind,
-                versions=versions,
+                versions=ValidationVersions(**manifest["versions"]),  # type: ignore[arg-type]
                 request_sha256=str(manifest["request_sha256"]),
                 sample_spec_sha256=str(manifest["sample_spec_sha256"]),
-                raw_manifest_relative_path=str(manifest["raw_manifest_relative_path"]),
-                raw_manifest_sha256=str(manifest["raw_manifest_sha256"]),
-                canonical_content_sha256=str(manifest["canonical_content_sha256"]),
-                quality_run_id=parse_entity_id(str(manifest["quality_run_id"])),
-                quality_manifest_sha256=str(manifest["quality_manifest_sha256"]),
-                difference_report_id=(
-                    parse_entity_id(str(difference_id)) if difference_id is not None else None
-                ),
-                difference_report_sha256=manifest["difference_report_sha256"],
-                gates=gates,
+                run_fingerprint=str(manifest["run_fingerprint"]),
                 started_at=UtcTimestamp.from_iso(str(manifest["started_at"])),
                 ended_at=UtcTimestamp.from_iso(str(manifest["ended_at"])),
+                difference_report_id=(
+                    parse_entity_id(str(difference)) if difference is not None else None
+                ),
                 failure=failure,
             )
-        except (KeyError, TypeError, ValueError) as error:
+        except Exception as error:
             raise ValidationEvidenceVerificationError(
-                "validation run contract is invalid"
+                "validation run envelope is invalid"
             ) from error
 
 
-def _verified_child_runs(
-    verifier: ValidationEvidenceVerifier, assessment_directory: Path
-) -> list[VerifiedAssessmentEvidence]:
-    results: list[VerifiedAssessmentEvidence] = []
-    for child in sorted(assessment_directory.iterdir(), key=lambda item: item.name):
-        if child.name.startswith("_assessment") or child.name.endswith(".incomplete"):
-            continue
-        if child.is_dir():
-            results.append(verifier.verify(directory=child))
-    if results:
-        first = results[0].assessment
-        if any(
-            item.assessment.assessment_id != first.assessment_id
-            or item.assessment.source != first.source
-            or item.assessment.dataset != first.dataset
-            or item.assessment.evidence_kind is not first.evidence_kind
-            or item.assessment.assessment_config_version != first.assessment_config_version
-            or item.assessment.sample_spec_version != first.sample_spec_version
-            or item.assessment.rule_version != first.rule_version
-            for item in results
-        ):
-            raise ValidationEvidenceVerificationError(
-                "completed runs cannot be combined into one assessment"
+def _read_file(path: Path) -> bytes:
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise OSError
+        return path.read_bytes()
+    except OSError as error:
+        raise ValidationEvidenceVerificationError("required evidence file is missing") from error
+
+
+def _fixed_sample_coverage(
+    rows: list[dict[str, object]], cases: tuple[dict[str, object], ...]
+) -> bool:
+    for case in cases:
+        code = case.get("code")
+        exchange = case["exchange"]
+        start = str(case["start_date"])
+        end = str(case["end_date"])
+        matches = [
+            row
+            for row in rows
+            if (code is None or row.get("code") == code)
+            and row.get("exchange") == exchange
+            and start <= str(row.get("trade_date", row.get("effective_from", ""))) <= end
+        ]
+        if not matches:
+            return False
+    return True
+
+
+def _verify_quality(
+    artifacts_root: Path,
+    *,
+    expected_rule: str,
+    expected_schema: str,
+    expected_content_sha: str,
+) -> tuple[EntityId, str]:
+    directories = list((artifacts_root / "data-quality").glob("*"))
+    if len(directories) != 1 or not directories[0].is_dir():
+        raise ValueError("exactly one QualityRun artifact is required")
+    directory = directories[0]
+    manifest_bytes = _read_file(directory / "manifest.json")
+    complete_bytes = _read_file(directory / "COMPLETE")
+    manifest = json.loads(manifest_bytes)
+    complete = json.loads(complete_bytes)
+    if not isinstance(manifest, dict) or manifest_bytes != _canonical(manifest):
+        raise ValueError("QualityRun manifest must be canonical")
+    unsigned = dict(manifest)
+    embedded = unsigned.pop("manifest_sha256", None)
+    required = {
+        "content_sha256",
+        "ended_at",
+        "manifest_sha256",
+        "results",
+        "rule_version",
+        "run_id",
+        "schema_version",
+        "started_at",
+        "status",
+        "version_id",
+    }
+    if set(manifest) != required or (
+        not isinstance(embedded, str)
+        or compute_sha256(_canonical(unsigned)) != embedded
+        or complete != {"manifest_sha256": embedded}
+        or manifest.get("status") != "PASSED"
+        or manifest.get("rule_version") != expected_rule
+        or manifest.get("schema_version") != expected_schema
+        or manifest.get("content_sha256") != expected_content_sha
+    ):
+        raise ValueError("QualityRun verdict or lineage mismatch")
+    results = manifest.get("results")
+    if not isinstance(results, list) or not results:
+        raise ValueError("QualityRun requires actual rule results")
+    parsed_results: list[QualityOutcomeResult] = []
+    expected_files = {"manifest.json", "COMPLETE"}
+    for result in results:
+        if not isinstance(result, dict) or set(result) != {
+            "affected_count",
+            "row_evidence_relative_path",
+            "rule_code",
+            "status",
+            "summary",
+        }:
+            raise ValueError("QualityResult fields do not match the contract")
+        if result.get("status") != "PASSED":
+            raise ValueError("QualityRun contains a non-passing result")
+        path = result.get("row_evidence_relative_path")
+        if path is not None:
+            validate_managed_relative(str(path), field="quality row evidence")
+            verify_quality_row_evidence(directory / str(path))
+            expected_files.add(str(path))
+        parsed_results.append(
+            QualityOutcomeResult(
+                rule_code=str(result["rule_code"]),
+                status=RuleOutcomeStatus(str(result["status"])),
+                affected_count=result["affected_count"],
+                summary=str(result["summary"]),
+                row_evidence_relative_path=str(path) if path is not None else None,
             )
-    return results
-
-
-def _aggregate_gates(gates: tuple[AssessmentGates, ...]) -> AssessmentGates:
-    if not gates:
-        raise ValueError("at least one gate result is required")
-    return AssessmentGates(
-        semantic_contract_verified=all(item.semantic_contract_verified for item in gates),
-        schema_unit_verified=all(item.schema_unit_verified for item in gates),
-        coverage_adequate=all(item.coverage_adequate for item in gates),
-        quality_passed=all(item.quality_passed for item in gates),
-        fixed_sample_differences_adequate=all(
-            item.fixed_sample_differences_adequate for item in gates
-        ),
+        )
+    outcome = QualityRunArtifact(
+        run_id=parse_entity_id(str(manifest["run_id"])),
+        version_id=parse_entity_id(str(manifest["version_id"])),
+        rule_version=str(manifest["rule_version"]),
+        schema_version=str(manifest["schema_version"]),
+        content_sha256=str(manifest["content_sha256"]),
+        started_at=UtcTimestamp.from_iso(str(manifest["started_at"])),
+        ended_at=UtcTimestamp.from_iso(str(manifest["ended_at"])),
+        status=QualityRunStatus(str(manifest["status"])),
+        results=tuple(parsed_results),
+        failure=None,
     )
+    actual_files = {
+        item.relative_to(directory).as_posix() for item in directory.rglob("*") if item.is_file()
+    }
+    if actual_files != expected_files:
+        raise ValueError("QualityRun file set mismatch")
+    return outcome.run_id, embedded
+
+
+def _verify_summary(directory: Path) -> tuple[dict[str, object], str]:
+    manifest_bytes = _read_file(directory / "manifest.json")
+    complete_bytes = _read_file(directory / "COMPLETE")
+    manifest = json.loads(manifest_bytes)
+    complete = json.loads(complete_bytes)
+    if not isinstance(manifest, dict) or manifest_bytes != _canonical(manifest):
+        raise ValidationEvidenceVerificationError("assessment manifest must be canonical")
+    unsigned = dict(manifest)
+    embedded = unsigned.pop("manifest_sha256", None)
+    if (
+        manifest.get("manifest_schema_version") != _ASSESSMENT_SCHEMA
+        or not isinstance(embedded, str)
+        or compute_sha256(_canonical(unsigned)) != embedded
+        or complete != {"manifest_sha256": embedded}
+        or {
+            item.relative_to(directory).as_posix()
+            for item in directory.rglob("*")
+            if item.is_file()
+        }
+        != {"manifest.json", "COMPLETE"}
+    ):
+        raise ValidationEvidenceVerificationError("assessment manifest verification failed")
+    required = {
+        "assessment_id",
+        "dataset",
+        "gates",
+        "manifest_schema_version",
+        "manifest_sha256",
+        "run_fingerprint",
+        "runs",
+        "sample_eligibility",
+        "source",
+    }
+    if set(manifest) != required:
+        raise ValidationEvidenceVerificationError("assessment fields do not match schema")
+    return manifest, embedded
 
 
 __all__ = [

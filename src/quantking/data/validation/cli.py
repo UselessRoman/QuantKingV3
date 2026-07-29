@@ -5,13 +5,19 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
+from quantking.common.time import utc_now
 from quantking.data.assessment.matrix import default_source_matrix
 from quantking.data.models import DatasetKind
 from quantking.data.validation.artifacts import ValidationEvidenceVerifier
+from quantking.data.validation.authorization import (
+    AuthorizationVerifier,
+    ExecutionAuthorization,
+)
 from quantking.data.validation.samples import load_packaged_fixed_sample
 
 REAL_EXECUTION_ACK = "I_ACKNOWLEDGE_AUTHORIZED_REAL_SOURCE_VALIDATION"
@@ -46,6 +52,14 @@ class RealValidationRunner(Protocol):
     def execute(self, *, plan: ValidationPlan, output_root: Path) -> Path: ...
 
 
+class ValidationExecutionError(Exception):
+    """Stable, sanitized execute failure safe for CLI output."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def build_plan(*, source: str, dataset: DatasetKind, output_root: Path) -> ValidationPlan:
     source = source.upper()
     if source not in _SDK_PACKAGES:
@@ -63,7 +77,7 @@ def build_plan(*, source: str, dataset: DatasetKind, output_root: Path) -> Valid
     command = (
         "python scripts/run_source_validation.py execute "
         f'--source {source} --dataset {dataset.value} --output-root "{root}" '
-        f"--ack {REAL_EXECUTION_ACK}"
+        f"--ack {REAL_EXECUTION_ACK} --authorization-file <one-time-authorization.json>"
     )
     return ValidationPlan(
         source=source,
@@ -95,10 +109,30 @@ def execute(
     dataset: DatasetKind,
     output_root: Path,
     acknowledgement: str,
+    authorization: ExecutionAuthorization | None = None,
+    authorization_verifier: AuthorizationVerifier | None = None,
 ) -> Path:
     if acknowledgement != REAL_EXECUTION_ACK:
         raise ValueError("exact real-execution acknowledgement is required")
+    if authorization is None or authorization_verifier is None:
+        raise ValidationExecutionError(
+            "AUTHORIZATION_REQUIRED",
+            "matching one-time scoped authorization is required before runner import",
+        )
     plan = build_plan(source=source, dataset=dataset, output_root=output_root)
+    sample = load_packaged_fixed_sample()
+    if not authorization_verifier.verify(
+        authorization,
+        source=plan.source,
+        dataset=dataset,
+        output_root=output_root,
+        sample_sha256=sample.sample_spec_sha256,
+        at=utc_now(),
+    ):
+        raise ValidationExecutionError(
+            "AUTHORIZATION_REQUIRED",
+            "matching one-time scoped authorization is required before runner import",
+        )
     module_name = f"quantking.data.validation.runners.{source.lower()}"
     try:
         module = importlib.import_module(module_name)
@@ -108,10 +142,11 @@ def execute(
             raise TypeError("provider runner must return a Path")
         return result
     except ModuleNotFoundError as error:
-        if error.name == module_name:
-            raise RuntimeError(
-                "authorized provider runner is not installed; keep the matrix blocked"
-            ) from error
+        if error.name in {module_name, module_name.rsplit(".", 1)[0]}:
+            raise ValidationExecutionError(
+                "RUNNER_UNAVAILABLE",
+                "provider runner is not installed; assessment remains blocked",
+            ) from None
         raise
 
 
@@ -182,6 +217,7 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--output-root", required=True, type=Path)
         if name == "execute":
             command.add_argument("--ack", required=True)
+            command.add_argument("--authorization-file", required=True, type=Path)
     command = sub.add_parser("verify")
     command.add_argument("--validation-root", required=True, type=Path)
     command.add_argument("--directory", required=True, type=Path)
@@ -190,37 +226,58 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_authorization(path: Path) -> ExecutionAuthorization:
+    try:
+        return ExecutionAuthorization.from_bytes(path.read_bytes())
+    except (OSError, ValueError):
+        raise ValidationExecutionError(
+            "AUTHORIZATION_REQUIRED",
+            "matching one-time scoped authorization is required before runner import",
+        ) from None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.action == "plan":
-        result: object = asdict(
-            build_plan(
-                source=args.source,
-                dataset=DatasetKind(args.dataset),
-                output_root=args.output_root,
-            )
-        )
-    elif args.action == "execute":
-        result = {
-            "directory": str(
-                execute(
+    try:
+        if args.action == "plan":
+            result: object = asdict(
+                build_plan(
                     source=args.source,
                     dataset=DatasetKind(args.dataset),
                     output_root=args.output_root,
-                    acknowledgement=args.ack,
                 )
             )
-        }
-    elif args.action == "verify":
-        result = verify(validation_root=args.validation_root, directory=args.directory)
-    else:
-        result = status(validation_root=args.validation_root)
+        elif args.action == "execute":
+            authorization = _load_authorization(args.authorization_file)
+            result = {
+                "directory": str(
+                    execute(
+                        source=args.source,
+                        dataset=DatasetKind(args.dataset),
+                        output_root=args.output_root,
+                        acknowledgement=args.ack,
+                        authorization=authorization,
+                        authorization_verifier=None,
+                    )
+                )
+            }
+        elif args.action == "verify":
+            result = verify(validation_root=args.validation_root, directory=args.directory)
+        else:
+            result = status(validation_root=args.validation_root)
+    except ValidationExecutionError as error:
+        print(
+            json.dumps({"error_code": error.code, "message": str(error)}, sort_keys=True),
+            file=sys.stderr,
+        )
+        return 2
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 
 __all__ = [
     "REAL_EXECUTION_ACK",
+    "ValidationExecutionError",
     "ValidationPlan",
     "build_plan",
     "execute",
