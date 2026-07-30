@@ -18,8 +18,9 @@ Stage 1 的目标是完成首个可发布、可查询和可追溯的 A 股日频
   完成主验收；细节见 [S1-05 主验收证据](S1-05_ACCEPTANCE.md)。
 - S1-06 已于 2026-07-28 在提交 `413805074b3a82c2d2a090d2b73c854a238e2e19`
   完成主验收；细节见 [S1-06 主验收证据](S1-06_ACCEPTANCE.md)。
-- S1-07A-R6 修复已提交、等待主验收；24 个单元仍为
-  BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。
+- S1-07A 已于 2026-07-29 在提交 `37512be531e15bbd5a698e6a227b0753781ef5e6`
+  完成主验收。该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为
+  BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。S1-07B/C/D、S1-08 尚未开始。
 
 ## 授权边界
 
@@ -65,8 +66,10 @@ S1-05 已于 2026-07-27 完成主验收（提交
 [S1-05 主验收证据](S1-05_ACCEPTANCE.md)）；该验收只使用 Fake Gateway、临时 SQLite
 和临时 Warehouse，没有访问真实网络、QMT 或正式数据根。S1-06 已于 2026-07-28 在提交
 `413805074b3a82c2d2a090d2b73c854a238e2e19` 完成主验收，证据见
-[S1-06 主验收证据](S1-06_ACCEPTANCE.md)；S1-07A-R6 修复已提交、等待主验收；24 个单元
-仍为 BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。
+[S1-06 主验收证据](S1-06_ACCEPTANCE.md)；S1-07A 已于 2026-07-29 在提交
+`37512be531e15bbd5a698e6a227b0753781ef5e6` 完成主验收。该验收仅覆盖离线验证框架及其
+信任边界；24 个 source×dataset 单元仍为 BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
+S1-07B/C/D、S1-08 尚未开始。
 
 ## S1-06 主验收
 

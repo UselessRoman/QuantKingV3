@@ -30,9 +30,11 @@ _STATUS_PHRASES = (
     "Stage 0 已完成；Stage 1 已获实施授权并进行中，但尚未完成",
     "Stage 0 已完成；Stage 1 已获实施授权并进行中，但尚未完成。",
 )
-_S1_07A_R1_STATUS = (
-    "S1-07A-R6 修复已提交、等待主验收；24 个单元仍为 "
-    "BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。"
+_S1_07A_STATUS = (
+    "S1-07A 已于 2026-07-29 在提交 "
+    "`37512be531e15bbd5a698e6a227b0753781ef5e6` 完成主验收。"
+    "该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为 "
+    "BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。S1-07B/C/D、S1-08 尚未开始。"
 )
 
 
@@ -61,8 +63,8 @@ class TestStage1DocsExist:
             _REPO_ROOT / "docs" / "ARCHITECTURE.md",
         ),
     )
-    def test_s1_07a_r1_status_is_canonical(self, path: Path) -> None:
-        assert _S1_07A_R1_STATUS in " ".join(_read(path).split())
+    def test_s1_07a_status_is_canonical(self, path: Path) -> None:
+        assert _S1_07A_STATUS in " ".join(_read(path).split())
 
     def test_stage1_readme_does_not_claim_accepted(self) -> None:
         text = _read(_STAGE1_DIR / "README.md")
@@ -131,9 +133,7 @@ class TestStage1DocsExist:
             text = _read(_STAGE1_DIR / name)
             assert "79f9fa3e682e212cf74e7886a04c6fb52158f302" in text
             assert "S1-02 主验收证据" in text
-            assert "S1-03～S1-08 未开始、未获授权" in text or "未开始、未获授权" in text, (
-                f"{name} must record S1-03～S1-08 are not started and not authorized"
-            )
+            assert "S1-07B/C/D、S1-08 尚未开始" in text
         evidence = _read(_STAGE1_DIR / "S1-02_ACCEPTANCE.md")
         assert "S1-02（Warehouse、原子发布与显式版本查询）完成主验收" in evidence
 

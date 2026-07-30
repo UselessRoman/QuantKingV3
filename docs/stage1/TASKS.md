@@ -11,8 +11,9 @@ S1-05 已于 2026-07-27 在提交 `e580d6963e01b1301dc26f29ed57a0b5b4770a0f`
 完成主验收，证据见 [S1-05 主验收证据](S1-05_ACCEPTANCE.md)。
 S1-06 已于 2026-07-28 在提交 `413805074b3a82c2d2a090d2b73c854a238e2e19`
 完成主验收，证据见 [S1-06 主验收证据](S1-06_ACCEPTANCE.md)。
-S1-07A-R6 修复已提交、等待主验收；24 个单元仍为
-BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。
+S1-07A 已于 2026-07-29 在提交 `37512be531e15bbd5a698e6a227b0753781ef5e6`
+完成主验收。该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为
+BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。S1-07B/C/D、S1-08 尚未开始。
 
 真实 XTQuant 和备用源验证仍延期并阻断 Stage 1 最终验收。
 
@@ -133,8 +134,10 @@ BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。
 
 ## S1-07：经授权真实样本与旧数据 DATA_ONLY 判定
 
-- **状态**：S1-07A-R6 修复已提交、等待主验收；24 个单元仍为
-  BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。
+- **状态**：S1-07A 已于 2026-07-29 在提交
+  `37512be531e15bbd5a698e6a227b0753781ef5e6` 完成主验收。该验收仅覆盖离线验证框架及其
+  信任边界；24 个 source×dataset 单元仍为 BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
+  S1-07B/C/D、S1-08 尚未开始。
 - **范围**：在逐项授权下运行真实 XTQuant/备用源固定样本；只读审计旧项目候选数据并作
   `DATA_ONLY`/拒绝判定，记录 schema、覆盖、校验和、来源和缺口证据。
 - **依赖**：S1-06 完成；真实网络、QMT、正式数据根和 `E:\QuantKing` 读取分别授权。

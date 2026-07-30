@@ -1,7 +1,9 @@
-# S1-07A-R6 finalized seal 最终 TOCTOU 修复交接
+# S1-07A 离线验证框架主验收证据
 
-状态：S1-07A-R6 修复已提交、等待主验收；24 个单元仍为
-BLOCKED_EXTERNAL_VALIDATION；S1-07B/C/D、S1-08 未开始、未获授权。
+状态：S1-07A 已于 2026-07-29 在提交
+`37512be531e15bbd5a698e6a227b0753781ef5e6` 完成主验收。该验收仅覆盖离线验证框架及其
+信任边界；24 个 source×dataset 单元仍为 BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
+S1-07B/C/D、S1-08 尚未开始。
 
 ## 范围与基线
 
@@ -24,6 +26,20 @@ R6 首次结果为 `5 failed, 2 passed`。根因为 `_verify_final(incomplete)` 
 ZIP 仍可在 `_finalize_seal()` 前被追加未声明/重复 entry 或替换 Canonical/Quality；
 finalized 文件只以此前 SHA 进入后续流程，没有在取得独占句柄后重新安全解包和完整深验。
 锁前 finalized 截断/替换已被 R5 的 SHA 回滚保护拒绝，因此两项初始即通过。
+
+## 主验收结果
+
+- 验收基准：`37512be531e15bbd5a698e6a227b0753781ef5e6`。
+- 上一轮 incomplete ZIP 绕过已变为安全拒绝，数据库 `ROW_COUNT=0`。
+- R5 + R6 攻击测试：`26 passed`。
+- Validation、持久化、DataCenter、迁移及文档扩展回归：`213 passed`。
+- 完整 `scripts/quality.ps1` 退出码为 0；后端为
+  `1113 passed, 2 skipped, 3 deselected`，前端为 `17 passed`，生产构建和
+  Playwright `1 passed`。
+- Ruff、format、mypy、架构边界、Markdown 和 `git diff --check` 均通过；Alembic 唯一
+  head 为 `20260729_0012`，验收工作树干净。
+- 第一次完整门禁仅因沙箱无法读取既有离线工具链缓存而在测试前退出；授权读取后原样重跑
+  全绿，不属于代码失败。
 
 ## 固定样本 v2
 

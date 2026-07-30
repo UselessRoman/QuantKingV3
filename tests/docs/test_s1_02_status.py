@@ -1,8 +1,8 @@
-# ruff: noqa: RUF001, RUF002, RUF003
+# ruff: noqa: RUF001
 """Status wording tests for the accepted Stage 1 S1-02 task.
 
 These tests assert that S1-02 has durable main-acceptance evidence while
-S1-03～S1-08 remain not started and not authorized.
+the current documents preserve the latest Stage 1 boundary.
 
 * The S1-02 implementation is present under ``src/quantking/data/adapters/warehouse``.
 * The Stage 1 status wording consistently records S1-02 main acceptance.
@@ -53,11 +53,10 @@ class TestStage1StatusWording:
         "doc",
         ("README.md", "TASKS.md", "ACCEPTANCE.md"),
     )
-    def test_s1_03_not_started(self, doc: str) -> None:
+    def test_later_external_tasks_not_started(self, doc: str) -> None:
         text = (_STAGE1_DIR / doc).read_text(encoding="utf-8")
         assert "S1-03" in text
-        # S1-03～S1-08 must remain not started and not authorized.
-        assert "S1-03～S1-08 未开始、未获授权" in text or "未开始、未获授权" in text
+        assert "S1-07B/C/D、S1-08 尚未开始" in text
 
     def test_s1_02_does_not_describe_stage1_complete(self) -> None:
         # S1-02 acceptance must not claim Stage 1 itself is complete.
