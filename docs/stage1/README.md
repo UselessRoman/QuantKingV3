@@ -20,7 +20,9 @@ Stage 1 的目标是完成首个可发布、可查询和可追溯的 A 股日频
   完成主验收；细节见 [S1-06 主验收证据](S1-06_ACCEPTANCE.md)。
 - S1-07A 已于 2026-07-29 在提交 `37512be531e15bbd5a698e6a227b0753781ef5e6`
   完成主验收。该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为
-  BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。S1-07B/C/D、S1-08 尚未开始。
+  BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
+- S1-07B 离线准备已提交，权威样本资格仍阻断，等待外部只读授权及人工复核。
+  S1-07C/D、S1-08 尚未开始、未获授权。
 
 ## 授权边界
 
@@ -47,7 +49,10 @@ S1-01 数据合同、元数据持久化与安全迁移基础（已主验收）
     → S1-04 质量、跨源差异与 SourceOverride（已主验收）
     → S1-05 EOD、Worker、CLI 与 API（已主验收）
     → S1-06 数据中心 Web（已主验收）
-    → S1-07 经授权真实样本与旧数据 DATA_ONLY 判定
+    → S1-07A 离线验证框架（已主验收）
+    → S1-07B 权威固定样本、引用证据合同和 REAL runtime/signer readiness
+    → S1-07C 逐项授权的真实来源运行和差异评估
+    → S1-07D 旧项目候选 DATA_ONLY/REJECTED 审计
     → S1-08 真实或明确范围 Canonical 构建及 Stage 1 最终验收
 ```
 
@@ -69,7 +74,8 @@ S1-05 已于 2026-07-27 完成主验收（提交
 [S1-06 主验收证据](S1-06_ACCEPTANCE.md)；S1-07A 已于 2026-07-29 在提交
 `37512be531e15bbd5a698e6a227b0753781ef5e6` 完成主验收。该验收仅覆盖离线验证框架及其
 信任边界；24 个 source×dataset 单元仍为 BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
-S1-07B/C/D、S1-08 尚未开始。
+S1-07B 离线准备已提交，权威样本资格仍阻断，等待外部只读授权及人工复核。
+S1-07C/D、S1-08 尚未开始、未获授权。
 
 ## S1-06 主验收
 
@@ -108,6 +114,7 @@ React 页面覆盖总览、来源、批次、版本与显式预览、质量、�
 - [验收矩阵](ACCEPTANCE.md)
 - [S1-06 主验收证据](S1-06_ACCEPTANCE.md)
 - [S1-07A 离线框架交接证据](S1-07A_ACCEPTANCE.md)
+- [S1-07B 离线准备交接](S1-07B_ACCEPTANCE.md)
 - [S1-02 主验收证据](S1-02_ACCEPTANCE.md)
 - [S1-03 离线验收证据](S1-03_ACCEPTANCE.md)
 - [S1-04 主验收证据](S1-04_ACCEPTANCE.md)

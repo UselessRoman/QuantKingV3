@@ -23,6 +23,7 @@ _REQUIRED_STAGE1_DOCS = (
     "S1-05_ACCEPTANCE.md",
     "S1-06_ACCEPTANCE.md",
     "S1-07A_ACCEPTANCE.md",
+    "S1-07B_ACCEPTANCE.md",
 )
 
 # The canonical status phrase required across updated documents.
@@ -34,8 +35,9 @@ _S1_07A_STATUS = (
     "S1-07A 已于 2026-07-29 在提交 "
     "`37512be531e15bbd5a698e6a227b0753781ef5e6` 完成主验收。"
     "该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为 "
-    "BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。S1-07B/C/D、S1-08 尚未开始。"
+    "BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。"
 )
+_S1_07B_STATUS = "S1-07B 离线准备已提交，权威样本资格仍阻断，等待外部只读授权及人工复核。"
 
 
 def _read(path: Path) -> str:
@@ -64,7 +66,10 @@ class TestStage1DocsExist:
         ),
     )
     def test_s1_07a_status_is_canonical(self, path: Path) -> None:
-        assert _S1_07A_STATUS in " ".join(_read(path).split())
+        normalized = " ".join(_read(path).split())
+        assert _S1_07A_STATUS in normalized
+        assert _S1_07B_STATUS in normalized
+        assert "S1-07C/D、S1-08 尚未开始、未获授权。" in normalized
 
     def test_stage1_readme_does_not_claim_accepted(self) -> None:
         text = _read(_STAGE1_DIR / "README.md")
@@ -133,7 +138,8 @@ class TestStage1DocsExist:
             text = _read(_STAGE1_DIR / name)
             assert "79f9fa3e682e212cf74e7886a04c6fb52158f302" in text
             assert "S1-02 主验收证据" in text
-            assert "S1-07B/C/D、S1-08 尚未开始" in text
+            assert "S1-07B 离线准备已提交" in text
+            assert "S1-07C/D、S1-08 尚未开始、未获授权" in text
         evidence = _read(_STAGE1_DIR / "S1-02_ACCEPTANCE.md")
         assert "S1-02（Warehouse、原子发布与显式版本查询）完成主验收" in evidence
 
@@ -145,7 +151,10 @@ class TestStage1DocsExist:
             "S1-04 质量、跨源差异与 SourceOverride",
             "S1-05 EOD、Worker、CLI 与 API",
             "S1-06 数据中心 Web",
-            "S1-07 经授权真实样本与旧数据 DATA_ONLY 判定",
+            "S1-07A 离线验证框架",
+            "S1-07B 权威固定样本",
+            "S1-07C 逐项授权的真实来源运行",
+            "S1-07D 旧项目候选 DATA_ONLY/REJECTED 审计",
             "S1-08 真实或明确范围 Canonical 构建及 Stage 1 最终验收",
         )
         positions = [text.index(item) for item in ordered]

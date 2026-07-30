@@ -221,6 +221,8 @@ Override 读模型同时验证 override、latest application、active binding、
 双向状态矩阵；总览失败数通过数据与 Job 仓储窄端口执行 SQL 聚合，范围与统一失败列表一致。
 S1-07A 已于 2026-07-29 在提交 `37512be531e15bbd5a698e6a227b0753781ef5e6`
 完成主验收。该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为
-BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。S1-07B/C/D、S1-08 尚未开始。各模块状态以
+BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
+S1-07B 离线准备已提交，权威样本资格仍阻断，等待外部只读授权及人工复核。
+S1-07C/D、S1-08 尚未开始、未获授权。各模块状态以
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)、[路线图](ROADMAP.md) 和 Stage 1
 任务卡为准。

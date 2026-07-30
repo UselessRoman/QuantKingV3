@@ -186,3 +186,26 @@ S1-07A 新增版本化 `FixedSampleSpec`、`RealSourceValidationRun` 和
 v1 基础内容，避免相同 version 接受不同规范内容。事件目的枚举已固化，
 但 IPO、退市、ST、停牌和公司行动的正式 case 必须先取得可复查权威依据及版本；本次离线
 实施没有联网核验，因此没有凭记忆把事件证券或日期写入 v2。
+
+## 7. S1-07B 权威样本与 REAL runtime readiness
+
+S1-07B 保留 v1/v2 的规范字节、内部 sample SHA 和 release SHA，并新增
+`s1-07.fixed-sample.v3` release。v3 绑定 v2 SHA，显式列出正常、IPO/上市、point-in-time、
+退市/退市整理期、ST/*ST、停牌/复牌、涨跌停、基准指数、公司行动、复权公式、单位语义和
+缺失/不支持场景的权威证据要求。由于没有取得官方材料只读授权和用户人工确认，全部要求仍
+列为缺失，资格由 verifier 推导为 `FRAMEWORK_ONLY`；修改 JSON eligibility、清空缺口或
+自签 reviewer decision 均不能得到 `PRODUCTION_ELIGIBLE`。
+
+reference bundle 使用规范 JSON、确定性排序、逐文件 SHA、精确 inventory、自签 manifest
+和 `COMPLETE`，并绑定 v3/v2 SHA 链、reference/document/fact/case 映射、code/schema
+version、reviewed_at 和 reviewer decision。locator 必须是 document-specific HTTPS，
+authority tier 必须为 `PRIMARY`；第三方摘要、首页、跨证券/交易所/日期/用途复用、缺失或
+多余文件、重复 ID、路径逃逸和 reparse point 均失败。S1-07B 没有 production reviewer
+key allowlist，因此合法合成 bundle 也只得到 `FRAMEWORK_ONLY`。
+
+`RealValidationRuntime` 使用固定 source/runner/distribution registry，plan 只读本机
+distribution metadata 而不导入 SDK，并冻结 source、dataset、v3 SHA、adapter/package/
+code/schema/rule/threshold/config version、case/request、输出根、网络/QMT需求、副作用和
+阻断原因。execute 的未来时序为 acknowledgement → runtime/scope/version 校验 → 持久化
+一次性 authorization claim → 受控 REAL signer → 固定 runner import → session/evidence。
+当前样本资格、REAL signer 和 runner 均阻断，任何 SDK import 之前失败。

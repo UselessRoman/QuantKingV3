@@ -5,6 +5,9 @@
 状态。权威来源是 `src/quantking/data/assessment/matrix.py` 的 `default_source_matrix()`；
 文档不得替代源码与契约测试。
 
+S1-07B 离线准备已提交，权威样本资格仍阻断，等待外部只读授权及人工复核。该准备没有产生
+任何真实来源证据，也没有改变矩阵角色或状态。
+
 ## 生产矩阵
 
 | 源 | 数据集 | 角色 | 当前状态 | 阻塞原因 | auto_switch |
@@ -25,7 +28,7 @@
 
 ## 真实验证路径
 
-FALLBACK 源的真实外部验证须在 S1-07 或专项验收中按项单独授权：
+真实外部验证须在 S1-07C 或专项验收中按 source × dataset 单元单独授权：
 
 1. 在授权下用真实供应商响应运行 `SourceCandidateAssessment`，记录 `EvidenceKind.REAL`。
 2. 通过 semantic contract、schema/unit、coverage、quality、fixed-sample differences、
@@ -33,6 +36,8 @@ FALLBACK 源的真实外部验证须在 S1-07 或专项验收中按项单独授�
 3. 未通过门禁或未授权时，状态保持 `BLOCKED_EXTERNAL_VALIDATION`，并保留阻塞原因。
 
 合成测试不构成真实能力证明；离线测试通过不等于主验收通过。
+公开合同中看似不支持某数据集的结论，在 S1-07B 只能记录为 capability candidate；没有
+S1-07C 的真实证据不得写成已验证能力结论。
 
 ## 不变量
 

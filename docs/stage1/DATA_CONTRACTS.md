@@ -13,7 +13,20 @@
 [S1-06 主验收证据](S1-06_ACCEPTANCE.md)；
 S1-07A 已于 2026-07-29 在提交 `37512be531e15bbd5a698e6a227b0753781ef5e6`
 完成主验收。该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为
-BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。S1-07B/C/D、S1-08 尚未开始。
+BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
+S1-07B 离线准备已提交，权威样本资格仍阻断，等待外部只读授权及人工复核。
+S1-07C/D、S1-08 尚未开始、未获授权。
+
+S1-07B 新增的 v3 release 不改写 v1/v2。v3 规范 sample SHA 为
+`5b5bf202e17181dfcbd9159f261dc9b4c636fb7641a3786523b42f952c6f3200`，直接绑定 v2 SHA
+`03d3d6c1e898b0746b7c5ab3911917a600fa3975f802c1d414fd0b6196c80dfb`。v3 当前继承 v2
+的 11 个框架 case，仅用于 plan 与合同测试；它没有新增任何未经权威材料核验的事件证券或
+日期，所有生产权威用途仍列为缺失，因此固定样本 gate 必须为 false。
+
+reference bundle 只保存必要结构化事实、短 statement、document identifier、locator 和
+原始材料 SHA，不提交公告或网页大段正文。每个 `CaseFactBinding` 必须精确匹配 case 的
+dataset、purpose、code、exchange 和起止日期；reference/fact/case 或 reviewer decision
+变化要求新 sample/release，不允许复用同一 v3 内容身份。
 
 ## 数据中心只读查询合同（S1-06）
 

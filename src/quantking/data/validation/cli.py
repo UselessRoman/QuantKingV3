@@ -21,6 +21,12 @@ from quantking.data.validation.authorization import (
     AuthorizationVerifier,
     ExecutionAuthorization,
 )
+from quantking.data.validation.runtime import (
+    ControlledRunnerRegistry,
+    LocalPackageVersionProbe,
+    RealValidationRuntime,
+    ValidationSource,
+)
 from quantking.data.validation.samples import load_packaged_fixed_sample
 
 REAL_EXECUTION_ACK = "I_ACKNOWLEDGE_AUTHORIZED_REAL_SOURCE_VALIDATION"
@@ -36,6 +42,15 @@ _SDK_PACKAGES = {
 class ValidationPlan:
     source: str
     dataset: str
+    sample_spec_version: str
+    sample_spec_sha256: str
+    adapter_version: str
+    package_version: str
+    code_version: str
+    schema_version: str
+    rule_version: str
+    threshold_version: str
+    config_version: str
     case_ids: tuple[str, ...]
     request_ranges: tuple[str, ...]
     requested_fields: tuple[str, ...]
@@ -48,6 +63,7 @@ class ValidationPlan:
     execute_qmt_connection: bool
     sdk_loaded: bool
     unavoidable_side_effects: tuple[str, ...]
+    blocking_reasons: tuple[str, ...]
     command: str
 
 
@@ -67,16 +83,15 @@ def build_plan(*, source: str, dataset: DatasetKind, output_root: Path) -> Valid
     source = source.upper()
     if source not in _SDK_PACKAGES:
         raise ValueError("source must be XTQUANT, BAOSTOCK, AKSHARE or TUSHARE")
-    root = output_root.resolve(strict=False)
-    if not output_root.is_absolute():
-        raise ValueError("output_root must be absolute")
-    sample = load_packaged_fixed_sample()
-    cases = tuple(
-        case
-        for case in sample.cases
-        if case.dataset is dataset and source in case.applicable_sources
+    readiness = RealValidationRuntime(
+        registry=ControlledRunnerRegistry.s1_07b(),
+        package_probe=LocalPackageVersionProbe(overrides={}),
+    ).plan(
+        source=ValidationSource(source),
+        dataset=dataset,
+        output_root=output_root,
     )
-    output = root / "source-assessments" / source.lower() / dataset.value / "<assessment_id>"
+    root = output_root.resolve(strict=False)
     command = (
         "python scripts/run_source_validation.py execute "
         f'--source {source} --dataset {dataset.value} --output-root "{root}" '
@@ -85,23 +100,28 @@ def build_plan(*, source: str, dataset: DatasetKind, output_root: Path) -> Valid
     return ValidationPlan(
         source=source,
         dataset=dataset.value,
-        case_ids=tuple(case.case_id for case in cases),
-        request_ranges=tuple(
-            f"{case.code or case.exchange}:{case.start_date}:{case.end_date}" for case in cases
-        ),
-        requested_fields=tuple(sorted({field for case in cases for field in case.fields})),
-        output_directory=str(output),
-        sdk=_SDK_PACKAGES[source],
+        sample_spec_version=readiness.sample_spec_version,
+        sample_spec_sha256=readiness.sample_spec_sha256,
+        adapter_version=readiness.adapter_version,
+        package_version=readiness.package_version,
+        code_version=readiness.code_version,
+        schema_version=readiness.schema_version,
+        rule_version=readiness.rule_version,
+        threshold_version=readiness.threshold_version,
+        config_version=readiness.config_version,
+        case_ids=readiness.case_ids,
+        request_ranges=readiness.request_ranges,
+        requested_fields=readiness.requested_fields,
+        output_directory=readiness.output_directory,
+        sdk=f"{_SDK_PACKAGES[source]}; local metadata={readiness.package_version}",
         network_access=False,
         qmt_connection=False,
         legacy_read=False,
-        execute_network_access=True,
-        execute_qmt_connection=source == "XTQUANT",
+        execute_network_access=readiness.network_required,
+        execute_qmt_connection=readiness.qmt_required,
         sdk_loaded=False,
-        unavoidable_side_effects=(
-            "execute creates a new immutable validation evidence directory",
-            "the provider may create process-local caches or sessions",
-        ),
+        unavoidable_side_effects=readiness.unavoidable_side_effects,
+        blocking_reasons=readiness.blocking_reasons,
         command=command,
     )
 

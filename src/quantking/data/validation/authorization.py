@@ -285,7 +285,7 @@ class SignerTrustPolicy:
         }:
             raise ValueError("Fake runner key is permanently SYNTHETIC")
         if SignerProfile.REAL in profiles.values():
-            raise ValueError("S1-07A has no allowlisted REAL signer")
+            raise ValueError("current offline validation runtime has no allowlisted REAL signer")
         object.__setattr__(self, "_profiles", MappingProxyType(profiles))
 
     @classmethod
