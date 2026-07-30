@@ -56,7 +56,7 @@ class TestStage1StatusWording:
     def test_later_external_tasks_not_started(self, doc: str) -> None:
         text = (_STAGE1_DIR / doc).read_text(encoding="utf-8")
         assert "S1-03" in text
-        assert "S1-07B 离线准备已提交" in text
+        assert "S1-07B-R1 离线准备修复已提交" in text
         assert "S1-07C/D、S1-08 尚未开始、未获授权" in text
 
     def test_s1_02_does_not_describe_stage1_complete(self) -> None:

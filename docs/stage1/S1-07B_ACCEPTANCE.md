@@ -1,11 +1,12 @@
 # S1-07B 离线准备交接
 
-状态：S1-07B 离线准备已提交，权威样本资格仍阻断，等待外部只读授权及人工复核。
+状态：S1-07B-R1 离线准备修复已提交，权威样本资格仍阻断，等待外部只读授权及人工复核。
 
 ## 范围与基线
 
 - Stage：Stage 1 / S1-07B。
-- 基线：`1b818018e9b8ca9f56353b0e78b37008912ba86d`。
+- S1-07B 基线：`1b818018e9b8ca9f56353b0e78b37008912ba86d`。
+- S1-07B-R1 基线：`310b2758cdb4595fc3e89891c7ca0c30a927447e`。
 - 本任务只实现权威固定样本 v3 的冻结/资格合同、引用证据 bundle/verifier，以及未来
   S1-07C 使用的 REAL runtime/signer readiness。
 - 没有联网、QMT/MiniQMT、真实 XTQuant 或备用源调用；没有读取正式数据根、旧项目或备份根。
@@ -22,6 +23,16 @@
 首次结果为 `15 failed, 1 passed`。根因是基线只有 v1 + v2 release、S1-07A synthetic-only
 证据链和硬阻断 CLI，尚不存在 v3 冻结链、document/fact/case 引用 bundle verifier、固定
 runner registry、只读 package metadata probe 或 version-scoped REAL runtime plan。
+
+R1 红测命令：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/data/validation/test_s1_07b_r1_runtime.py -q
+```
+
+R1 首次结果为 `22 failed, 3 passed`。根因是 execute 在样本资格检查后直接进入 authorization
+校验，没有在 claim 前机器复验 package version、source×dataset case scope、完整冻结版本和
+安全 output root；plan 对 output root 的预先 resolve 还会丢失部分路径攻击信息。
 
 ## 固定样本版本链
 
@@ -122,14 +133,27 @@ dataset、purpose、code、exchange 和完整日期范围。缺失、多余、�
 本次本机只读 metadata 结果：XTQuant、BaoStock、AKShare、Tushare 均为 `unavailable`。
 未安装、升级或导入任何供应商包。
 
-未来 execute 时序固定为：
+R1 后 execute 的机器前置门与授权时序固定为：
 
 1. exact acknowledgement；
-2. runtime、sample eligibility、scope/expiry/plan SHA/全部冻结版本匹配；
-3. 使用 S1-07A 的跨进程持久 claim 原子消费 authorization；
-4. 从受控 secret runtime 加载 REAL signer；
-5. 从固定 registry 延迟加载 runner；
-6. 创建 provider session 和不可变 evidence。
+2. 重新生成当前 plan；
+3. 在 claim/import/session/evidence 之前检查 `PRODUCTION_ELIGIBLE`、非空
+   source×dataset case scope、精确稳定 provider package version、安全绝对 output root，
+   以及 adapter/package/code/schema/rule/threshold/sample/config 完整性；
+4. 检查 `RuntimeAuthorizationEnvelope` 的 plan SHA、签名、scope/expiry、sample SHA 和
+   全部冻结版本；
+5. 使用 S1-07A 的跨进程持久 claim 原子消费 authorization；
+6. 从受控 secret runtime 加载 REAL signer；
+7. 从固定 registry 延迟加载 runner；
+8. 创建 provider session 和不可变 evidence。
+
+前置门错误码为：缺失、空值、`unavailable`、`unknown`、`latest` 使用
+`PROVIDER_PACKAGE_VERSION_UNRESOLVED`；版本范围、预发布、本地版本或不可解析值使用
+`PROVIDER_PACKAGE_VERSION_INVALID`；空 case 使用 `SAMPLE_SCOPE_EMPTY`；任一冻结版本或
+sample SHA 漂移使用 `RUNTIME_VERSION_MISMATCH`；非绝对路径、`..`、symlink、junction 或
+reparse point 使用 `OUTPUT_ROOT_UNSAFE`。这些失败均不消费 authorization，也不导入
+signer、runner 或 SDK。全部前置门通过后才消费 authorization；此后 REAL signer/runner
+初始化失败也不释放授权。
 
 S1-07B 没有 production reviewer key、REAL signer key 或 runner enablement，因此在任何 SDK
 import 前稳定阻断。Fake/test/self-signed key 永远不在 production allowlist；密钥不进入
@@ -149,15 +173,17 @@ SourceOverride 或 DatasetVersion。
 
 ## 验证与副作用
 
-- S1-07B 定向测试覆盖 v3/version-chain/eligibility、引用 inventory/fact binding、reviewer
-  trust、path/tamper，以及 registry/plan/version drift/pre-import 阻断：`19 passed`。
-- S1-07A R2～R6、assessment repository、DataCenter、migration、Stage 1 文档和完整
-  架构定向组合：`279 passed`。
+- S1-07B-R1 攻击测试覆盖未解析/不稳定 package、全部冻结版本漂移、空 scope、不安全输出根、
+  claim/import 计数和并发单次消费：`27 passed`。
+- S1-07B-R1 加既有 S1-07B runtime 与文档状态定向组合：`105 passed`。
+- S1-07A R2～R6、全部 validation、assessment repository、DataCenter、migration 和 Stage 1
+  文档扩展回归：`291 passed`。
 - 完整 `scripts/quality.ps1` 退出码为 0：离线后端
-  `1133 passed, 2 skipped, 3 deselected`；Ruff、format、mypy、架构边界和 Markdown
+  `1160 passed, 2 skipped, 3 deselected`；Ruff、format、mypy、架构边界和 Markdown
   全部通过；前端单测 `17 passed`，生产构建通过，Playwright `1 passed`。
-- 第一次完整门禁在测试前因沙箱不能读取既有离线 uv 缓存退出；取得只读许可后发现并修正
-  两处 Ruff 格式差异，随后原样重跑全绿。该缓存访问没有联网或下载依赖。
+- 第一次完整门禁在测试前因沙箱不能读取既有离线 uv 缓存退出；取得只读许可后首次代码门
+  在 Ruff format 发现一个文档状态测试需机械格式化，修正后原样重跑全绿。该缓存访问没有
+  联网或下载依赖。
 - Alembic 唯一 head 仍为 `20260729_0012`；S1-07B 没有新增 migration。
 - 外部访问：无。只读取仓库、pytest 临时目录和本机 Python distribution metadata；未读取
   `E:\QuantKing`、`E:\QuantKingV3Data` 或 `F:\QuantKingV3Backups`。

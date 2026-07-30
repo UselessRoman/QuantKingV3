@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Protocol
 
 from quantking.common.ids import EntityId
+from quantking.common.paths import is_reparse_point
 from quantking.common.time import utc_now
 from quantking.data.adapters.warehouse.manifest import compute_sha256
 from quantking.data.comparison.thresholds import THRESHOLD_RULE_VERSION
@@ -28,7 +29,18 @@ from quantking.data.validation.authorization import (
 )
 from quantking.data.validation.samples import load_fixed_sample_v3
 
-_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}$")
+_STABLE_PACKAGE_VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+)+$")
+_UNRESOLVED_PACKAGE_VERSIONS = frozenset({"", "latest", "unavailable", "unknown"})
+_RUNTIME_VERSION_FIELDS = (
+    "adapter_version",
+    "package_version",
+    "code_version",
+    "schema_version",
+    "rule_version",
+    "threshold_version",
+    "sample_spec_version",
+    "config_version",
+)
 _REAL_ACK = "I_ACKNOWLEDGE_AUTHORIZED_REAL_SOURCE_VALIDATION"
 
 
@@ -159,7 +171,7 @@ class LocalPackageVersionProbe:
             value = importlib.metadata.version(distribution_name)
         except importlib.metadata.PackageNotFoundError:
             return None
-        return value if _VERSION.fullmatch(value) else None
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +180,7 @@ class RuntimeValidationPlan:
     dataset: DatasetKind
     sample_spec_version: str
     sample_spec_sha256: str
+    sample_production_eligible: bool
     adapter_version: str
     package_version: str
     code_version: str
@@ -294,14 +307,17 @@ class RealValidationRuntime:
             for case in sample.cases
             if case.dataset is dataset and source.value in case.applicable_sources
         )
-        reasons = [
-            "AUTHORITATIVE_SAMPLE_FRAMEWORK_ONLY",
-            "REAL_SIGNER_NOT_INITIALIZED",
-            "PROVIDER_RUNNER_NOT_ENABLED",
-        ]
-        if package_version is None or package_version == "unavailable":
+        reasons = ["REAL_SIGNER_NOT_INITIALIZED", "PROVIDER_RUNNER_NOT_ENABLED"]
+        if not sample.fixed_sample_gate_eligible:
+            reasons.append("AUTHORITATIVE_SAMPLE_FRAMEWORK_ONLY")
+        if not cases:
+            reasons.append("SAMPLE_SCOPE_EMPTY")
+        package_failure = _package_version_failure(package_display)
+        if package_failure == "PROVIDER_PACKAGE_VERSION_UNRESOLVED":
             reasons.append("PROVIDER_PACKAGE_VERSION_UNRESOLVED")
-        root = output_root.resolve(strict=False)
+        elif package_failure is not None:
+            reasons.append("PROVIDER_PACKAGE_VERSION_INVALID")
+        root = output_root
         unsigned: dict[str, object] = {
             "adapter_version": descriptor.adapter_version,
             "blocking_reasons": sorted(reasons),
@@ -327,6 +343,7 @@ class RealValidationRuntime:
             "rule_version": default_rule_set().rule_version,
             "sample_spec_sha256": sample.sample_spec_sha256,
             "sample_spec_version": sample.sample_spec_version,
+            "sample_production_eligible": sample.fixed_sample_gate_eligible,
             "schema_version": descriptor_for(dataset.value).schema_version,
             "sdk_loaded": False,
             "source": source.value,
@@ -342,6 +359,7 @@ class RealValidationRuntime:
             dataset=dataset,
             sample_spec_version=sample.sample_spec_version,
             sample_spec_sha256=sample.sample_spec_sha256,
+            sample_production_eligible=sample.fixed_sample_gate_eligible,
             adapter_version=descriptor.adapter_version,
             package_version=package_display,
             code_version="s1-07b.runtime.v1",
@@ -376,17 +394,47 @@ class RealValidationRuntime:
                 "ACKNOWLEDGEMENT_REQUIRED",
                 "exact real-execution acknowledgement is required",
             )
-        plan = self.plan(source=source, dataset=dataset, output_root=output_root)
-        sample = load_fixed_sample_v3()
-        if not sample.fixed_sample_gate_eligible:
+        try:
+            plan = self.plan(source=source, dataset=dataset, output_root=output_root)
+        except ValueError:
+            if not isinstance(output_root, Path) or not output_root.is_absolute():
+                raise RealRuntimeExecutionError(
+                    "OUTPUT_ROOT_UNSAFE",
+                    "output root is not a safe absolute managed path",
+                ) from None
+            raise
+        if not plan.sample_production_eligible:
             raise RealRuntimeExecutionError(
                 "SAMPLE_NOT_PRODUCTION_ELIGIBLE",
                 "authoritative fixed sample is not production eligible",
             )
+        if not plan.case_ids:
+            raise RealRuntimeExecutionError(
+                "SAMPLE_SCOPE_EMPTY",
+                "fixed sample has no case for the requested source and dataset",
+            )
+        package_failure = _package_version_failure(plan.package_version)
+        if package_failure is not None:
+            raise RealRuntimeExecutionError(
+                package_failure,
+                "provider package version is not an exact stable version",
+            )
+        _validate_output_root(output_root)
         if authorization is None:
             raise RealRuntimeExecutionError(
                 "AUTHORIZATION_REQUIRED",
                 "matching version-scoped authorization is required",
+            )
+        expected_versions = {field: str(getattr(plan, field)) for field in _RUNTIME_VERSION_FIELDS}
+        if (
+            any(not value for value in expected_versions.values())
+            or dict(authorization.frozen_versions) != expected_versions
+            or authorization.authorization.sample_sha256 != plan.sample_spec_sha256
+            or authorization.plan_sha256 != plan.plan_sha256
+        ):
+            raise RealRuntimeExecutionError(
+                "RUNTIME_VERSION_MISMATCH",
+                "runtime versions do not match the current frozen plan",
             )
         if (
             self._runtime_authorization_verifier is None
@@ -424,6 +472,43 @@ class RealValidationRuntime:
             "REAL_SIGNER_UNAVAILABLE",
             "production REAL signer is not initialized; runner was not imported",
         )
+
+
+def _package_version_failure(value: str | None) -> str | None:
+    normalized = value.strip().lower() if isinstance(value, str) else ""
+    if normalized in _UNRESOLVED_PACKAGE_VERSIONS:
+        return "PROVIDER_PACKAGE_VERSION_UNRESOLVED"
+    if not _STABLE_PACKAGE_VERSION.fullmatch(normalized):
+        return "PROVIDER_PACKAGE_VERSION_INVALID"
+    return None
+
+
+def _validate_output_root(output_root: Path) -> None:
+    if (
+        not isinstance(output_root, Path)
+        or not output_root.is_absolute()
+        or ".." in output_root.parts
+    ):
+        raise RealRuntimeExecutionError(
+            "OUTPUT_ROOT_UNSAFE",
+            "output root is not a safe absolute managed path",
+        )
+    current = Path(output_root.anchor)
+    try:
+        for part in output_root.parts[1:]:
+            current /= part
+            if current.exists() and is_reparse_point(current):
+                raise RealRuntimeExecutionError(
+                    "OUTPUT_ROOT_UNSAFE",
+                    "output root contains a reparse point",
+                )
+    except RealRuntimeExecutionError:
+        raise
+    except OSError:
+        raise RealRuntimeExecutionError(
+            "OUTPUT_ROOT_UNSAFE",
+            "output root could not be safely inspected",
+        ) from None
 
 
 __all__ = [

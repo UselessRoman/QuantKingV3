@@ -203,9 +203,12 @@ authority tier 必须为 `PRIMARY`；第三方摘要、首页、跨证券/交易
 多余文件、重复 ID、路径逃逸和 reparse point 均失败。S1-07B 没有 production reviewer
 key allowlist，因此合法合成 bundle 也只得到 `FRAMEWORK_ONLY`。
 
+S1-07B-R1 离线准备修复已提交，权威样本资格仍阻断，等待外部只读授权及人工复核。
 `RealValidationRuntime` 使用固定 source/runner/distribution registry，plan 只读本机
 distribution metadata 而不导入 SDK，并冻结 source、dataset、v3 SHA、adapter/package/
 code/schema/rule/threshold/config version、case/request、输出根、网络/QMT需求、副作用和
-阻断原因。execute 的未来时序为 acknowledgement → runtime/scope/version 校验 → 持久化
-一次性 authorization claim → 受控 REAL signer → 固定 runner import → session/evidence。
-当前样本资格、REAL signer 和 runner 均阻断，任何 SDK import 之前失败。
+阻断原因。execute 的未来时序为 acknowledgement → 重建 plan → sample/scope/package/
+output/version 机器前置门 → envelope 签名及 plan SHA 验证 → 持久化一次性 authorization
+claim → 受控 REAL signer → 固定 runner import → session/evidence。所有前置门失败都发生在
+claim 和 import 之前；前置门通过后，后续 signer/runner 失败不释放 authorization。当前样本
+资格、REAL signer 和 runner 均阻断，任何 SDK import 之前失败。
