@@ -28,7 +28,7 @@ def test_runtime_plan_freezes_scope_versions_and_does_not_import_sdk(tmp_path: P
         dataset=DatasetKind.EXCHANGE_CALENDAR,
         output_root=tmp_path,
     )
-    assert plan.sample_spec_version == "s1-07.fixed-sample.v3"
+    assert plan.sample_spec_version == "s1-07.fixed-sample.v4"
     assert plan.adapter_version
     assert plan.package_version == "unavailable"
     assert plan.code_version
@@ -93,7 +93,7 @@ def test_runtime_blocks_before_runner_import_without_eligible_sample_and_real_si
             acknowledgement="I_ACKNOWLEDGE_AUTHORIZED_REAL_SOURCE_VALIDATION",
             authorization=None,
         )
-    assert captured.value.code == "SAMPLE_NOT_PRODUCTION_ELIGIBLE"
+    assert captured.value.code == "CASE_NOT_AUTHORITY_APPROVED"
     assert imports == []
 
 

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from importlib.resources import files
 from types import MappingProxyType
+from typing import cast
 
 from quantking.common.time import TradingDate
 from quantking.data.adapters.warehouse.manifest import compute_sha256
@@ -23,12 +24,16 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 FIXED_SAMPLE_V1_SHA256 = "bc40271a632e0f8b4bae493806bf3d316897857a1102ed01b70f2bb46c632bee"
 FIXED_SAMPLE_V2_SHA256 = "03d3d6c1e898b0746b7c5ab3911917a600fa3975f802c1d414fd0b6196c80dfb"
 FIXED_SAMPLE_V3_SHA256 = "5b5bf202e17181dfcbd9159f261dc9b4c636fb7641a3786523b42f952c6f3200"
+FIXED_SAMPLE_V4_SHA256 = "859726293e8ed2e77663b6a4168b29a2cfd48070236ec5b8815ad2ee3b5904d7"
 FIXED_SAMPLE_V1_BYTES_SHA256 = "aafb03db4a3845aa710848dc1f12542350afbb57d6edae466cf0978b5c0bc249"
 FIXED_SAMPLE_V2_RELEASE_BYTES_SHA256 = (
     "2b692c631018c1e600680af329d3936dd98267d9d82ffdbcbe854b3ca8574cb8"
 )
 FIXED_SAMPLE_V3_RELEASE_BYTES_SHA256 = (
     "52bc879ed5f42ea6a8fe0d6b489d4d9c1153e3568379d614539b65ca207e72eb"
+)
+FIXED_SAMPLE_V4_RELEASE_BYTES_SHA256 = (
+    "48b054df659423c93b198aa63660892ba221db9c2d3afd008715ed8bca3c6034"
 )
 
 
@@ -53,8 +58,37 @@ class SamplePurpose(StrEnum):
 
 
 class SampleEligibility(StrEnum):
+    """Sample-wide eligibility contract.
+
+    S1-07B-FINAL introduced ``VALIDATION_READY_WITH_BLOCKED_CASES`` to replace
+    the previous all-or-nothing ``PRODUCTION_ELIGIBLE`` gate. A sample at this
+    tier may drive runtime preflight for the cases it explicitly approves, but
+    never claims all 17 authoritative purposes are production-ready.
+    """
+
     FRAMEWORK_ONLY = "FRAMEWORK_ONLY"
     PRODUCTION_ELIGIBLE = "PRODUCTION_ELIGIBLE"
+    VALIDATION_READY_WITH_BLOCKED_CASES = "VALIDATION_READY_WITH_BLOCKED_CASES"
+
+
+class CaseEligibility(StrEnum):
+    """Per-case authority eligibility.
+
+    ``FRAMEWORK_ONLY`` cases only validate request/schema/unit contracts; they
+    carry no authoritative fact and cannot enter S1-07C runtime.
+    ``AUTHORITY_APPROVED`` cases are bound to a verified, locally approved
+    reference bundle and may pass runtime preflight (still subject to provider
+    package, REAL signer and authorization gates).
+    ``VALIDATION_READY`` is reserved for future cases that have complete
+    reference evidence but await REAL provider response.
+    ``BLOCKED_REFERENCE`` marks a case whose reference evidence is incomplete,
+    conflicting or has been revoked; it cannot pass runtime preflight.
+    """
+
+    FRAMEWORK_ONLY = "FRAMEWORK_ONLY"
+    AUTHORITY_APPROVED = "AUTHORITY_APPROVED"
+    VALIDATION_READY = "VALIDATION_READY"
+    BLOCKED_REFERENCE = "BLOCKED_REFERENCE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +216,13 @@ class FixedSampleSpec:
             raise ValueError("production-eligible sample cannot have missing purposes")
         if self.eligibility is SampleEligibility.FRAMEWORK_ONLY and not missing:
             raise ValueError("framework-only sample must declare missing authoritative purposes")
+        if (
+            self.eligibility is SampleEligibility.VALIDATION_READY_WITH_BLOCKED_CASES
+            and not missing
+        ):
+            raise ValueError(
+                "validation-ready-with-blocked-cases sample must declare missing purposes"
+            )
         object.__setattr__(self, "missing_authoritative_purposes", missing)
         required = tuple(
             sorted(
@@ -199,8 +240,8 @@ class FixedSampleSpec:
             self.previous_sample_spec_sha256
         ):
             raise ValueError("previous_sample_spec_sha256 must be a lowercase SHA-256")
-        if required and set(missing) != {item.value for item in required}:
-            raise ValueError("framework v3 must declare every authoritative purpose as missing")
+        if required and not set(missing).issubset({item.value for item in required}):
+            raise ValueError("missing purposes must be a subset of required authoritative purposes")
         if self.compute_sha256() != self.sample_spec_sha256:
             raise ValueError("sample_spec_sha256 does not bind the canonical sample content")
 
@@ -229,7 +270,10 @@ class FixedSampleSpec:
 
     @property
     def fixed_sample_gate_eligible(self) -> bool:
-        return self.eligibility is SampleEligibility.PRODUCTION_ELIGIBLE
+        return self.eligibility in (
+            SampleEligibility.PRODUCTION_ELIGIBLE,
+            SampleEligibility.VALIDATION_READY_WITH_BLOCKED_CASES,
+        )
 
 
 def _canonical_json(value: object) -> str:
@@ -380,6 +424,60 @@ def load_fixed_sample_v3() -> FixedSampleSpec:
     return fixed_sample_v3_from_release(packaged_v3_release_payload())
 
 
+def packaged_v4_release_payload() -> dict[str, object]:
+    resource = files("quantking.data.validation").joinpath("fixed_sample.release.v4.json")
+    raw = resource.read_bytes()
+    payload = json.loads(raw)
+    if (
+        not isinstance(payload, dict)
+        or raw.rstrip(b"\r\n") != _canonical_json(payload).encode("utf-8")
+        or compute_sha256(raw) != FIXED_SAMPLE_V4_RELEASE_BYTES_SHA256
+    ):
+        raise ValueError("controlled v4 release bytes are invalid")
+    return dict(payload)
+
+
+def fixed_sample_v4_from_release(release: Mapping[str, object]) -> FixedSampleSpec:
+    controlled = packaged_v4_release_payload()
+    if dict(release) != controlled:
+        raise ValueError("controlled v4 release content mismatch")
+    v3 = load_fixed_sample_v3()
+    expected_fields = {
+        "additional_cases",
+        "eligibility",
+        "missing_authoritative_purposes",
+        "previous_sample_spec_sha256",
+        "required_authoritative_purposes",
+        "sample_spec_sha256",
+        "sample_spec_version",
+    }
+    if (
+        set(release) != expected_fields
+        or release["sample_spec_version"] != "s1-07.fixed-sample.v4"
+        or release["sample_spec_sha256"] != FIXED_SAMPLE_V4_SHA256
+        or release["previous_sample_spec_sha256"] != v3.sample_spec_sha256
+        or release["eligibility"] != SampleEligibility.VALIDATION_READY_WITH_BLOCKED_CASES.value
+    ):
+        raise ValueError("controlled v4 release lineage mismatch")
+    payload, _base = _base_payload_and_spec()
+    promoted = dict(payload)
+    # Combine v1 base cases with the additional authority cases declared by v4.
+    additional_cases = cast("list[dict[str, object]]", release["additional_cases"])
+    promoted["cases"] = cast("list[dict[str, object]]", payload["cases"]) + additional_cases
+    # Promote v4 metadata; fixed_sample_from_dict reads these top-level keys.
+    promoted["eligibility"] = release["eligibility"]
+    promoted["missing_authoritative_purposes"] = release["missing_authoritative_purposes"]
+    promoted["previous_sample_spec_sha256"] = release["previous_sample_spec_sha256"]
+    promoted["required_authoritative_purposes"] = release["required_authoritative_purposes"]
+    promoted["sample_spec_version"] = release["sample_spec_version"]
+    promoted["sample_spec_sha256"] = release["sample_spec_sha256"]
+    return fixed_sample_from_dict(promoted)
+
+
+def load_fixed_sample_v4() -> FixedSampleSpec:
+    return fixed_sample_v4_from_release(packaged_v4_release_payload())
+
+
 def load_packaged_fixed_sample() -> FixedSampleSpec:
     """Load the S1-07A v2 sample used by already-accepted evidence contracts."""
     return load_fixed_sample_v2()
@@ -392,6 +490,9 @@ __all__ = [
     "FIXED_SAMPLE_V2_SHA256",
     "FIXED_SAMPLE_V3_RELEASE_BYTES_SHA256",
     "FIXED_SAMPLE_V3_SHA256",
+    "FIXED_SAMPLE_V4_RELEASE_BYTES_SHA256",
+    "FIXED_SAMPLE_V4_SHA256",
+    "CaseEligibility",
     "FixedSampleCase",
     "FixedSampleSpec",
     "SampleEligibility",
@@ -399,9 +500,12 @@ __all__ = [
     "SampleReference",
     "fixed_sample_from_dict",
     "fixed_sample_v3_from_release",
+    "fixed_sample_v4_from_release",
     "load_fixed_sample_v1",
     "load_fixed_sample_v2",
     "load_fixed_sample_v3",
+    "load_fixed_sample_v4",
     "load_packaged_fixed_sample",
     "packaged_v3_release_payload",
+    "packaged_v4_release_payload",
 ]

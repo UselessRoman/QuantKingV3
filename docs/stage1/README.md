@@ -21,7 +21,9 @@ Stage 1 的目标是完成首个可发布、可查询和可追溯的 A 股日频
 - S1-07A 已于 2026-07-29 在提交 `37512be531e15bbd5a698e6a227b0753781ef5e6`
   完成主验收。该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为
   BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
-- S1-07B-R1 离线准备修复已提交，权威样本资格仍阻断，等待外部只读授权及人工复核。
+- S1-07B 最终实现已提交、等待主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED
+  case（603377.SH ST）、reference bundle v2 证据链和按 case 放行运行时已定版；
+  17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
   S1-07C/D、S1-08 尚未开始、未获授权。
 
 ## 授权边界
@@ -74,7 +76,9 @@ S1-05 已于 2026-07-27 完成主验收（提交
 [S1-06 主验收证据](S1-06_ACCEPTANCE.md)；S1-07A 已于 2026-07-29 在提交
 `37512be531e15bbd5a698e6a227b0753781ef5e6` 完成主验收。该验收仅覆盖离线验证框架及其
 信任边界；24 个 source×dataset 单元仍为 BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
-S1-07B-R1 离线准备修复已提交，权威样本资格仍阻断，等待外部只读授权及人工复核。
+S1-07B 最终实现已提交、等待主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED
+case（603377.SH ST）、reference bundle v2 证据链和按 case 放行运行时已定版；
+17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
 S1-07C/D、S1-08 尚未开始、未获授权。
 
 ## S1-06 主验收
@@ -114,7 +118,7 @@ React 页面覆盖总览、来源、批次、版本与显式预览、质量、�
 - [验收矩阵](ACCEPTANCE.md)
 - [S1-06 主验收证据](S1-06_ACCEPTANCE.md)
 - [S1-07A 离线框架交接证据](S1-07A_ACCEPTANCE.md)
-- [S1-07B 离线准备交接](S1-07B_ACCEPTANCE.md)
+- [S1-07B 最终实现交接](S1-07B_ACCEPTANCE.md)
 - [S1-02 主验收证据](S1-02_ACCEPTANCE.md)
 - [S1-03 离线验收证据](S1-03_ACCEPTANCE.md)
 - [S1-04 主验收证据](S1-04_ACCEPTANCE.md)

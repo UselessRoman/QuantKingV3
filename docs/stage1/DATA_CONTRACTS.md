@@ -14,14 +14,24 @@
 S1-07A 已于 2026-07-29 在提交 `37512be531e15bbd5a698e6a227b0753781ef5e6`
 完成主验收。该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为
 BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
-S1-07B-R1 离线准备修复已提交，权威样本资格仍阻断，等待外部只读授权及人工复核。
+S1-07B 最终实现已提交、等待主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED
+case（603377.SH ST）、reference bundle v2 证据链和按 case 放行运行时已定版；
+17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
 S1-07C/D、S1-08 尚未开始、未获授权。
 
-S1-07B 新增的 v3 release 不改写 v1/v2。v3 规范 sample SHA 为
-`5b5bf202e17181dfcbd9159f261dc9b4c636fb7641a3786523b42f952c6f3200`，直接绑定 v2 SHA
-`03d3d6c1e898b0746b7c5ab3911917a600fa3975f802c1d414fd0b6196c80dfb`。v3 当前继承 v2
-的 11 个框架 case，仅用于 plan 与合同测试；它没有新增任何未经权威材料核验的事件证券或
-日期，所有生产权威用途仍列为缺失，因此固定样本 gate 必须为 false。
+S1-07B 的固定样本版本链为：v1 → v2 → v3 → v4。v4 原样继承 v3 的 11 个 framework case
+（保持 `FRAMEWORK_ONLY`），并新增 603377.SH ST 权威 case（`AUTHORITY_APPROVED`）。v4
+全局 release 资格为 `VALIDATION_READY_WITH_BLOCKED_CASES`，不使用全局
+`PRODUCTION_ELIGIBLE`。v4 sample SHA 为
+`859726293e8ed2e77663b6a4168b29a2cfd48070236ec5b8815ad2ee3b5904d7`，直接绑定 v3 SHA
+`5b5bf202e17181dfcbd9159f261dc9b4c636fb7641a3786523b42f952c6f3200`。后续新增材料必须
+创建 v5+，不得修改 v4。
+
+权威 reference bundle v2 绑定 CNINFO 公告 1225449700（临 2026-110），分别建模
+`document_date`（2026-07-30）、`publication_date`/`known_from_date`（2026-07-31）和
+`usable_for_decisions_after`（2026-07-31 market close）。回溯确认事实的
+`effective_date`（2026-03-23、2026-04-18）不得被表达为当时已知。`LOCAL_OWNER` 审批只
+证明用户复核了固定样本事实，不等同于 REAL provider signer。
 
 reference bundle 只保存必要结构化事实、短 statement、document identifier、locator 和
 原始材料 SHA，不提交公告或网页大段正文。每个 `CaseFactBinding` 必须精确匹配 case 的

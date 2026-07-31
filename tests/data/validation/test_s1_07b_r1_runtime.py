@@ -22,7 +22,7 @@ from quantking.data.validation.runtime import (
     RuntimeValidationPlan,
     ValidationSource,
 )
-from quantking.data.validation.samples import load_fixed_sample_v3
+from quantking.data.validation.samples import load_fixed_sample_v3, load_fixed_sample_v4
 
 ACK = "I_ACKNOWLEDGE_AUTHORIZED_REAL_SOURCE_VALIDATION"
 VERSION_FIELDS = (
@@ -74,7 +74,7 @@ class SpyClaimStore:
 
 
 def _eligible_sample(*, empty: bool = False) -> SimpleNamespace:
-    sample = load_fixed_sample_v3()
+    sample = load_fixed_sample_v4()
     return SimpleNamespace(
         cases=() if empty else sample.cases,
         sample_spec_version=sample.sample_spec_version,
@@ -83,12 +83,46 @@ def _eligible_sample(*, empty: bool = False) -> SimpleNamespace:
     )
 
 
+def _patch_cases_approved(monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Patch the verifier so all selected cases pass the case-level gate.
+
+    This is a test-only bypass for runtime mechanics tests (authorization
+    consumption, version drift). It does NOT exist in the production runtime
+    API; callers cannot forge case eligibility.
+    """
+    from quantking.data.validation.authority_bundle import (
+        ReviewDecisionStatus,
+        VerifiedAuthorityReferenceBundle,
+    )
+    from quantking.data.validation.samples import CaseEligibility
+
+    sample = load_fixed_sample_v4()
+    case_eligibilities = {case.case_id: CaseEligibility.AUTHORITY_APPROVED for case in sample.cases}
+    fake = VerifiedAuthorityReferenceBundle(
+        bundle_id="test-mechanics-bundle",
+        manifest_sha256="a" * 64,
+        sample_spec_version=sample.sample_spec_version,
+        sample_spec_sha256=sample.sample_spec_sha256,
+        previous_sample_spec_sha256=sample.previous_sample_spec_sha256 or "",
+        reference_inventory_sha256="b" * 64,
+        approved_case_ids=frozenset(case_eligibilities),
+        review_decision_status=ReviewDecisionStatus.APPROVED,
+        case_eligibilities=case_eligibilities,
+    )
+    monkeypatch.setattr(
+        "quantking.data.validation.runtime.AuthorityReferenceBundleVerifier.verify",
+        lambda self, *, directory, sample: fake,
+    )
+    return Path("fake-bundle")
+
+
 def _runtime(
     *,
     package: str | None = "1.2.3",
     claim_store: object | None = None,
     authority: FakeAuthorizationAuthority | None = None,
     invocation: bool = True,
+    reference_bundle_root: Path | None = None,
 ) -> RealValidationRuntime:
     return RealValidationRuntime(
         registry=ControlledRunnerRegistry.s1_07b(),
@@ -97,6 +131,7 @@ def _runtime(
         authorization_verifier=authority,
         runtime_authorization_verifier=AcceptRuntimeAuthorization(),
         invocation_id=new_entity_id("data_invocation") if invocation else None,
+        reference_bundle_root=reference_bundle_root,
     )
 
 
@@ -129,13 +164,18 @@ def _execute(
     *,
     output_root: Path,
     authorization: RuntimeAuthorizationEnvelope | None,
+    case_ids: tuple[str, ...] | None = None,
+    reference_bundle_directory: Path | None = None,
+    dataset: DatasetKind = DatasetKind.EXCHANGE_CALENDAR,
 ) -> None:
     runtime.execute(
         source=ValidationSource.XTQUANT,
-        dataset=DatasetKind.EXCHANGE_CALENDAR,
+        dataset=dataset,
         output_root=output_root,
         acknowledgement=ACK,
         authorization=authorization,
+        case_ids=case_ids,
+        reference_bundle_directory=reference_bundle_directory,
     )
 
 
@@ -145,7 +185,7 @@ def test_unresolved_package_version_fails_before_claim_or_import(
     monkeypatch: pytest.MonkeyPatch,
     value: str | None,
 ) -> None:
-    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v3", _eligible_sample)
+    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v4", _eligible_sample)
     imports: list[str] = []
     monkeypatch.setattr(
         "quantking.data.validation.runtime._import_runner",
@@ -171,7 +211,7 @@ def test_non_exact_or_unstable_package_version_is_invalid(
     monkeypatch: pytest.MonkeyPatch,
     value: str,
 ) -> None:
-    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v3", _eligible_sample)
+    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v4", _eligible_sample)
     claims = SpyClaimStore()
     runtime = _runtime(package=value, claim_store=claims)
 
@@ -186,7 +226,7 @@ def test_package_version_drift_between_plan_and_execute_does_not_claim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v3", _eligible_sample)
+    bundle_dir = _patch_cases_approved(monkeypatch)
     authority = FakeAuthorizationAuthority()
     claims = SpyClaimStore()
     runtime = RealValidationRuntime(
@@ -196,16 +236,25 @@ def test_package_version_drift_between_plan_and_execute_does_not_claim(
         authorization_verifier=authority,
         runtime_authorization_verifier=AcceptRuntimeAuthorization(),
         invocation_id=new_entity_id("data_invocation"),
+        reference_bundle_root=tmp_path,
     )
     original = runtime.plan(
         source=ValidationSource.XTQUANT,
         dataset=DatasetKind.EXCHANGE_CALENDAR,
         output_root=tmp_path,
+        case_ids=("calendar_sh",),
+        reference_bundle_directory=bundle_dir,
     )
     envelope = _envelope(original, authority=authority, output_root=tmp_path)
 
     with pytest.raises(RealRuntimeExecutionError) as captured:
-        _execute(runtime, output_root=tmp_path, authorization=envelope)
+        _execute(
+            runtime,
+            output_root=tmp_path,
+            authorization=envelope,
+            case_ids=("calendar_sh",),
+            reference_bundle_directory=bundle_dir,
+        )
 
     assert captured.value.code == "RUNTIME_VERSION_MISMATCH"
     assert claims.calls == 0
@@ -228,14 +277,21 @@ def test_each_non_package_runtime_version_drift_fails_before_claim(
     monkeypatch: pytest.MonkeyPatch,
     field: str,
 ) -> None:
-    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v3", _eligible_sample)
+    bundle_dir = _patch_cases_approved(monkeypatch)
     authority = FakeAuthorizationAuthority()
     claims = SpyClaimStore()
-    runtime = _runtime(package="1.2.3", claim_store=claims, authority=authority)
+    runtime = _runtime(
+        package="1.2.3",
+        claim_store=claims,
+        authority=authority,
+        reference_bundle_root=tmp_path,
+    )
     plan = runtime.plan(
         source=ValidationSource.XTQUANT,
         dataset=DatasetKind.EXCHANGE_CALENDAR,
         output_root=tmp_path,
+        case_ids=("calendar_sh",),
+        reference_bundle_directory=bundle_dir,
     )
     versions = _versions(plan)
     versions[field] = f"{versions[field]}.drift"
@@ -247,6 +303,8 @@ def test_each_non_package_runtime_version_drift_fails_before_claim(
             authorization=_envelope(
                 plan, authority=authority, output_root=tmp_path, versions=versions
             ),
+            case_ids=("calendar_sh",),
+            reference_bundle_directory=bundle_dir,
         )
 
     assert captured.value.code == "RUNTIME_VERSION_MISMATCH"
@@ -258,7 +316,7 @@ def test_empty_source_dataset_scope_fails_before_claim_or_import(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "quantking.data.validation.runtime.load_fixed_sample_v3",
+        "quantking.data.validation.runtime.load_fixed_sample_v4",
         lambda: _eligible_sample(empty=True),
     )
     imports: list[str] = []
@@ -281,7 +339,7 @@ def test_reparse_output_root_fails_before_claim_or_import(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v3", _eligible_sample)
+    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v4", _eligible_sample)
     unsafe = tmp_path / "linked"
     unsafe.mkdir()
     monkeypatch.setattr(
@@ -308,7 +366,7 @@ def test_lexical_output_root_escape_fails_before_authorization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v3", _eligible_sample)
+    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v4", _eligible_sample)
     claims = SpyClaimStore()
     runtime = _runtime(package="1.2.3", claim_store=claims)
     unsafe = tmp_path / "managed" / ".." / "escaped"
@@ -323,7 +381,7 @@ def test_lexical_output_root_escape_fails_before_authorization(
 def test_relative_output_root_returns_stable_error_before_authorization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v3", _eligible_sample)
+    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v4", _eligible_sample)
     claims = SpyClaimStore()
     runtime = _runtime(package="1.2.3", claim_store=claims)
 
@@ -338,7 +396,7 @@ def test_preflight_passes_then_missing_signer_consumes_exactly_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v3", _eligible_sample)
+    bundle_dir = _patch_cases_approved(monkeypatch)
     imports: list[str] = []
     monkeypatch.setattr(
         "quantking.data.validation.runtime._import_runner",
@@ -346,11 +404,18 @@ def test_preflight_passes_then_missing_signer_consumes_exactly_once(
     )
     authority = FakeAuthorizationAuthority()
     claims = SpyClaimStore()
-    runtime = _runtime(package="1.2.3", claim_store=claims, authority=authority)
+    runtime = _runtime(
+        package="1.2.3",
+        claim_store=claims,
+        authority=authority,
+        reference_bundle_root=tmp_path,
+    )
     plan = runtime.plan(
         source=ValidationSource.XTQUANT,
         dataset=DatasetKind.EXCHANGE_CALENDAR,
         output_root=tmp_path,
+        case_ids=("calendar_sh",),
+        reference_bundle_directory=bundle_dir,
     )
 
     with pytest.raises(RealRuntimeExecutionError) as captured:
@@ -358,6 +423,8 @@ def test_preflight_passes_then_missing_signer_consumes_exactly_once(
             runtime,
             output_root=tmp_path,
             authorization=_envelope(plan, authority=authority, output_root=tmp_path),
+            case_ids=("calendar_sh",),
+            reference_bundle_directory=bundle_dir,
         )
 
     assert captured.value.code == "REAL_SIGNER_UNAVAILABLE"
@@ -369,23 +436,27 @@ def test_concurrent_execute_consumes_one_authorization_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("quantking.data.validation.runtime.load_fixed_sample_v3", _eligible_sample)
+    bundle_dir = _patch_cases_approved(monkeypatch)
     authority = FakeAuthorizationAuthority()
     first = _runtime(
         package="1.2.3",
         claim_store=AuthorizationClaimStore(claim_root=tmp_path / "claims"),
         authority=authority,
+        reference_bundle_root=tmp_path,
     )
     plan = first.plan(
         source=ValidationSource.XTQUANT,
         dataset=DatasetKind.EXCHANGE_CALENDAR,
         output_root=tmp_path / "output",
+        case_ids=("calendar_sh",),
+        reference_bundle_directory=bundle_dir,
     )
     envelope = _envelope(plan, authority=authority, output_root=tmp_path / "output")
     second = _runtime(
         package="1.2.3",
         claim_store=AuthorizationClaimStore(claim_root=tmp_path / "claims"),
         authority=authority,
+        reference_bundle_root=tmp_path,
     )
 
     def invoke(runtime: RealValidationRuntime) -> str:
@@ -394,6 +465,8 @@ def test_concurrent_execute_consumes_one_authorization_only(
                 runtime,
                 output_root=tmp_path / "output",
                 authorization=envelope,
+                case_ids=("calendar_sh",),
+                reference_bundle_directory=bundle_dir,
             )
         except RealRuntimeExecutionError as error:
             return error.code

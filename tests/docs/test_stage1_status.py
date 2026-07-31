@@ -37,7 +37,11 @@ _S1_07A_STATUS = (
     "该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为 "
     "BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。"
 )
-_S1_07B_STATUS = "S1-07B-R1 离线准备修复已提交，权威样本资格仍阻断，等待外部只读授权及人工复核。"
+_S1_07B_STATUS = (
+    "S1-07B 最终实现已提交、等待主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED "
+    "case（603377.SH ST）、reference bundle v2 证据链和按 case 放行运行时已定版； "
+    "17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。"
+)
 
 
 def _read(path: Path) -> str:
@@ -138,7 +142,7 @@ class TestStage1DocsExist:
             text = _read(_STAGE1_DIR / name)
             assert "79f9fa3e682e212cf74e7886a04c6fb52158f302" in text
             assert "S1-02 主验收证据" in text
-            assert "S1-07B-R1 离线准备修复已提交" in text
+            assert "S1-07B 最终实现已提交、等待主验收" in text
             assert "S1-07C/D、S1-08 尚未开始、未获授权" in text
         evidence = _read(_STAGE1_DIR / "S1-02_ACCEPTANCE.md")
         assert "S1-02（Warehouse、原子发布与显式版本查询）完成主验收" in evidence

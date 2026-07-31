@@ -21,13 +21,21 @@ from quantking.data.comparison.thresholds import THRESHOLD_RULE_VERSION
 from quantking.data.models import DatasetKind
 from quantking.data.quality.rules import default_rule_set
 from quantking.data.schemas import descriptor_for
+from quantking.data.validation.authority_bundle import (
+    AuthorityBundleVerificationError,
+    AuthorityReferenceBundleVerifier,
+)
 from quantking.data.validation.authorization import (
     AuthorizationClaimError,
     AuthorizationClaimStore,
     AuthorizationVerifier,
     ExecutionAuthorization,
 )
-from quantking.data.validation.samples import load_fixed_sample_v3
+from quantking.data.validation.samples import (
+    CaseEligibility,
+    FixedSampleCase,
+    load_fixed_sample_v4,
+)
 
 _STABLE_PACKAGE_VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+)+$")
 _UNRESOLVED_PACKAGE_VERSIONS = frozenset({"", "latest", "unavailable", "unknown"})
@@ -198,6 +206,8 @@ class RuntimeValidationPlan:
     unavoidable_side_effects: tuple[str, ...]
     blocking_reasons: tuple[str, ...]
     sdk_loaded: bool
+    reference_bundle_id: str
+    reference_bundle_sha256: str
     plan_sha256: str
 
     def unsigned_payload(self) -> dict[str, object]:
@@ -266,7 +276,15 @@ class RuntimeRunner(Protocol):
 
 
 class RealValidationRuntime:
-    """S1-07B readiness runtime; REAL signer/runner enablement remains absent."""
+    """S1-07B readiness runtime; REAL signer/runner enablement remains absent.
+
+    S1-07B-FINAL replaces the all-or-nothing sample-level production gate with
+    per-case authority gating. The runtime loads v4 by default and only allows
+    cases with AUTHORITY_APPROVED reference bindings to pass preflight. Cases
+    that are FRAMEWORK_ONLY, BLOCKED_REFERENCE, or unbound are rejected at the
+    case-level gate. Missing purposes that are not selected do not block the
+    plan; they remain in the coverage backlog.
+    """
 
     def __init__(
         self,
@@ -277,6 +295,7 @@ class RealValidationRuntime:
         authorization_verifier: AuthorizationVerifier | None = None,
         runtime_authorization_verifier: RuntimeAuthorizationVerifier | None = None,
         invocation_id: EntityId | None = None,
+        reference_bundle_root: Path | None = None,
     ) -> None:
         self.registry = registry
         self._package_probe = package_probe
@@ -284,6 +303,7 @@ class RealValidationRuntime:
         self._authorization_verifier = authorization_verifier
         self._runtime_authorization_verifier = runtime_authorization_verifier
         self._invocation_id = invocation_id
+        self._reference_bundle_root = reference_bundle_root
 
     def plan(
         self,
@@ -291,6 +311,8 @@ class RealValidationRuntime:
         source: ValidationSource,
         dataset: DatasetKind,
         output_root: Path,
+        case_ids: tuple[str, ...] | None = None,
+        reference_bundle_directory: Path | None = None,
     ) -> RuntimeValidationPlan:
         if not isinstance(source, ValidationSource):
             raise TypeError("source must be a ValidationSource")
@@ -298,20 +320,70 @@ class RealValidationRuntime:
             raise TypeError("dataset must be a DatasetKind")
         if not isinstance(output_root, Path) or not output_root.is_absolute():
             raise ValueError("output_root must be an absolute Path")
+        if case_ids is not None:
+            if not isinstance(case_ids, tuple) or not case_ids:
+                raise ValueError("case_ids must be a non-empty tuple when provided")
+            for case_id in case_ids:
+                if not isinstance(case_id, str) or not case_id.strip():
+                    raise ValueError("case_ids must contain non-empty strings")
         descriptor = self.registry.descriptor_for(source)
         package_version = self._package_probe.exact_version(descriptor.distribution_name)
         package_display = package_version or "unavailable"
-        sample = load_fixed_sample_v3()
-        cases = tuple(
-            case
-            for case in sample.cases
-            if case.dataset is dataset and source.value in case.applicable_sources
-        )
+        sample = load_fixed_sample_v4()
+        # Select cases: explicit case_ids take precedence; otherwise all cases
+        # matching the dataset and source are selected (backward compatibility).
+        if case_ids is not None:
+            sample_cases = {case.case_id: case for case in sample.cases}
+            selected: list[FixedSampleCase] = []
+            for cid in case_ids:
+                case = sample_cases.get(cid)
+                if case is None:
+                    raise ValueError(f"case_ids contains unknown case: {cid}")
+                if case.dataset is not dataset:
+                    raise ValueError(f"case_id {cid} does not belong to dataset {dataset.value}")
+                if source.value not in case.applicable_sources:
+                    raise ValueError(f"case_id {cid} is not applicable to source {source.value}")
+                selected.append(case)
+            cases = tuple(selected)
+        else:
+            cases = tuple(
+                case
+                for case in sample.cases
+                if case.dataset is dataset and source.value in case.applicable_sources
+            )
+
+        # Determine per-case eligibility via the authority reference bundle.
+        reference_bundle_id = ""
+        reference_bundle_sha = ""
+        case_eligibilities: dict[str, CaseEligibility] = {
+            case.case_id: CaseEligibility.FRAMEWORK_ONLY for case in cases
+        }
+        if reference_bundle_directory is not None:
+            if self._reference_bundle_root is None:
+                raise ValueError("reference_bundle_directory requires reference_bundle_root")
+            try:
+                verified = AuthorityReferenceBundleVerifier(
+                    root=self._reference_bundle_root
+                ).verify(directory=reference_bundle_directory, sample=sample)
+            except AuthorityBundleVerificationError:
+                raise ValueError("reference bundle verification failed") from None
+            reference_bundle_id = verified.bundle_id
+            reference_bundle_sha = verified.manifest_sha256
+            for case in cases:
+                eligibility = verified.case_eligibilities.get(case.case_id)
+                if eligibility is not None:
+                    case_eligibilities[case.case_id] = eligibility
+
         reasons = ["REAL_SIGNER_NOT_INITIALIZED", "PROVIDER_RUNNER_NOT_ENABLED"]
         if not sample.fixed_sample_gate_eligible:
             reasons.append("AUTHORITATIVE_SAMPLE_FRAMEWORK_ONLY")
         if not cases:
             reasons.append("SAMPLE_SCOPE_EMPTY")
+        if any(
+            case_eligibilities[case.case_id] is not CaseEligibility.AUTHORITY_APPROVED
+            for case in cases
+        ):
+            reasons.append("CASE_NOT_AUTHORITY_APPROVED")
         package_failure = _package_version_failure(package_display)
         if package_failure == "PROVIDER_PACKAGE_VERSION_UNRESOLVED":
             reasons.append("PROVIDER_PACKAGE_VERSION_UNRESOLVED")
@@ -336,6 +408,8 @@ class RealValidationRuntime:
             "output_root": str(root),
             "package_version": package_display,
             "qmt_required": descriptor.qmt_required,
+            "reference_bundle_id": reference_bundle_id,
+            "reference_bundle_sha256": reference_bundle_sha,
             "request_ranges": [
                 f"{case.code or case.exchange}:{case.start_date}:{case.end_date}" for case in cases
             ],
@@ -377,6 +451,8 @@ class RealValidationRuntime:
             unavoidable_side_effects=tuple(unsigned["unavoidable_side_effects"]),  # type: ignore[arg-type]
             blocking_reasons=tuple(sorted(reasons)),
             sdk_loaded=False,
+            reference_bundle_id=reference_bundle_id,
+            reference_bundle_sha256=reference_bundle_sha,
             plan_sha256=compute_sha256(_canonical(unsigned)),
         )
 
@@ -388,6 +464,8 @@ class RealValidationRuntime:
         output_root: Path,
         acknowledgement: str,
         authorization: RuntimeAuthorizationEnvelope | None,
+        case_ids: tuple[str, ...] | None = None,
+        reference_bundle_directory: Path | None = None,
     ) -> Path:
         if acknowledgement != _REAL_ACK:
             raise RealRuntimeExecutionError(
@@ -395,7 +473,13 @@ class RealValidationRuntime:
                 "exact real-execution acknowledgement is required",
             )
         try:
-            plan = self.plan(source=source, dataset=dataset, output_root=output_root)
+            plan = self.plan(
+                source=source,
+                dataset=dataset,
+                output_root=output_root,
+                case_ids=case_ids,
+                reference_bundle_directory=reference_bundle_directory,
+            )
         except ValueError:
             if not isinstance(output_root, Path) or not output_root.is_absolute():
                 raise RealRuntimeExecutionError(
@@ -403,11 +487,6 @@ class RealValidationRuntime:
                     "output root is not a safe absolute managed path",
                 ) from None
             raise
-        if not plan.sample_production_eligible:
-            raise RealRuntimeExecutionError(
-                "SAMPLE_NOT_PRODUCTION_ELIGIBLE",
-                "authoritative fixed sample is not production eligible",
-            )
         if not plan.case_ids:
             raise RealRuntimeExecutionError(
                 "SAMPLE_SCOPE_EMPTY",
@@ -420,6 +499,11 @@ class RealValidationRuntime:
                 "provider package version is not an exact stable version",
             )
         _validate_output_root(output_root)
+        if "CASE_NOT_AUTHORITY_APPROVED" in plan.blocking_reasons:
+            raise RealRuntimeExecutionError(
+                "CASE_NOT_AUTHORITY_APPROVED",
+                "selected case is not authority-approved",
+            )
         if authorization is None:
             raise RealRuntimeExecutionError(
                 "AUTHORIZATION_REQUIRED",
