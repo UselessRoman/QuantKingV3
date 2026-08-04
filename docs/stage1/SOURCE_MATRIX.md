@@ -5,7 +5,7 @@
 状态。权威来源是 `src/quantking/data/assessment/matrix.py` 的 `default_source_matrix()`；
 文档不得替代源码与契约测试。
 
-S1-07B-FINAL-R1 修复已提交、等待主验收。首个 603377.SH ST case 已建立有限范围的权威材料
+S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` 完成主验收。首个 603377.SH ST case 已建立有限范围的权威材料
 binding，但尚未产生任何真实来源证据，也没有改变矩阵角色或状态；24 个单元仍全部为
 `BLOCKED_EXTERNAL_VALIDATION`，REAL 稳定运行数为 0。
 

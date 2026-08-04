@@ -38,7 +38,8 @@ _S1_07A_STATUS = (
     "BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。"
 )
 _S1_07B_STATUS = (
-    "S1-07B-FINAL-R1 修复已提交、等待主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED "
+    "S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` "
+    "完成主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED "
     "case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版； "
     "17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。"
 )
@@ -142,7 +143,8 @@ class TestStage1DocsExist:
             text = _read(_STAGE1_DIR / name)
             assert "79f9fa3e682e212cf74e7886a04c6fb52158f302" in text
             assert "S1-02 主验收证据" in text
-            assert "S1-07B-FINAL-R1 修复已提交、等待主验收" in text
+            assert "d60559601efd61de15b41ffa86b4f2f730a69d5e" in text
+            assert "S1-07B" in text and "完成主验收" in text
             assert "S1-07C/D、S1-08 尚未开始、未获授权" in text
         evidence = _read(_STAGE1_DIR / "S1-02_ACCEPTANCE.md")
         assert "S1-02（Warehouse、原子发布与显式版本查询）完成主验收" in evidence
@@ -193,10 +195,20 @@ class TestStage1DocsExist:
         "name",
         ("ACCEPTANCE.md", "QUALITY_CONTRACTS.md", "SOURCE_MATRIX.md"),
     )
-    def test_s1_07b_final_status_has_no_r1_blocked_residue(self, name: str) -> None:
+    def test_s1_07b_main_acceptance_has_no_pending_residue(self, name: str) -> None:
         text = _read(_STAGE1_DIR / name)
         assert "S1-07B-R1 离线准备修复已提交，权威样本资格仍阻断" not in text
-        assert "S1-07B-FINAL-R1 修复已提交" in text
+        assert "S1-07B-FINAL-R1 修复已提交、等待主验收" not in text
+        assert "S1-07B 已于 2026-08-04" in text
+
+    def test_s1_07b_acceptance_evidence_records_independent_results(self) -> None:
+        text = _read(_STAGE1_DIR / "S1-07B_ACCEPTANCE.md")
+        assert "d60559601efd61de15b41ffa86b4f2f730a69d5e" in text
+        assert "136 passed" in text
+        assert "1223 passed, 2 skipped, 3 deselected" in text
+        assert "20260729_0012" in text
+        assert "其余 16 个 purpose" in text
+        assert "REAL 稳定运行数仍为 0" in text
 
 
 class TestRootStatusWordingSynced:

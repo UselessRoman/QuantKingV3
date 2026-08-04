@@ -14,7 +14,7 @@ S1-06 已于 2026-07-28 在提交 `413805074b3a82c2d2a090d2b73c854a238e2e19`
 S1-07A 已于 2026-07-29 在提交 `37512be531e15bbd5a698e6a227b0753781ef5e6`
 完成主验收。该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为
 BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
-S1-07B-FINAL-R1 修复已提交、等待主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED
+S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` 完成主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED
 case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版；
 17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
 S1-07C/D、S1-08 尚未开始、未获授权。
@@ -108,7 +108,7 @@ S1-04 已完成主验收。真实供应商能力仍按单独授权边界管理�
 S1-04 主验收证据见 [独立验收报告](S1-04_ACCEPTANCE.md)。S1-05 已完成主验收，
 证据见 [S1-05 主验收证据](S1-05_ACCEPTANCE.md)。S1-06 已完成主验收，证据见
 [S1-06 主验收证据](S1-06_ACCEPTANCE.md)；
-S1-07A 已完成主验收；S1-07B-FINAL-R1 修复已提交、等待主验收。首个 ST case 已获得有限范围的
+S1-07A 已完成主验收；S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` 完成主验收。首个 ST case 已获得有限范围的
 权威材料批准；其余 purpose 继续作为覆盖 backlog。S1-07C/D、S1-08 尚未开始、未获授权。
 真实 XTQuant 和备用源验证仍阻断 Stage 1 最终验收。
 
@@ -158,8 +158,9 @@ S1-06 已完成主验收：
 ## S1-07A/B 与后续任务
 
 S1-07A 离线验证框架已完成主验收，证据见
-[S1-07A 主验收证据](S1-07A_ACCEPTANCE.md)。S1-07B-FINAL-R1 修复已提交、等待主验收：
+[S1-07A 主验收证据](S1-07A_ACCEPTANCE.md)。S1-07B 已于 2026-08-04 在提交
+`d60559601efd61de15b41ffa86b4f2f730a69d5e` 完成主验收：
 权威核心样本 v4、首个 AUTHORITY_APPROVED case（603377.SH ST）、reference bundle v3
 和按 case 放行运行时已定版。17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
-证据见 [S1-07B 最终实现交接](S1-07B_ACCEPTANCE.md)。
+证据见 [S1-07B 主验收证据](S1-07B_ACCEPTANCE.md)。
 S1-07C/D、S1-08 尚未开始、未获授权，详见 [任务卡](TASKS.md)。

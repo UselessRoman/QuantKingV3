@@ -14,7 +14,7 @@
 S1-07A 已于 2026-07-29 在提交 `37512be531e15bbd5a698e6a227b0753781ef5e6`
 完成主验收。该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为
 BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
-S1-07B-FINAL-R1 修复已提交、等待主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED
+S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` 完成主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED
 case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版；
 17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
 S1-07C/D、S1-08 尚未开始、未获授权。

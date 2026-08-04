@@ -203,7 +203,7 @@ authority tier 必须为 `PRIMARY`；第三方摘要、首页、跨证券/交易
 多余文件、重复 ID、路径逃逸和 reparse point 均失败。S1-07B 没有 production reviewer
 key allowlist，因此合法合成 bundle 也只得到 `FRAMEWORK_ONLY`。
 
-S1-07B-FINAL-R1 修复已提交、等待主验收。v4 以 case 为单位推导权威资格：只有完整匹配
+S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` 完成主验收。v4 以 case 为单位推导权威资格：只有完整匹配
 Git 控制的不可变 authority release（bundle manifest/inventory、sample v4 血缘、CNINFO
 locator、P2B/P2F/PDF SHA、四项事实定位与批准声明 SHA）的正式 bundle 才能得到
 `AUTHORITY_APPROVED`；任意自签 manifest 或调用方声明的 `LOCAL_OWNER/APPROVED` 只能证明

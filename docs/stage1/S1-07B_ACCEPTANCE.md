@@ -1,8 +1,25 @@
-# S1-07B 最终实现交接
+# S1-07B 主验收证据
 
-状态：S1-07B-FINAL-R1 修复已提交、等待主验收。权威核心样本 v4、首个 AUTHORITY_APPROVED
+状态：S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e`
+完成主验收。权威核心样本 v4、首个 AUTHORITY_APPROVED
 case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版。17 个
 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
+
+## 主验收结论
+
+独立主验收以提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` 为基准，确认受控
+authority bundle release、伪造 bundle 失败关闭、不可前视时间关系、统一
+`RealValidationRuntime` 执行入口、claim/import/output 前阻断，以及失败 attempt 和并发冲突
+取证均符合合同。正式 bundle 复验后唯一批准 case 为 `st_warning_603377_sh`。
+
+独立定向验收为 `136 passed`；完整 `scripts/quality.ps1` 退出码为 0，后端为
+`1223 passed, 2 skipped, 3 deselected`，前端 17 项单测、生产构建和 Playwright 全部通过；
+Ruff、mypy、架构边界、Markdown、whitespace 通过；Alembic 唯一 head 为
+`20260729_0012`，验收时工作树干净。
+
+该主验收不改变后续边界：其余 16 个 purpose 仍为 backlog，24 个 source×dataset 单元仍为
+`BLOCKED_EXTERNAL_VALIDATION`，REAL 稳定运行数仍为 0；S1-07C/D、S1-08 尚未开始，Stage 1
+尚未完成。
 
 ## 权威范围校正
 
@@ -320,7 +337,8 @@ Alembic 唯一 head 仍为 `20260729_0012`；S1-07B-FINAL 没有新增 migration
 
 ## 结论
 
-- S1-07B-FINAL-R1 修复已提交、等待主验收。
+- S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e`
+  完成主验收。
 - S1-07C/D、S1-08 未开始、未获授权。
 - Stage 1 尚未完成。
 - REAL 稳定运行数：0。
