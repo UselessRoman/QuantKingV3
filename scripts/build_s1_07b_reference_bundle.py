@@ -5,7 +5,7 @@ This script runs OUTSIDE pytest (which blocks formal paths). It:
 1. Re-verifies the P2B manifest, P2F manifest, P2F inventory, COMPLETE markers,
    per-file SHA-256 and path safety.
 2. Verifies the PDF SHA-256.
-3. Builds the immutable v2 reference bundle binding the 603377.SH ST authority
+3. Builds the immutable v3 reference bundle binding the 603377.SH ST authority
    facts to the v4 fixed sample.
 4. Writes the bundle to the managed reference-bundles root.
 """
@@ -20,9 +20,15 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root / "src"))
 
-from quantking.common.paths import is_reparse_point  # noqa: E402
+from quantking.common.paths import (  # noqa: E402
+    is_reparse_point,
+    resolve_under,
+)
 from quantking.common.time import TradingDate  # noqa: E402
-from quantking.data.adapters.warehouse.manifest import compute_sha256  # noqa: E402
+from quantking.data.adapters.warehouse.manifest import (  # noqa: E402
+    compute_sha256,
+    validate_managed_relative,
+)
 from quantking.data.models import DatasetKind  # noqa: E402
 from quantking.data.validation.authority_bundle import (  # noqa: E402
     AuthorityCaseFactBinding,
@@ -61,6 +67,10 @@ CNINFO_LOCATOR = (
     "https://www.cninfo.com.cn/new/disclosure/detail?stockCode=603377"
     "&orgId=9900023616&announcementId=1225449700&announcementTime=2026-07-31"
 )
+IDENTITY_PARAGRAPH_SHA = "2e81c9678e4d86b28e683e2f2dddf7474de51c8f2def68b7afe308644ece0d39"
+STATUS_0323_PARAGRAPH_SHA = "2f1a2b21bd0b7dc1b419fa8964fefe2cb6d375537f5e8780a4bb760617bed3a8"
+STATUS_0418_PARAGRAPH_SHA = "c69d8f9ebbef147c1524c4e8822534cd7a39fd37c3d44985ac3cc2fb7bb53268"
+CONTINUATION_PARAGRAPH_SHA = "27786c8b65e8124e6685a53881daf438c41f4c447b8bd9f6222ab9c92818457f"
 
 
 def _canonical(value: object) -> bytes:
@@ -102,41 +112,189 @@ def _verify_manifest(root: Path, label: str, expected_sha: str) -> dict:
     if sha_line != expected_line:
         raise RuntimeError(f"{label}: manifest.sha256 line mismatch")
 
-    complete = json.loads(complete_path.read_bytes())
-    if complete.get("manifest_sha256") != actual_sha:
+    complete_bytes = complete_path.read_bytes()
+    complete = json.loads(complete_bytes)
+    if (
+        complete_bytes != _canonical(complete)
+        or not isinstance(complete, dict)
+        or set(complete)
+        != {
+            "authorization_id",
+            "completed_at",
+            "inventory_sha256",
+            "manifest_sha256",
+            "status",
+        }
+        or complete.get("authorization_id") != manifest.get("authorization_id")
+        or complete.get("inventory_sha256") != manifest.get("inventory_sha256")
+        or complete.get("manifest_sha256") != actual_sha
+        or not str(complete.get("status", "")).startswith("COMPLETE")
+    ):
         raise RuntimeError(f"{label}: COMPLETE marker SHA mismatch")
 
     print(f"  {label}: manifest SHA verified ({actual_sha[:16]}...)")
     return manifest
 
 
-def _verify_p2f_inventory(manifest: dict) -> None:
-    """Verify P2F file inventory SHA and per-file SHA-256."""
+def _verify_evidence_inventory(
+    root: Path,
+    manifest: dict,
+    *,
+    label: str,
+    expected_inventory_sha: str | None = None,
+) -> None:
+    """Verify an evidence inventory, exact tree and every declared file."""
     files = manifest.get("files")
     if not isinstance(files, list):
-        raise RuntimeError("P2F: manifest files missing")
+        raise RuntimeError(f"{label}: manifest files missing")
+    if any(
+        not isinstance(entry, dict) or set(entry) != {"path", "sha256", "size"} for entry in files
+    ):
+        raise RuntimeError(f"{label}: inventory entry schema mismatch")
     inventory_canonical = _canonical(files)
     inventory_sha = compute_sha256(inventory_canonical)
-    if inventory_sha != EXPECTED_P2F_INVENTORY_SHA:
-        raise RuntimeError(
-            f"P2F inventory SHA mismatch: {inventory_sha} != {EXPECTED_P2F_INVENTORY_SHA}"
-        )
-    print(f"  P2F inventory SHA verified ({inventory_sha[:16]}...)")
+    if inventory_sha != manifest.get("inventory_sha256"):
+        raise RuntimeError(f"{label}: embedded inventory SHA mismatch")
+    if expected_inventory_sha is not None and inventory_sha != expected_inventory_sha:
+        raise RuntimeError(f"{label}: authorized inventory SHA mismatch")
+    print(f"  {label} inventory SHA verified ({inventory_sha[:16]}...)")
 
+    declared: set[str] = set()
     for entry in files:
         rel = entry["path"]
+        validate_managed_relative(rel, field=f"{label} evidence file")
+        if rel in declared:
+            raise RuntimeError(f"{label}: duplicate inventory path")
+        declared.add(rel)
         expected = entry["sha256"]
         size = entry["size"]
-        target = P2F_ROOT / rel
-        if not target.is_file():
-            raise RuntimeError(f"P2F: file missing: {rel}")
+        target = resolve_under(root, rel)
+        if target.is_symlink() or is_reparse_point(target) or not target.is_file():
+            raise RuntimeError(f"{label}: declared file is unsafe or missing")
         payload = target.read_bytes()
         if len(payload) != size:
-            raise RuntimeError(f"P2F: size mismatch: {rel}")
+            raise RuntimeError(f"{label}: declared file size mismatch")
         actual = compute_sha256(payload)
         if actual != expected:
-            raise RuntimeError(f"P2F: SHA mismatch: {rel}")
-    print(f"  P2F per-file SHA verified ({len(files)} files)")
+            raise RuntimeError(f"{label}: declared file SHA mismatch")
+
+    reserved = manifest.get("reserved_files")
+    if reserved != ["manifest.json", "manifest.sha256", "COMPLETE"]:
+        raise RuntimeError(f"{label}: reserved file contract mismatch")
+    expected_files = declared | set(reserved)
+    actual_files = {item.relative_to(root).as_posix() for item in root.rglob("*") if item.is_file()}
+    expected_directories = {
+        parent.as_posix()
+        for relative in expected_files
+        for parent in Path(relative).parents
+        if parent != Path(".")
+    }
+    actual_directories = {
+        item.relative_to(root).as_posix() for item in root.rglob("*") if item.is_dir()
+    }
+    if actual_files != expected_files or actual_directories != expected_directories:
+        raise RuntimeError(f"{label}: exact evidence tree mismatch")
+    print(f"  {label} per-file SHA and exact tree verified ({len(files)} files)")
+
+
+def _verify_p2f_fact_inputs() -> None:
+    """Cross-bind the four approved facts to the sealed P2F extraction."""
+    payload = (P2F_ROOT / "candidate_facts.json").read_bytes()
+    parsed = json.loads(payload)
+    if payload != _canonical(parsed) or not isinstance(parsed, dict):
+        raise RuntimeError("P2F: candidate facts are not canonical")
+    raw_facts = parsed.get("facts")
+    if not isinstance(raw_facts, list) or any(not isinstance(item, dict) for item in raw_facts):
+        raise RuntimeError("P2F: candidate fact collection is invalid")
+    facts = {str(item.get("fact_id")): item for item in raw_facts}
+    if set(facts) != {
+        "ST-DOCUMENT-IDENTITY-001",
+        "ST-STATUS-20260323",
+        "ST-STATUS-20260418",
+        "ST-CONTINUES-20260730",
+    }:
+        raise RuntimeError("P2F: candidate fact identity mismatch")
+
+    for item in facts.values():
+        if (
+            item.get("purpose") != "ST"
+            or item.get("dataset") != "trading_status"
+            or item.get("security_code") != "603377"
+            or item.get("security_name") != "ST 东时"
+            or item.get("company_name") != "东方时尚驾驶学校股份有限公司"
+            or item.get("announcement_number") != "临2026-110"
+            or item.get("document_date") != "2026-07-30"
+            or item.get("locator_publication_date") != "2026-07-31"
+            or item.get("document_specific_locator") != CNINFO_LOCATOR
+            or item.get("material_sha256") != EXPECTED_PDF_SHA
+            or item.get("reviewer_decision") != "NEEDS_MORE_EVIDENCE"
+        ):
+            raise RuntimeError("P2F: candidate fact common lineage mismatch")
+
+    identity = facts["ST-DOCUMENT-IDENTITY-001"]
+    if identity.get("candidate_fact") != {
+        "announcement_number": "临2026-110",
+        "company_name": "东方时尚驾驶学校股份有限公司",
+        "displayed_security_name": "ST 东时",
+        "document_date": "2026-07-30",
+        "security_code": "603377",
+    } or _locator_projection(identity, "identity") != {
+        "exact_paragraph_sha256": IDENTITY_PARAGRAPH_SHA,
+        "pages": [1],
+    }:
+        raise RuntimeError("P2F: document identity binding mismatch")
+
+    expected_status = {
+        "ST-STATUS-20260323": (
+            "2026-03-23",
+            "《上海证券交易所股票上市规则》第9.8.1条第一款第（七）项",
+            STATUS_0323_PARAGRAPH_SHA,
+            [2],
+        ),
+        "ST-STATUS-20260418": (
+            "2026-04-18",
+            "《上海证券交易所股票上市规则》第9.8.1条第一款第（六）项",
+            STATUS_0418_PARAGRAPH_SHA,
+            [1, 2],
+        ),
+    }
+    for fact_id, (effective_date, basis, paragraph_sha, pages) in expected_status.items():
+        item = facts[fact_id]
+        if (
+            item.get("effective_date") != effective_date
+            or item.get("candidate_fact") != {"basis": basis, "other_risk_warning": True}
+            or _locator_projection(item)
+            != {
+                "exact_paragraph_sha256": paragraph_sha,
+                "pages": pages,
+            }
+        ):
+            raise RuntimeError("P2F: retrospective status binding mismatch")
+
+    continuation = facts["ST-CONTINUES-20260730"]
+    if continuation.get("candidate_fact") != {
+        "displayed_security_name": "ST 东时",
+        "other_risk_warning_continues": True,
+    } or _locator_projection(continuation, "continuation") != {
+        "exact_paragraph_sha256": CONTINUATION_PARAGRAPH_SHA,
+        "pages": [2],
+    }:
+        raise RuntimeError("P2F: continuation binding mismatch")
+    print("  P2F four approved fact inputs and paragraph locators verified")
+
+
+def _locator_projection(item: dict, nested: str | None = None) -> dict[str, object]:
+    locator = item.get("locator")
+    if not isinstance(locator, dict):
+        raise RuntimeError("P2F: fact locator is invalid")
+    if nested is not None:
+        locator = locator.get(nested)
+        if not isinstance(locator, dict):
+            raise RuntimeError("P2F: nested fact locator is invalid")
+    return {
+        "exact_paragraph_sha256": locator.get("exact_paragraph_sha256"),
+        "pages": locator.get("pages"),
+    }
 
 
 def _verify_pdf() -> str:
@@ -154,12 +312,18 @@ def _verify_pdf() -> str:
 
 def _build_draft(pdf_sha: str, p2b_sha: str, p2f_sha: str) -> AuthorityReferenceBundleDraft:
     sample = load_fixed_sample_v4()
+    st_case = next(case for case in sample.cases if case.case_id == "st_warning_603377_sh")
+    if st_case.purpose.value != "ST":
+        raise RuntimeError("controlled ST case purpose mismatch")
     document = AuthorityReferenceDocument(
         reference_id="cninfo-603377-1225449700",
         authority="CNINFO primary disclosure",
         canonical_locator=CNINFO_LOCATOR,
         announcement_id="1225449700",
         announcement_number="临2026-110",
+        security_code="603377.SH",
+        security_name="ST 东时",
+        company_name="东方时尚驾驶学校股份有限公司",
         document_date=TradingDate.from_iso("2026-07-30"),
         publication_date=TradingDate.from_iso("2026-07-31"),
         known_from_date=TradingDate.from_iso("2026-07-31"),
@@ -171,7 +335,7 @@ def _build_draft(pdf_sha: str, p2b_sha: str, p2f_sha: str) -> AuthorityReference
         fact_id="st-document-identity-001",
         reference_id=document.reference_id,
         dataset=DatasetKind.TRADING_STATUS,
-        purpose=sample.cases[0].purpose,  # ST
+        purpose=st_case.purpose,
         code="603377.SH",
         exchange="SH",
         fact_nature=FactNature.IDENTITY,
@@ -180,7 +344,7 @@ def _build_draft(pdf_sha: str, p2b_sha: str, p2f_sha: str) -> AuthorityReference
         known_from_date=TradingDate.from_iso("2026-07-31"),
         usable_for_decisions_after="2026-07-31 market close",
         material_sha256=pdf_sha,
-        paragraph_sha256="2e81c9678e4d86b28e683e2f2dddf7474de51c8f2def68b7afe308644ece0d39",
+        paragraph_sha256=IDENTITY_PARAGRAPH_SHA,
         pages=(1,),
         statement="证券代码：603377 证券简称：ST 东时 公告编号：临 2026-110",
     )
@@ -188,7 +352,7 @@ def _build_draft(pdf_sha: str, p2b_sha: str, p2f_sha: str) -> AuthorityReference
         fact_id="st-status-20260323",
         reference_id=document.reference_id,
         dataset=DatasetKind.TRADING_STATUS,
-        purpose=sample.cases[0].purpose,
+        purpose=st_case.purpose,
         code="603377.SH",
         exchange="SH",
         fact_nature=FactNature.RETROSPECTIVE_CONFIRMATION,
@@ -197,7 +361,7 @@ def _build_draft(pdf_sha: str, p2b_sha: str, p2f_sha: str) -> AuthorityReference
         known_from_date=TradingDate.from_iso("2026-07-31"),
         usable_for_decisions_after="2026-07-31 market close",
         material_sha256=pdf_sha,
-        paragraph_sha256="2f1a2b21bd0b7dc1b419fa8964fefe2cb6d375537f5e8780a4bb760617bed3a8",
+        paragraph_sha256=STATUS_0323_PARAGRAPH_SHA,
         pages=(2,),
         statement=(
             "根据《上海证券交易所股票上市规则》第 9.8.1 条第一款第（七）项规定，"
@@ -210,7 +374,7 @@ def _build_draft(pdf_sha: str, p2b_sha: str, p2f_sha: str) -> AuthorityReference
         fact_id="st-status-20260418",
         reference_id=document.reference_id,
         dataset=DatasetKind.TRADING_STATUS,
-        purpose=sample.cases[0].purpose,
+        purpose=st_case.purpose,
         code="603377.SH",
         exchange="SH",
         fact_nature=FactNature.RETROSPECTIVE_CONFIRMATION,
@@ -219,7 +383,7 @@ def _build_draft(pdf_sha: str, p2b_sha: str, p2f_sha: str) -> AuthorityReference
         known_from_date=TradingDate.from_iso("2026-07-31"),
         usable_for_decisions_after="2026-07-31 market close",
         material_sha256=pdf_sha,
-        paragraph_sha256="c69d8f9ebbef147c1524c4e8822534cd7a39fd37c3d44985ac3cc2fb7bb53268",
+        paragraph_sha256=STATUS_0418_PARAGRAPH_SHA,
         pages=(1, 2),
         statement=(
             "根据《上海证券交易所股票上市规则》第 9.8.1 条第一款第（六）项规定，"
@@ -232,7 +396,7 @@ def _build_draft(pdf_sha: str, p2b_sha: str, p2f_sha: str) -> AuthorityReference
         fact_id="st-continues-20260730",
         reference_id=document.reference_id,
         dataset=DatasetKind.TRADING_STATUS,
-        purpose=sample.cases[0].purpose,
+        purpose=st_case.purpose,
         code="603377.SH",
         exchange="SH",
         fact_nature=FactNature.CONTINUATION,
@@ -241,7 +405,7 @@ def _build_draft(pdf_sha: str, p2b_sha: str, p2f_sha: str) -> AuthorityReference
         known_from_date=TradingDate.from_iso("2026-07-31"),
         usable_for_decisions_after="2026-07-31 market close",
         material_sha256=pdf_sha,
-        paragraph_sha256="27786c8b65e8124e6685a53881daf438c41f4c447b8bd9f6222ab9c92818457f",
+        paragraph_sha256=CONTINUATION_PARAGRAPH_SHA,
         pages=(2,),
         statement=(
             "公司前期被实施其他风险警示的情形尚未全部消除，公司股票继续被实施其他风险警示。"
@@ -253,17 +417,17 @@ def _build_draft(pdf_sha: str, p2b_sha: str, p2f_sha: str) -> AuthorityReference
         AuthorityCaseFactBinding(
             case_id="st_warning_603377_sh",
             fact_id=fact.fact_id,
-            purpose=sample.cases[0].purpose,
+            purpose=st_case.purpose,
         )
         for fact in facts
     )
     approval_statement = (
-        "LOCAL_OWNER approves the ST authority reference bundle for case "
-        "st_warning_603377_sh binding CNINFO announcement 1225449700 "
-        "(临2026-110) to the v4 fixed sample."
+        "LOCAL_OWNER approves only the document identity, retrospective other-risk-warning "
+        "confirmations effective 2026-03-23 and 2026-04-18, and continuation at publication "
+        "for case st_warning_603377_sh; this approval is not REAL provider identity."
     )
     decision = ReviewDecision(
-        decision_id="local-owner-approval-st-603377-v1",
+        decision_id="local-owner-approval-st-603377-v3",
         reviewer_role=ReviewerRole.LOCAL_OWNER,
         status=ReviewDecisionStatus.APPROVED,
         case_ids=("st_warning_603377_sh",),
@@ -271,10 +435,10 @@ def _build_draft(pdf_sha: str, p2b_sha: str, p2f_sha: str) -> AuthorityReference
         approval_statement_sha256=compute_sha256(
             _canonical({"approval_statement": approval_statement})
         ),
-        decided_at=TradingDate.from_iso("2026-07-31"),
+        decided_at=TradingDate.from_iso("2026-08-04"),
     )
     return AuthorityReferenceBundleDraft(
-        bundle_id="st-603377-authority-v1",
+        bundle_id="st-603377-authority-v3",
         sample_spec_version=sample.sample_spec_version,
         sample_spec_sha256=sample.sample_spec_sha256,
         previous_sample_spec_sha256=sample.previous_sample_spec_sha256 or "",
@@ -282,8 +446,8 @@ def _build_draft(pdf_sha: str, p2b_sha: str, p2f_sha: str) -> AuthorityReference
         facts=facts,
         bindings=bindings,
         review_decisions=(decision,),
-        code_version="s1-07b.authority-bundle.v2",
-        schema_version="authority-bundle.v2",
+        code_version="s1-07b.authority-bundle.v3",
+        schema_version="authority-bundle.v3",
     )
 
 
@@ -292,13 +456,20 @@ def main() -> None:
     print()
     print("[1/4] Verifying P2B evidence...")
     _check_reparse(P2B_ROOT)
-    _verify_manifest(P2B_ROOT, "P2B", EXPECTED_P2B_MANIFEST_SHA)
+    p2b_manifest = _verify_manifest(P2B_ROOT, "P2B", EXPECTED_P2B_MANIFEST_SHA)
+    _verify_evidence_inventory(P2B_ROOT, p2b_manifest, label="P2B")
 
     print()
     print("[2/4] Verifying P2F evidence...")
     _check_reparse(P2F_ROOT)
     p2f_manifest = _verify_manifest(P2F_ROOT, "P2F", EXPECTED_P2F_MANIFEST_SHA)
-    _verify_p2f_inventory(p2f_manifest)
+    _verify_evidence_inventory(
+        P2F_ROOT,
+        p2f_manifest,
+        label="P2F",
+        expected_inventory_sha=EXPECTED_P2F_INVENTORY_SHA,
+    )
+    _verify_p2f_fact_inputs()
 
     print()
     print("[3/4] Verifying PDF material...")
@@ -314,10 +485,20 @@ def main() -> None:
         p2f_sha=EXPECTED_P2F_MANIFEST_SHA,
     )
     writer = AuthorityReferenceBundleWriter(root=BUNDLE_ROOT)
-    bundle_dir = writer.write(draft)
+    sample = load_fixed_sample_v4()
+    bundle_dir = writer.write(draft, sample=sample)
     print(f"  Bundle written to: {bundle_dir}")
 
-    # Verify the written bundle
+    # Deeply verify the written bundle. Reading its self-reported manifest is
+    # not sufficient to establish case-level authority eligibility.
+    from quantking.data.validation.authority_bundle import (
+        AuthorityReferenceBundleVerifier,
+    )
+
+    verified = AuthorityReferenceBundleVerifier(root=BUNDLE_ROOT).verify(
+        directory=bundle_dir,
+        sample=sample,
+    )
     manifest_path = bundle_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_bytes())
     manifest_sha = manifest["manifest_sha256"]
@@ -327,6 +508,7 @@ def main() -> None:
     print(f"  Inventory SHA: {inventory_sha}")
     print(f"  Sample version: {manifest['sample_spec_version']}")
     print(f"  Files: {len(manifest['files'])}")
+    print(f"  Approved cases: {sorted(verified.approved_case_ids)}")
     print()
     print("=== SUCCESS: Reference bundle built and verified ===")
 

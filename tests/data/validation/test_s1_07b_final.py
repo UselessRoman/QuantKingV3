@@ -1,5 +1,5 @@
 # ruff: noqa: RUF001
-"""S1-07B-FINAL: authoritative sample v4, reference bundle v2, per-case runtime gating.
+"""S1-07B-FINAL: authoritative sample v4, reference bundle v3, per-case runtime gating.
 
 Covers immutable version chain, time semantics, case-level eligibility,
 reference bundle integrity, runtime per-case gating, security attacks,
@@ -147,7 +147,7 @@ def test_v4_idempotent_loading_produces_same_sha() -> None:
 
 
 # ---------------------------------------------------------------------------
-# v2 authority reference bundle helpers
+# v3 authority reference bundle helpers
 # ---------------------------------------------------------------------------
 
 _PDF_SHA = "f3deec88dbd796c44535ecf72965c7f2103aca2ee663125b6499a427545c98e0"
@@ -180,6 +180,9 @@ def _build_st_authority_draft():
         canonical_locator=_CNINFO_LOCATOR,
         announcement_id="1225449700",
         announcement_number="临2026-110",
+        security_code="603377.SH",
+        security_name="ST 东时",
+        company_name="东方时尚驾驶学校股份有限公司",
         document_date=TradingDate.from_iso("2026-07-30"),
         publication_date=TradingDate.from_iso("2026-07-31"),
         known_from_date=TradingDate.from_iso("2026-07-31"),
@@ -309,8 +312,8 @@ def _build_st_authority_draft():
         facts=facts,
         bindings=bindings,
         review_decisions=(decision,),
-        code_version="s1-07b.authority-bundle.v2",
-        schema_version="authority-bundle.v2",
+        code_version="s1-07b.authority-bundle.v3",
+        schema_version="authority-bundle.v3",
     )
 
 
@@ -318,16 +321,20 @@ def _write_st_bundle(root: Path) -> Path:
     from quantking.data.validation.authority_bundle import (
         AuthorityReferenceBundleWriter,
     )
+    from quantking.data.validation.samples import load_fixed_sample_v4
 
-    return AuthorityReferenceBundleWriter(root=root).write(_build_st_authority_draft())
+    return AuthorityReferenceBundleWriter(root=root).write(
+        _build_st_authority_draft(),
+        sample=load_fixed_sample_v4(),
+    )
 
 
 # ---------------------------------------------------------------------------
-# v2 authority reference bundle writer and verifier
+# v3 authority reference bundle writer and verifier
 # ---------------------------------------------------------------------------
 
 
-def test_v2_authority_bundle_writer_produces_canonical_files(tmp_path: Path) -> None:
+def test_v3_authority_bundle_writer_produces_canonical_files(tmp_path: Path) -> None:
     from quantking.data.validation.authority_bundle import (
         AuthorityReferenceBundleVerifier,
     )
@@ -352,7 +359,7 @@ def test_v2_authority_bundle_writer_produces_canonical_files(tmp_path: Path) -> 
     assert list((directory / "references").glob("*.json"))
 
 
-def test_v2_authority_bundle_st_case_is_authority_approved(tmp_path: Path) -> None:
+def test_v3_authority_bundle_st_case_is_authority_approved(tmp_path: Path) -> None:
     from quantking.data.validation.authority_bundle import (
         AuthorityReferenceBundleVerifier,
     )
@@ -366,7 +373,7 @@ def test_v2_authority_bundle_st_case_is_authority_approved(tmp_path: Path) -> No
     assert verified.case_eligibilities["st_warning_603377_sh"] is CaseEligibility.AUTHORITY_APPROVED
 
 
-def test_v2_authority_bundle_inherited_cases_are_framework_only(tmp_path: Path) -> None:
+def test_v3_authority_bundle_inherited_cases_are_framework_only(tmp_path: Path) -> None:
     from quantking.data.validation.authority_bundle import (
         AuthorityReferenceBundleVerifier,
     )
@@ -383,30 +390,38 @@ def test_v2_authority_bundle_inherited_cases_are_framework_only(tmp_path: Path) 
         assert eligibility is CaseEligibility.FRAMEWORK_ONLY
 
 
-def test_v2_authority_bundle_idempotent_republish(tmp_path: Path) -> None:
+def test_v3_authority_bundle_idempotent_republish(tmp_path: Path) -> None:
     from quantking.data.validation.authority_bundle import (
         AuthorityReferenceBundleWriter,
     )
+    from quantking.data.validation.samples import load_fixed_sample_v4
 
     first = _write_st_bundle(tmp_path)
-    second = AuthorityReferenceBundleWriter(root=tmp_path).write(_build_st_authority_draft())
+    second = AuthorityReferenceBundleWriter(root=tmp_path).write(
+        _build_st_authority_draft(),
+        sample=load_fixed_sample_v4(),
+    )
     assert first == second
 
 
-def test_v2_authority_bundle_rejects_content_conflict(tmp_path: Path) -> None:
+def test_v3_authority_bundle_rejects_content_conflict(tmp_path: Path) -> None:
     from quantking.data.validation.authority_bundle import (
         AuthorityBundleIdempotencyConflictError,
         AuthorityReferenceBundleWriter,
     )
+    from quantking.data.validation.samples import load_fixed_sample_v4
 
     first_draft = _build_st_authority_draft()
     _write_st_bundle(tmp_path)
     conflicting = replace(
         first_draft,
-        code_version="s1-07b.authority-bundle.v2.tampered",
+        code_version="s1-07b.authority-bundle.v3.tampered",
     )
     with pytest.raises(AuthorityBundleIdempotencyConflictError):
-        AuthorityReferenceBundleWriter(root=tmp_path).write(conflicting)
+        AuthorityReferenceBundleWriter(root=tmp_path).write(
+            conflicting,
+            sample=load_fixed_sample_v4(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -423,7 +438,7 @@ def test_v2_authority_bundle_rejects_content_conflict(tmp_path: Path) -> None:
         "extra_directory",
     ],
 )
-def test_v2_authority_bundle_rejects_tampering(tmp_path: Path, mutation: str) -> None:
+def test_v3_authority_bundle_rejects_tampering(tmp_path: Path, mutation: str) -> None:
     from quantking.data.adapters.warehouse.manifest import compute_sha256
     from quantking.data.validation.authority_bundle import (
         AuthorityBundleVerificationError,
@@ -499,7 +514,7 @@ def test_v2_authority_bundle_rejects_tampering(tmp_path: Path, mutation: str) ->
         verifier.verify(directory=directory, sample=sample)
 
 
-def test_v2_authority_bundle_rejects_path_traversal(tmp_path: Path) -> None:
+def test_v3_authority_bundle_rejects_path_traversal(tmp_path: Path) -> None:
     from quantking.data.adapters.warehouse.manifest import compute_sha256
     from quantking.data.validation.authority_bundle import (
         AuthorityBundleVerificationError,
@@ -531,7 +546,7 @@ def test_v2_authority_bundle_rejects_path_traversal(tmp_path: Path) -> None:
         AuthorityReferenceBundleVerifier(root=tmp_path).verify(directory=directory, sample=sample)
 
 
-def test_v2_authority_bundle_rejects_symlink_or_junction(
+def test_v3_authority_bundle_rejects_symlink_or_junction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from quantking.data.validation import authority_bundle as bundle_module
@@ -562,7 +577,7 @@ def test_v2_authority_bundle_rejects_symlink_or_junction(
         AuthorityReferenceBundleVerifier(root=tmp_path).verify(directory=directory, sample=sample)
 
 
-def test_v2_local_owner_approval_cannot_be_real_signer(tmp_path: Path) -> None:
+def test_v3_local_owner_approval_cannot_be_real_signer(tmp_path: Path) -> None:
     """LOCAL_OWNER approval proves user review; it must never impersonate a REAL signer."""
     from quantking.data.validation.authority_bundle import (
         AuthorityReferenceBundleVerifier,
@@ -680,6 +695,9 @@ def test_publication_date_must_not_precede_document_date() -> None:
             canonical_locator=_CNINFO_LOCATOR,
             announcement_id="1225449700",
             announcement_number="临2026-110",
+            security_code="603377.SH",
+            security_name="ST 东时",
+            company_name="东方时尚驾驶学校股份有限公司",
             document_date=TradingDate.from_iso("2026-07-31"),
             publication_date=TradingDate.from_iso("2026-07-30"),
             known_from_date=TradingDate.from_iso("2026-07-31"),
@@ -701,6 +719,9 @@ def test_known_from_date_must_not_precede_publication_date() -> None:
             canonical_locator=_CNINFO_LOCATOR,
             announcement_id="1225449700",
             announcement_number="临2026-110",
+            security_code="603377.SH",
+            security_name="ST 东时",
+            company_name="东方时尚驾驶学校股份有限公司",
             document_date=TradingDate.from_iso("2026-07-30"),
             publication_date=TradingDate.from_iso("2026-07-31"),
             known_from_date=TradingDate.from_iso("2026-07-30"),
@@ -1081,3 +1102,60 @@ def test_stage1_status_s1_07b_awaiting_acceptance() -> None:
     # S1-07C/D and S1-08 must remain unauthorized.
     assert "S1-07C" in text
     assert "尚未开始" in text or "未获授权" in text or "未开始" in text
+
+
+def test_formal_bundle_builder_binds_every_fact_to_st_purpose() -> None:
+    """The production builder must not select a case by tuple position."""
+    from scripts.build_s1_07b_reference_bundle import _build_draft
+
+    draft = _build_draft(
+        pdf_sha=_PDF_SHA,
+        p2b_sha=_P2B_MANIFEST_SHA,
+        p2f_sha=_P2F_MANIFEST_SHA,
+    )
+    assert draft.bundle_id == "st-603377-authority-v3"
+    assert draft.references[0].security_code == "603377.SH"
+    assert draft.references[0].security_name == "ST 东时"
+    assert draft.references[0].company_name == "东方时尚驾驶学校股份有限公司"
+    assert {fact.purpose for fact in draft.facts} == {SamplePurpose.ST}
+    assert {binding.purpose for binding in draft.bindings} == {SamplePurpose.ST}
+    assert {str(decision.decided_at) for decision in draft.review_decisions} == {"2026-08-04"}
+    identity = next(fact for fact in draft.facts if fact.fact_id == "st-document-identity-001")
+    assert identity.statement == "证券代码：603377 证券简称：ST 东时 公告编号：临 2026-110"
+
+
+def test_writer_rejects_cross_purpose_bundle_before_final_publish(tmp_path: Path) -> None:
+    from quantking.data.validation.authority_bundle import AuthorityReferenceBundleWriter
+    from quantking.data.validation.samples import load_fixed_sample_v4
+
+    draft = _build_st_authority_draft()
+    malformed = replace(
+        draft,
+        facts=tuple(replace(fact, purpose=SamplePurpose.NORMAL) for fact in draft.facts),
+        bindings=tuple(
+            replace(binding, purpose=SamplePurpose.NORMAL) for binding in draft.bindings
+        ),
+    )
+    with pytest.raises(ValueError, match="binding does not align"):
+        AuthorityReferenceBundleWriter(root=tmp_path).write(
+            malformed,
+            sample=load_fixed_sample_v4(),
+        )
+    assert not (tmp_path / "reference-bundles" / malformed.bundle_id).exists()
+
+
+def test_writer_rejects_reference_identity_drift_before_final_publish(tmp_path: Path) -> None:
+    from quantking.data.validation.authority_bundle import AuthorityReferenceBundleWriter
+    from quantking.data.validation.samples import load_fixed_sample_v4
+
+    draft = _build_st_authority_draft()
+    malformed = replace(
+        draft,
+        references=(replace(draft.references[0], security_code="000001.SZ"),),
+    )
+    with pytest.raises(ValueError, match="fact lineage does not align"):
+        AuthorityReferenceBundleWriter(root=tmp_path).write(
+            malformed,
+            sample=load_fixed_sample_v4(),
+        )
+    assert not (tmp_path / "reference-bundles" / malformed.bundle_id).exists()

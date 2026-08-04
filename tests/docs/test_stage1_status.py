@@ -39,7 +39,7 @@ _S1_07A_STATUS = (
 )
 _S1_07B_STATUS = (
     "S1-07B 最终实现已提交、等待主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED "
-    "case（603377.SH ST）、reference bundle v2 证据链和按 case 放行运行时已定版； "
+    "case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版； "
     "17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。"
 )
 
@@ -188,6 +188,15 @@ class TestStage1DocsExist:
             "benchmark_index_daily",
         ):
             assert dataset in text, f"{dataset} must be documented in DATA_CONTRACTS.md"
+
+    @pytest.mark.parametrize(
+        "name",
+        ("ACCEPTANCE.md", "QUALITY_CONTRACTS.md", "SOURCE_MATRIX.md"),
+    )
+    def test_s1_07b_final_status_has_no_r1_blocked_residue(self, name: str) -> None:
+        text = _read(_STAGE1_DIR / name)
+        assert "S1-07B-R1 离线准备修复已提交，权威样本资格仍阻断" not in text
+        assert "S1-07B 最终实现已提交" in text
 
 
 class TestRootStatusWordingSynced:

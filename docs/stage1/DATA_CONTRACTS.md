@@ -15,7 +15,7 @@ S1-07A 已于 2026-07-29 在提交 `37512be531e15bbd5a698e6a227b0753781ef5e6`
 完成主验收。该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为
 BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
 S1-07B 最终实现已提交、等待主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED
-case（603377.SH ST）、reference bundle v2 证据链和按 case 放行运行时已定版；
+case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版；
 17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
 S1-07C/D、S1-08 尚未开始、未获授权。
 
@@ -27,7 +27,7 @@ S1-07B 的固定样本版本链为：v1 → v2 → v3 → v4。v4 原样继承 v
 `5b5bf202e17181dfcbd9159f261dc9b4c636fb7641a3786523b42f952c6f3200`。后续新增材料必须
 创建 v5+，不得修改 v4。
 
-权威 reference bundle v2 绑定 CNINFO 公告 1225449700（临 2026-110），分别建模
+权威 reference bundle v3 绑定 CNINFO 公告 1225449700（临 2026-110），分别建模
 `document_date`（2026-07-30）、`publication_date`/`known_from_date`（2026-07-31）和
 `usable_for_decisions_after`（2026-07-31 market close）。回溯确认事实的
 `effective_date`（2026-03-23、2026-04-18）不得被表达为当时已知。`LOCAL_OWNER` 审批只

@@ -1,7 +1,7 @@
 # S1-07B 最终实现交接
 
 状态：S1-07B 最终实现已提交、等待主验收。权威核心样本 v4、首个 AUTHORITY_APPROVED
-case（603377.SH ST）、reference bundle v2 证据链和按 case 放行运行时已定版。17 个
+case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版。17 个
 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
 
 ## 权威范围校正
@@ -39,10 +39,14 @@ Stage 1 最终验收仍被 S1-07C/D、真实来源验证和剩余 source×datase
 .\.venv\Scripts\python.exe -m pytest tests/data/validation/test_s1_07b_final.py -q -p no:cacheprovider --tb=no
 ```
 
-首次结果为多项 failed。根因是基线只有 v3 sample、v1 synthetic reference bundle 和全局
-阻断式 runtime preflight，尚不存在 v4 sample SHA、v2 authority bundle（时间语义、
-LOCAL_OWNER 审批、case 级资格）、按 case 放行的 runtime plan/execute 和 case 级资格
-verifier。
+原 FINAL 实现复核后的首次红测结果为 `5 failed, 83 passed`。根因包括：正式 bundle builder
+按 `sample.cases[0]` 的位置误取 `NORMAL` purpose，writer 未在原子完成前把 draft 绑定受控
+sample 并深验，以及三份 Stage 1 文档仍残留 R1 阻断状态。原先生成的
+`st-603377-authority-v1` 因 fact/binding purpose 与 ST case 不一致，被正式 verifier 以
+`AUTHORITY_BUNDLE_FACT_MISMATCH` 安全拒绝。v2 修正 purpose 后又在复核中发现 identity
+statement 合并了公司名、但 paragraph SHA 只对应页首段落，因此也未作为最终运行时输入。
+v1/v2 目录均原样保留、未覆盖；v3 将证券与公司身份结构化，并使 identity statement 与页首
+段落 SHA 精确对应。最终 verifier 对 v2 稳定返回 `AUTHORITY_BUNDLE_MANIFEST_MISMATCH`。
 
 修复后全部转绿（见下文验证与副作用）。
 
@@ -131,11 +135,12 @@ case（`AUTHORITY_APPROVED`）。全局 release 资格为 `VALIDATION_READY_WITH
 
 ### 路径与凭证
 
-- 路径：`E:\QuantKingV3Data\validation\s1-07b\reference-bundles\st-603377-authority-v1`
-- Bundle ID：`st-603377-authority-v1`
-- Manifest SHA-256：`d79c3af532e74fb9de58637cfda168bb756d5087a3511f810da871f216da7dc4`
-- Reference inventory SHA-256：`3002ce2d04d34772ed31b42bb1acd19c7c0b1ca349aa90bcf39a9f14ff646428`
+- 路径：`E:\QuantKingV3Data\validation\s1-07b\reference-bundles\st-603377-authority-v3`
+- Bundle ID：`st-603377-authority-v3`
+- Manifest SHA-256：`94ac8da21586a13803058b80344ff1b8dd63633c091e90b8cba832b5ef6a0bea`
+- Reference inventory SHA-256：`a40c1ee28ff545aca29fd292d18bfc241f95ff02eadbdee6de5083731ba1c07c`
 - Sample version：`s1-07.fixed-sample.v4`
+- LOCAL_OWNER decision date：`2026-08-04`
 
 ### 外部证据复验
 
@@ -156,7 +161,7 @@ case（`AUTHORITY_APPROVED`）。全局 release 资格为 `VALIDATION_READY_WITH
 ### Bundle 文件集合
 
 ```
-st-603377-authority-v1/
+st-603377-authority-v3/
 ├── references/
 │   └── cninfo-603377-1225449700.json
 ├── facts.json
@@ -169,11 +174,16 @@ st-603377-authority-v1/
 
 ### 合同
 
-- `ReferenceDocument` 绑定 document-specific CNINFO locator、公告编号、PDF SHA、P2B/P2F
-  manifest SHA，并分别记录 `document_date`、`publication_date`、`known_from_date`。
+- `ReferenceDocument` 绑定 document-specific CNINFO locator、公告编号、证券代码/简称、公司、
+  PDF SHA、P2B/P2F manifest SHA，并分别记录 `document_date`、`publication_date`、
+  `known_from_date`。
 - `ReferenceFact` 分别表达文档身份、两个回溯有效事实和发布时继续实施事实。
 - `CaseFactBinding` 精确绑定 case、fact 和 purpose。
 - `ReviewDecision` 记录 `LOCAL_OWNER`、`APPROVED`、批准范围及批准语句的规范 SHA。
+- 每个 fact 与 binding 的 purpose 必须精确等于被绑定 case 的 `ST`；正式 writer 在创建 final
+  目录前以受控 v4 sample 验证该关系，并在 `.incomplete` 内运行完整 verifier。
+- 正式 builder 还逐字段复验 P2F 四条 sealed candidate 的 purpose、证券、公司、公告、日期、
+  locator、材料 SHA、页码和段落 SHA；只复验整个 P2F 文件 SHA 不足以建立事实 binding。
 - 该批准只证明用户复核了固定样本事实，不得被当成 REAL provider signer。不生成或伪装任何
   REAL signer。reviewer decision 与 REAL provider identity 是两个独立概念。
 - bundle 使用 `.incomplete` → 验证 → manifest/SHA/COMPLETE → 原子完成。
@@ -267,15 +277,18 @@ SourceOverride 或 DatasetVersion。当前四来源仍不得凭离线框架升�
 
 ### 定向测试
 
-- S1-07B 新增攻击测试（v4 sample、v2 bundle、时间语义、按 case 放行）：
-  `tests/data/validation/test_s1_07b_final.py` — `76 passed`（含 runtime 与 r1 runtime）。
-- 全部 `tests/data/validation` + `tests/data`：`169 passed`。
-- S1-07A R2～R6、assessment persistence、DataCenter、migration 和 Stage 1 文档扩展回归：
-  见完整质量门结果。
+- S1-07B 新增攻击测试（v4 sample、v3 bundle、时间语义、按 case 放行）：
+  `tests/data/validation/test_s1_07b_final.py` — `46 passed`。
+- FINAL 与 Stage 1 状态组合：`89 passed`。
+- 全部 validation、S1-07A R2～R6、assessment persistence、DataCenter、migration、架构和
+  Stage 1 文档扩展回归：`324 passed`。
 
 ### 完整质量门
 
-见交接报告中的 `scripts/quality.ps1` 结果。
+第一次执行在测试前因沙箱不能读取既有离线 uv 缓存而退出；授权读取本机离线工具链缓存后，
+原命令重跑。最终身份血缘补强后的首次门禁由 mypy 发现局部变量复用，修正后再次原样重跑
+退出码为 0。最终后端为 `1209 passed, 2 skipped, 3 deselected`；Ruff、format、mypy、
+架构边界和 Markdown 通过；前端为 `17 passed`，生产构建通过，Playwright 为 `1 passed`。
 
 ### Alembic
 
@@ -286,8 +299,9 @@ Alembic 唯一 head 仍为 `20260729_0012`；S1-07B-FINAL 没有新增 migration
 - 外部读取：仅离线读取已封存 P2B/P2F evidence 目录用于复验 manifest/inventory/SHA 和
   构建 reference bundle。不访问网络、QMT、供应商 SDK、旧项目或备份根。
 - 外部写入：仅在
-  `E:\QuantKingV3Data\validation\s1-07b\reference-bundles\st-603377-authority-v1`
-  创建最终 reference bundle。不修改 P2B、P2F 或任何既有证据。
+  `E:\QuantKingV3Data\validation\s1-07b\reference-bundles\st-603377-authority-v3`
+  创建最终 reference bundle。先前的 v1/v2 bundle 原样保留作失败取证/不可变历史；不修改
+  P2B、P2F 或任何既有证据。
 - Git 只记录规范化事实、locator、材料 SHA、bundle SHA、版本和合同。不提交 PDF、网页或
   证据目录。
 - 副作用仅限仓库源码、测试、文档、离线临时测试产物，以及完整质量门对仓库内

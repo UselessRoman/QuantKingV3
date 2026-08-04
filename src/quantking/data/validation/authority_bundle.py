@@ -1,8 +1,8 @@
 """S1-07B-FINAL authoritative reference bundle with time semantics.
 
-This module implements the v2 authority bundle contract that binds the
+This module implements the v3 authority bundle contract that binds the
 603377.SH ST announcement to the v4 fixed sample. It is distinct from the
-v1 ``references.py`` synthetic test bundle: v2 carries document/publication/
+v1 ``references.py`` synthetic test bundle: v3 carries document/publication/
 known-from dates, retrospective confirmation semantics, LOCAL_OWNER review
 decisions, and per-case eligibility. It never produces a sample-level
 ``PRODUCTION_ELIGIBLE`` verdict and never impersonates a REAL provider signer.
@@ -39,7 +39,8 @@ _CASE_ID = re.compile(r"^[a-z][a-z0-9_-]{2,95}$")
 _VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _PAGE = re.compile(r"^[1-9][0-9]*$")
-_SCHEMA = "authority-bundle.manifest.v2"
+_SCHEMA = "authority-bundle.manifest.v3"
+_SECURITY_CODE = re.compile(r"^[0-9]{6}\.(SH|SZ|BJ)$")
 _USABLE_BOUNDARY = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2} market close$")
 
 
@@ -81,6 +82,9 @@ class AuthorityReferenceDocument:
     canonical_locator: str
     announcement_id: str
     announcement_number: str
+    security_code: str
+    security_name: str
+    company_name: str
     document_date: TradingDate
     publication_date: TradingDate
     known_from_date: TradingDate
@@ -103,6 +107,10 @@ class AuthorityReferenceDocument:
             raise ValueError("canonical locator must be HTTPS and announcement-specific")
         if not self.announcement_id.strip() or not self.announcement_number.strip():
             raise ValueError("announcement_id and announcement_number are required")
+        if not _SECURITY_CODE.fullmatch(self.security_code):
+            raise ValueError("security_code must be a controlled exchange-qualified code")
+        if not self.security_name.strip() or not self.company_name.strip():
+            raise ValueError("security_name and company_name are required")
         for label, value in (
             ("document_date", self.document_date),
             ("publication_date", self.publication_date),
@@ -128,6 +136,7 @@ class AuthorityReferenceDocument:
             "announcement_number": self.announcement_number,
             "authority": self.authority,
             "canonical_locator": self.canonical_locator,
+            "company_name": self.company_name,
             "document_date": str(self.document_date),
             "known_from_date": str(self.known_from_date),
             "material_sha256": self.material_sha256,
@@ -135,6 +144,8 @@ class AuthorityReferenceDocument:
             "p2f_manifest_sha256": self.p2f_manifest_sha256,
             "publication_date": str(self.publication_date),
             "reference_id": self.reference_id,
+            "security_code": self.security_code,
+            "security_name": self.security_name,
         }
 
 
@@ -372,6 +383,16 @@ class AuthorityReferenceBundleDraft:
             raise ValueError("fact references an undeclared authority document")
         if {item.reference_id for item in self.facts} != set(references):
             raise ValueError("every authority document must support a declared fact")
+        for reference_fact in self.facts:
+            reference = references[reference_fact.reference_id]
+            if (
+                reference_fact.code != reference.security_code
+                or reference_fact.material_sha256 != reference.material_sha256
+                or reference_fact.document_date != reference.document_date
+                or reference_fact.publication_date != reference.publication_date
+                or reference_fact.known_from_date != reference.known_from_date
+            ):
+                raise ValueError("fact lineage does not align with its authority document")
         for binding in self.bindings:
             case = cases.get(binding.case_id)
             fact = facts.get(binding.fact_id)
@@ -472,7 +493,15 @@ class AuthorityReferenceBundleWriter:
             raise ValueError("reference root must be absolute")
         self._root = root
 
-    def write(self, draft: AuthorityReferenceBundleDraft) -> Path:
+    def write(
+        self,
+        draft: AuthorityReferenceBundleDraft,
+        *,
+        sample: FixedSampleSpec,
+    ) -> Path:
+        # A structurally valid, self-signed draft is not authoritative by itself.
+        # Bind it to the controlled sample before creating any final directory.
+        draft.validate_against(sample)
         parent = resolve_under(self._root, "reference-bundles")
         parent.mkdir(parents=True, exist_ok=True)
         if is_reparse_point(parent):
@@ -480,10 +509,18 @@ class AuthorityReferenceBundleWriter:
         final = parent / draft.bundle_id
         if final.exists():
             self._verify_idempotent(final, draft)
+            AuthorityReferenceBundleVerifier(root=self._root).verify(
+                directory=final,
+                sample=sample,
+            )
             return final
         incomplete = parent / f".{draft.bundle_id}.{uuid4().hex}.incomplete"
         try:
             self._write_draft(incomplete, draft)
+            AuthorityReferenceBundleVerifier(root=self._root).verify(
+                directory=incomplete,
+                sample=sample,
+            )
             os.replace(incomplete, final)
         except Exception:
             _discard_incomplete(incomplete)
@@ -539,7 +576,7 @@ def _discard_incomplete(incomplete: Path) -> None:
 
 
 class AuthorityReferenceBundleVerifier:
-    """Verifies v2 authority bundles and returns per-case eligibility.
+    """Verifies v3 authority bundles and returns per-case eligibility.
 
     The verifier never promotes a sample to ``PRODUCTION_ELIGIBLE`` and never
     treats LOCAL_OWNER approval as a REAL provider signer. It only certifies
@@ -733,6 +770,7 @@ def _draft_from_verified_payloads(
             "announcement_number",
             "authority",
             "canonical_locator",
+            "company_name",
             "document_date",
             "known_from_date",
             "material_sha256",
@@ -740,6 +778,8 @@ def _draft_from_verified_payloads(
             "p2f_manifest_sha256",
             "publication_date",
             "reference_id",
+            "security_code",
+            "security_name",
         }:
             raise ValueError("authority reference document schema mismatch")
         references.append(
@@ -749,6 +789,9 @@ def _draft_from_verified_payloads(
                 canonical_locator=str(raw["canonical_locator"]),
                 announcement_id=str(raw["announcement_id"]),
                 announcement_number=str(raw["announcement_number"]),
+                security_code=str(raw["security_code"]),
+                security_name=str(raw["security_name"]),
+                company_name=str(raw["company_name"]),
                 document_date=TradingDate.from_iso(str(raw["document_date"])),
                 publication_date=TradingDate.from_iso(str(raw["publication_date"])),
                 known_from_date=TradingDate.from_iso(str(raw["known_from_date"])),
