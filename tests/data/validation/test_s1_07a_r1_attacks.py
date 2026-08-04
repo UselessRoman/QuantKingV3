@@ -175,7 +175,7 @@ def test_acknowledgement_is_not_authorization_and_fails_before_import(
         imports.append(name)
         raise AssertionError("runner import must not happen without authorization")
 
-    monkeypatch.setattr("quantking.data.validation.cli.importlib.import_module", forbidden_import)
+    monkeypatch.setattr("quantking.data.validation.runtime._import_runner", forbidden_import)
     with pytest.raises(ValidationExecutionError) as captured:
         execute(
             source="XTQUANT",
@@ -185,7 +185,7 @@ def test_acknowledgement_is_not_authorization_and_fails_before_import(
             authorization=None,
             authorization_verifier=None,
         )
-    assert captured.value.code == "AUTHORIZATION_REQUIRED"
+    assert captured.value.code == "PROVIDER_PACKAGE_VERSION_UNRESOLVED"
     assert imports == []
 
 
@@ -221,8 +221,8 @@ def test_missing_runner_is_stable_sanitized_and_does_not_load_sdk(tmp_path: Path
             invocation_id=new_entity_id("data_invocation"),
             authorization_claim_store=AuthorizationClaimStore(claim_root=tmp_path / "claims"),
         )
-    assert captured.value.code == "RUNNER_UNAVAILABLE"
-    assert str(captured.value) == "provider runner is not installed; assessment remains blocked"
+    assert captured.value.code == "PROVIDER_PACKAGE_VERSION_UNRESOLVED"
+    assert str(captured.value) == "provider package version is not an exact stable version"
     assert "Traceback" not in str(captured.value)
     assert not ({"xtquant", "baostock", "akshare", "tushare"} & (set(sys.modules) - before))
 

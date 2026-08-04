@@ -203,8 +203,12 @@ authority tier 必须为 `PRIMARY`；第三方摘要、首页、跨证券/交易
 多余文件、重复 ID、路径逃逸和 reparse point 均失败。S1-07B 没有 production reviewer
 key allowlist，因此合法合成 bundle 也只得到 `FRAMEWORK_ONLY`。
 
-S1-07B 最终实现已提交、等待主验收。v4 以 case 为单位推导权威资格：已深验且获批准的
-`AUTHORITY_APPROVED` case 可通过 sample/reference 前置门，未选中的 coverage backlog 不再
+S1-07B-FINAL-R1 修复已提交、等待主验收。v4 以 case 为单位推导权威资格：只有完整匹配
+Git 控制的不可变 authority release（bundle manifest/inventory、sample v4 血缘、CNINFO
+locator、P2B/P2F/PDF SHA、四项事实定位与批准声明 SHA）的正式 bundle 才能得到
+`AUTHORITY_APPROVED`；任意自签 manifest 或调用方声明的 `LOCAL_OWNER/APPROVED` 只能证明
+结构自洽，不能成为信任锚。已深验且获批准的 case 可通过 sample/reference 前置门，
+未选中的 coverage backlog 不再
 形成全局阻断；任何未批准或混合 case 选择仍失败关闭。
 `RealValidationRuntime` 使用固定 source/runner/distribution registry，plan 只读本机
 distribution metadata 而不导入 SDK，并冻结 source、dataset、v4 SHA、case IDs、reference
@@ -212,6 +216,7 @@ bundle ID/SHA、adapter/package/
 code/schema/rule/threshold/config version、case/request、输出根、网络/QMT需求、副作用和
 阻断原因。execute 的未来时序为 acknowledgement → 重建 plan → sample/scope/package/
 output/version 机器前置门 → envelope 签名及 plan SHA 验证 → 持久化一次性 authorization
-claim → 受控 REAL signer → 固定 runner import → session/evidence。所有前置门失败都发生在
-claim 和 import 之前；前置门通过后，后续 signer/runner 失败不释放 authorization。当前样本
-资格、REAL signer 和 runner 均阻断，任何 SDK import 之前失败。
+claim → 受控 REAL signer → 固定 runner import → session/evidence。所有 blocking reason
+（包括 case、package、runner 与 signer）都在 claim、runner import 和输出创建之前失败。
+CLI、脚本和应用组合只调用这一条 `RealValidationRuntime` 执行链，不存在旧 v2 或第二条直接
+runner import 路径。当前 REAL signer 和 runner 均阻断，任何 SDK import 之前失败。

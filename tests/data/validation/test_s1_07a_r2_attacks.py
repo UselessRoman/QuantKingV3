@@ -329,7 +329,7 @@ def test_concurrent_authorization_claim_has_exactly_one_winner(tmp_path: Path) -
     assert sorted(results) == ["AUTHORIZATION_ALREADY_CONSUMED", "CLAIMED"]
 
 
-def test_execute_consumes_authorization_even_when_runner_is_unavailable(
+def test_execute_does_not_consume_authorization_when_preflight_is_blocked(
     tmp_path: Path,
 ) -> None:
     from quantking.data.validation.authorization import (
@@ -360,12 +360,13 @@ def test_execute_consumes_authorization_even_when_runner_is_unavailable(
         "authorization_verifier": authority,
         "authorization_claim_store": store,
     }
-    with pytest.raises(ValidationExecutionError, match="runner is not installed") as first:
+    with pytest.raises(ValidationExecutionError) as first:
         execute(**arguments, invocation_id=new_entity_id("data_invocation"))
-    assert first.value.code == "RUNNER_UNAVAILABLE"
+    assert first.value.code == "PROVIDER_PACKAGE_VERSION_UNRESOLVED"
     with pytest.raises(ValidationExecutionError) as second:
         execute(**arguments, invocation_id=new_entity_id("data_invocation"))
-    assert second.value.code == "AUTHORIZATION_ALREADY_CONSUMED"
+    assert second.value.code == "PROVIDER_PACKAGE_VERSION_UNRESOLVED"
+    assert not (tmp_path / "claims" / "authorization-claims.sqlite3").exists()
 
 
 def test_cli_valid_authorization_is_hard_blocked_consistently(
@@ -400,7 +401,7 @@ def test_cli_valid_authorization_is_hard_blocked_consistently(
     )
     captured = capsys.readouterr()
     assert exit_code == 2
-    assert '"error_code": "AUTHORIZATION_RUNTIME_UNAVAILABLE"' in captured.err
+    assert '"error_code": "PROVIDER_PACKAGE_VERSION_UNRESOLVED"' in captured.err
     assert "Traceback" not in captured.err
 
 

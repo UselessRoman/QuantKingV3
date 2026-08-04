@@ -155,6 +155,26 @@ def check_boundaries(root: Path) -> list[Violation]:
             "assessment.py",
         )
         for node in ast.walk(tree):
+            direct_dynamic_import = (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "importlib"
+                and node.func.attr == "import_module"
+            )
+            if (
+                direct_dynamic_import
+                and _starts_with(parts, ("data", "validation"))
+                and parts != ("data", "validation", "runtime.py")
+            ):
+                violations.append(
+                    Violation(
+                        display,
+                        node.lineno,
+                        "validation runner dynamic import",
+                        "data/validation/runtime.py only",
+                    )
+                )
             forbidden_assessment_write = (
                 isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)

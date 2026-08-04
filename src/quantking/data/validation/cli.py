@@ -3,20 +3,17 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Protocol
 
 from quantking.common.ids import EntityId
-from quantking.common.time import utc_now
 from quantking.data.assessment.matrix import default_source_matrix
 from quantking.data.models import DatasetKind
 from quantking.data.validation.artifacts import ValidationEvidenceVerifier
+from quantking.data.validation.authority_bundle import CONTROLLED_AUTHORITY_BUNDLE_ID
 from quantking.data.validation.authorization import (
-    AuthorizationClaimError,
     AuthorizationClaimStore,
     AuthorizationVerifier,
     ExecutionAuthorization,
@@ -24,10 +21,11 @@ from quantking.data.validation.authorization import (
 from quantking.data.validation.runtime import (
     ControlledRunnerRegistry,
     LocalPackageVersionProbe,
+    RealRuntimeExecutionError,
     RealValidationRuntime,
+    RuntimeAuthorizationEnvelope,
     ValidationSource,
 )
-from quantking.data.validation.samples import load_packaged_fixed_sample
 
 REAL_EXECUTION_ACK = "I_ACKNOWLEDGE_AUTHORIZED_REAL_SOURCE_VALIDATION"
 _SDK_PACKAGES = {
@@ -64,11 +62,9 @@ class ValidationPlan:
     sdk_loaded: bool
     unavoidable_side_effects: tuple[str, ...]
     blocking_reasons: tuple[str, ...]
+    reference_bundle_id: str
+    reference_bundle_sha256: str
     command: str
-
-
-class RealValidationRunner(Protocol):
-    def execute(self, *, plan: ValidationPlan, output_root: Path) -> Path: ...
 
 
 class ValidationExecutionError(Exception):
@@ -79,17 +75,33 @@ class ValidationExecutionError(Exception):
         self.code = code
 
 
-def build_plan(*, source: str, dataset: DatasetKind, output_root: Path) -> ValidationPlan:
+def build_plan(
+    *,
+    source: str,
+    dataset: DatasetKind,
+    output_root: Path,
+    case_ids: tuple[str, ...] | None = None,
+    reference_bundle_root: Path | None = None,
+) -> ValidationPlan:
     source = source.upper()
     if source not in _SDK_PACKAGES:
         raise ValueError("source must be XTQUANT, BAOSTOCK, AKSHARE or TUSHARE")
-    readiness = RealValidationRuntime(
+    runtime = RealValidationRuntime(
         registry=ControlledRunnerRegistry.s1_07b(),
         package_probe=LocalPackageVersionProbe(overrides={}),
-    ).plan(
+        reference_bundle_root=reference_bundle_root,
+    )
+    bundle_directory = (
+        reference_bundle_root / "reference-bundles" / CONTROLLED_AUTHORITY_BUNDLE_ID
+        if reference_bundle_root is not None
+        else None
+    )
+    readiness = runtime.plan(
         source=ValidationSource(source),
         dataset=dataset,
         output_root=output_root,
+        case_ids=case_ids,
+        reference_bundle_directory=bundle_directory,
     )
     root = output_root.resolve(strict=False)
     command = (
@@ -122,6 +134,8 @@ def build_plan(*, source: str, dataset: DatasetKind, output_root: Path) -> Valid
         sdk_loaded=False,
         unavoidable_side_effects=readiness.unavoidable_side_effects,
         blocking_reasons=readiness.blocking_reasons,
+        reference_bundle_id=readiness.reference_bundle_id,
+        reference_bundle_sha256=readiness.reference_bundle_sha256,
         command=command,
     )
 
@@ -136,49 +150,40 @@ def execute(
     authorization_verifier: AuthorizationVerifier | None = None,
     invocation_id: EntityId | None = None,
     authorization_claim_store: AuthorizationClaimStore | None = None,
+    runtime_authorization: RuntimeAuthorizationEnvelope | None = None,
+    runtime: RealValidationRuntime | None = None,
+    case_ids: tuple[str, ...] | None = None,
+    reference_bundle_root: Path | None = None,
 ) -> Path:
     if acknowledgement != REAL_EXECUTION_ACK:
         raise ValueError("exact real-execution acknowledgement is required")
-    if authorization is None or authorization_verifier is None:
-        raise ValidationExecutionError(
-            "AUTHORIZATION_REQUIRED",
-            "matching one-time scoped authorization is required before runner import",
-        )
-    plan = build_plan(source=source, dataset=dataset, output_root=output_root)
-    sample = load_packaged_fixed_sample()
-    if invocation_id is None or authorization_claim_store is None:
-        raise ValidationExecutionError(
-            "AUTHORIZATION_RUNTIME_UNAVAILABLE",
-            "authorization claim runtime is unavailable; runner remains blocked",
-        )
+    if runtime is not None and type(runtime) is not RealValidationRuntime:
+        raise TypeError("runtime must be the controlled RealValidationRuntime")
+    runtime = runtime or RealValidationRuntime(
+        registry=ControlledRunnerRegistry.s1_07b(),
+        package_probe=LocalPackageVersionProbe(overrides={}),
+        claim_store=authorization_claim_store,
+        authorization_verifier=authorization_verifier,
+        invocation_id=invocation_id,
+        reference_bundle_root=reference_bundle_root,
+    )
+    bundle_directory = (
+        reference_bundle_root / "reference-bundles" / CONTROLLED_AUTHORITY_BUNDLE_ID
+        if reference_bundle_root is not None
+        else None
+    )
     try:
-        authorization_claim_store.claim(
-            authorization,
-            invocation_id=invocation_id,
-            verifier=authorization_verifier,
-            source=plan.source,
+        return runtime.execute(
+            source=ValidationSource(source.upper()),
             dataset=dataset,
             output_root=output_root,
-            sample_sha256=sample.sample_spec_sha256,
-            at=utc_now(),
+            acknowledgement=acknowledgement,
+            authorization=runtime_authorization,
+            case_ids=case_ids,
+            reference_bundle_directory=bundle_directory,
         )
-    except AuthorizationClaimError as error:
-        raise ValidationExecutionError(str(error), "authorization claim was rejected") from None
-    module_name = f"quantking.data.validation.runners.{source.lower()}"
-    try:
-        module = importlib.import_module(module_name)
-        runner: RealValidationRunner = module.create_runner()
-        result = runner.execute(plan=plan, output_root=output_root)
-        if not isinstance(result, Path):
-            raise TypeError("provider runner must return a Path")
-        return result
-    except ModuleNotFoundError as error:
-        if error.name in {module_name, module_name.rsplit(".", 1)[0]}:
-            raise ValidationExecutionError(
-                "RUNNER_UNAVAILABLE",
-                "provider runner is not installed; assessment remains blocked",
-            ) from None
-        raise
+    except RealRuntimeExecutionError as error:
+        raise ValidationExecutionError(error.code, str(error)) from None
 
 
 def verify(*, validation_root: Path, directory: Path) -> dict[str, object]:
@@ -246,6 +251,8 @@ def _parser() -> argparse.ArgumentParser:
             "--dataset", required=True, choices=[item.value for item in DatasetKind]
         )
         command.add_argument("--output-root", required=True, type=Path)
+        command.add_argument("--case-id", action="append", dest="case_ids")
+        command.add_argument("--reference-bundle-root", type=Path)
         if name == "execute":
             command.add_argument("--ack", required=True)
             command.add_argument("--authorization-file", required=True, type=Path)
@@ -276,6 +283,8 @@ def main(argv: list[str] | None = None) -> int:
                     source=args.source,
                     dataset=DatasetKind(args.dataset),
                     output_root=args.output_root,
+                    case_ids=tuple(args.case_ids) if args.case_ids else None,
+                    reference_bundle_root=args.reference_bundle_root,
                 )
             )
         elif args.action == "execute":
@@ -284,10 +293,17 @@ def main(argv: list[str] | None = None) -> int:
                     "ACKNOWLEDGEMENT_REQUIRED",
                     "exact real-execution acknowledgement is required",
                 )
-            _load_authorization(args.authorization_file)
-            raise ValidationExecutionError(
-                "AUTHORIZATION_RUNTIME_UNAVAILABLE",
-                "authorization claim runtime is unavailable; runner remains blocked",
+            authorization = _load_authorization(args.authorization_file)
+            result = str(
+                execute(
+                    source=args.source,
+                    dataset=DatasetKind(args.dataset),
+                    output_root=args.output_root,
+                    acknowledgement=args.ack,
+                    authorization=authorization,
+                    case_ids=tuple(args.case_ids) if args.case_ids else None,
+                    reference_bundle_root=args.reference_bundle_root,
+                )
             )
         elif args.action == "verify":
             result = verify(validation_root=args.validation_root, directory=args.directory)

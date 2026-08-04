@@ -171,7 +171,7 @@ def test_two_processes_have_one_winner_and_restart_remembers_claim(
     assert restarted.stdout.strip() == "AUTHORIZATION_ALREADY_CONSUMED"
 
 
-def test_runner_failure_does_not_release_persistent_claim(tmp_path: Path) -> None:
+def test_blocked_public_runtime_does_not_consume_persistent_claim(tmp_path: Path) -> None:
     from quantking.data.validation.authorization import AuthorizationClaimStore
     from quantking.data.validation.cli import (
         REAL_EXECUTION_ACK,
@@ -192,23 +192,22 @@ def test_runner_failure_does_not_release_persistent_claim(tmp_path: Path) -> Non
             invocation_id=new_entity_id("data_invocation"),
             authorization_claim_store=AuthorizationClaimStore(claim_root=claim_root),
         )
-    assert first.value.code == "RUNNER_UNAVAILABLE"
+    assert first.value.code == "PROVIDER_PACKAGE_VERSION_UNRESOLVED"
     assert (
-        _claim(
-            AuthorizationClaimStore(claim_root=claim_root),
-            authority,
-            authorization,
-            tmp_path,
-        )
-        == "AUTHORIZATION_ALREADY_CONSUMED"
+        _claim(AuthorizationClaimStore(claim_root=claim_root), authority, authorization, tmp_path)
+        == "CLAIMED"
     )
 
 
-def test_runner_execution_failure_does_not_release_claim(
+def test_legacy_fake_runner_cannot_bypass_public_runtime_preflight(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from quantking.data.validation.authorization import AuthorizationClaimStore
-    from quantking.data.validation.cli import REAL_EXECUTION_ACK, execute
+    from quantking.data.validation.cli import (
+        REAL_EXECUTION_ACK,
+        ValidationExecutionError,
+        execute,
+    )
 
     class ExplodingRunner:
         def execute(self, **_kwargs: object) -> Path:
@@ -219,7 +218,7 @@ def test_runner_execution_failure_does_not_release_claim(
     monkeypatch.setitem(sys.modules, module.__name__, module)
     authority, authorization = _authorization(tmp_path)
     claim_root = tmp_path / "claims"
-    with pytest.raises(RuntimeError, match="synthetic runner execution failure"):
+    with pytest.raises(ValidationExecutionError) as captured:
         execute(
             source="XTQUANT",
             dataset=DatasetKind.EXCHANGE_CALENDAR,
@@ -230,12 +229,8 @@ def test_runner_execution_failure_does_not_release_claim(
             invocation_id=new_entity_id("data_invocation"),
             authorization_claim_store=AuthorizationClaimStore(claim_root=claim_root),
         )
+    assert getattr(captured.value, "code", None) == "PROVIDER_PACKAGE_VERSION_UNRESOLVED"
     assert (
-        _claim(
-            AuthorizationClaimStore(claim_root=claim_root),
-            authority,
-            authorization,
-            tmp_path,
-        )
-        == "AUTHORIZATION_ALREADY_CONSUMED"
+        _claim(AuthorizationClaimStore(claim_root=claim_root), authority, authorization, tmp_path)
+        == "CLAIMED"
     )

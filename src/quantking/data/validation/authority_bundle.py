@@ -10,14 +10,16 @@ decisions, and per-case eligibility. It never produces a sample-level
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
+from importlib.resources import files
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -42,12 +44,44 @@ _PAGE = re.compile(r"^[1-9][0-9]*$")
 _SCHEMA = "authority-bundle.manifest.v3"
 _SECURITY_CODE = re.compile(r"^[0-9]{6}\.(SH|SZ|BJ)$")
 _USABLE_BOUNDARY = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2} market close$")
+AUTHORITY_TRUST_RELEASE_BYTES_SHA256 = (
+    "c2ec1e5c0c600dd6bbef35db893b952dec3ba541343c306523907ff75b72a05b"
+)
+CONTROLLED_AUTHORITY_BUNDLE_ID = "st-603377-authority-v3"
+CONTROLLED_AUTHORITY_BUNDLE_MANIFEST_SHA256 = (
+    "94ac8da21586a13803058b80344ff1b8dd63633c091e90b8cba832b5ef6a0bea"
+)
 
 
 def _canonical(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode(
         "utf-8"
     )
+
+
+def _load_controlled_authority_release() -> dict[str, object]:
+    """Load the sole Git-controlled LOCAL_OWNER trust anchor for S1-07B."""
+    payload = (
+        files("quantking.data.validation").joinpath("authority_bundle.release.v1.json").read_bytes()
+    )
+    if compute_sha256(payload) != AUTHORITY_TRUST_RELEASE_BYTES_SHA256:
+        raise AuthorityBundleVerificationError("AUTHORITY_BUNDLE_TRUST_RELEASE_INVALID")
+    try:
+        release = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise AuthorityBundleVerificationError("AUTHORITY_BUNDLE_TRUST_RELEASE_INVALID") from None
+    if not isinstance(release, dict) or set(release) != {
+        "approval",
+        "bundle_id",
+        "bundle_manifest_sha256",
+        "facts",
+        "reference",
+        "reference_inventory_sha256",
+        "sample",
+        "schema_version",
+    }:
+        raise AuthorityBundleVerificationError("AUTHORITY_BUNDLE_TRUST_RELEASE_INVALID")
+    return release
 
 
 class FactNature(StrEnum):
@@ -201,6 +235,9 @@ class AuthorityReferenceFact:
                 raise ValueError("retrospective effective_date must not follow document_date")
         if not _USABLE_BOUNDARY.fullmatch(self.usable_for_decisions_after):
             raise ValueError("usable_for_decisions_after must be '<date> market close'")
+        usable_date = TradingDate.from_iso(self.usable_for_decisions_after.split(" ", 1)[0])
+        if usable_date.value < self.known_from_date.value:
+            raise ValueError("usable_for_decisions_after must not precede known_from_date")
         for sha_label, sha_value in (
             ("material_sha256", self.material_sha256),
             ("paragraph_sha256", self.paragraph_sha256),
@@ -479,6 +516,13 @@ class VerifiedAuthorityReferenceBundle:
     case_eligibilities: Mapping[str, CaseEligibility] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class _StructurallyVerifiedAuthorityBundle:
+    draft: AuthorityReferenceBundleDraft
+    manifest_sha256: str
+    reference_inventory_sha256: str
+
+
 class AuthorityBundleVerificationError(Exception):
     """Stable, sanitized authority-bundle verification failure."""
 
@@ -499,31 +543,46 @@ class AuthorityReferenceBundleWriter:
         *,
         sample: FixedSampleSpec,
     ) -> Path:
-        # A structurally valid, self-signed draft is not authoritative by itself.
-        # Bind it to the controlled sample before creating any final directory.
-        draft.validate_against(sample)
         parent = resolve_under(self._root, "reference-bundles")
         parent.mkdir(parents=True, exist_ok=True)
         if is_reparse_point(parent):
             raise ValueError("reference root is unsafe")
+        attempt_id = uuid4().hex
         final = parent / draft.bundle_id
-        if final.exists():
-            self._verify_idempotent(final, draft)
-            AuthorityReferenceBundleVerifier(root=self._root).verify(
-                directory=final,
-                sample=sample,
-            )
-            return final
-        incomplete = parent / f".{draft.bundle_id}.{uuid4().hex}.incomplete"
+        incomplete = parent / f".{draft.bundle_id}.{attempt_id}.incomplete"
         try:
+            draft.validate_against(sample)
             self._write_draft(incomplete, draft)
-            AuthorityReferenceBundleVerifier(root=self._root).verify(
+            AuthorityReferenceBundleVerifier(root=self._root).verify_structure(
                 directory=incomplete,
                 sample=sample,
             )
-            os.replace(incomplete, final)
-        except Exception:
-            _discard_incomplete(incomplete)
+            if final.exists():
+                self._verify_idempotent(final, draft)
+                AuthorityReferenceBundleVerifier(root=self._root).verify_structure(
+                    directory=final,
+                    sample=sample,
+                )
+                _remove_success_attempt(incomplete)
+                return final
+            try:
+                os.rename(incomplete, final)
+            except OSError:
+                if not final.exists():
+                    raise
+                self._verify_idempotent(final, draft)
+                AuthorityReferenceBundleVerifier(root=self._root).verify_structure(
+                    directory=final,
+                    sample=sample,
+                )
+                _remove_success_attempt(incomplete)
+        except Exception as error:
+            _preserve_failed_attempt(
+                incomplete,
+                draft=draft,
+                attempt_id=attempt_id,
+                error=error,
+            )
             raise
         return final
 
@@ -564,15 +623,60 @@ class AuthorityReferenceBundleWriter:
             ) from error
 
 
-def _discard_incomplete(incomplete: Path) -> None:
+def _remove_success_attempt(incomplete: Path) -> None:
     if not incomplete.exists():
         return
     for item in incomplete.rglob("*"):
         if item.is_file():
-            with contextlib.suppress(OSError):
-                item.unlink()
-    with contextlib.suppress(OSError):
-        incomplete.rmdir()
+            item.unlink(missing_ok=True)
+    for item in sorted((path for path in incomplete.rglob("*") if path.is_dir()), reverse=True):
+        item.rmdir()
+    incomplete.rmdir()
+
+
+def _preserve_failed_attempt(
+    incomplete: Path,
+    *,
+    draft: AuthorityReferenceBundleDraft,
+    attempt_id: str,
+    error: Exception,
+) -> None:
+    """Preserve a bounded, sanitized, non-overwriting failed publication attempt."""
+    incomplete.mkdir(parents=True, exist_ok=True)
+    input_inventory = {
+        "bundle_id": draft.bundle_id,
+        "files": draft.unsigned_manifest()["files"],
+        "sample_sha256": draft.sample_spec_sha256,
+        "schema_version": "authority-bundle-failed-input.v1",
+    }
+    inventory_target = incomplete / "input_inventory.json"
+    if not inventory_target.exists():
+        inventory_descriptor = os.open(
+            inventory_target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
+        try:
+            os.write(inventory_descriptor, _canonical(input_inventory))
+            os.fsync(inventory_descriptor)
+        finally:
+            os.close(inventory_descriptor)
+    code = str(error)
+    if not code.startswith("AUTHORITY_BUNDLE_"):
+        code = "AUTHORITY_BUNDLE_PUBLICATION_FAILED"
+    payload = {
+        "attempt_id": attempt_id,
+        "bundle_id": draft.bundle_id,
+        "error_code": code,
+        "failed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "sample_sha256": draft.sample_spec_sha256,
+        "schema_version": "authority-bundle-failure.v1",
+    }
+    target = incomplete / "failure.json"
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, _canonical(payload))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 class AuthorityReferenceBundleVerifier:
@@ -595,7 +699,37 @@ class AuthorityReferenceBundleVerifier:
         sample: FixedSampleSpec,
     ) -> VerifiedAuthorityReferenceBundle:
         try:
-            return self._verify(directory=directory, sample=sample)
+            structural = self.verify_structure(directory=directory, sample=sample)
+            self._verify_controlled_trust(structural)
+            draft = structural.draft
+            approved_case_ids = {
+                case_id
+                for decision in draft.review_decisions
+                if decision.status is ReviewDecisionStatus.APPROVED
+                for case_id in decision.case_ids
+            }
+            bound_cases = {item.case_id for item in draft.bindings}
+            case_eligibilities = {
+                case.case_id: (
+                    CaseEligibility.AUTHORITY_APPROVED
+                    if case.case_id in bound_cases and case.case_id in approved_case_ids
+                    else CaseEligibility.BLOCKED_REFERENCE
+                    if case.case_id in bound_cases
+                    else CaseEligibility.FRAMEWORK_ONLY
+                )
+                for case in sample.cases
+            }
+            return VerifiedAuthorityReferenceBundle(
+                bundle_id=draft.bundle_id,
+                manifest_sha256=structural.manifest_sha256,
+                sample_spec_version=draft.sample_spec_version,
+                sample_spec_sha256=draft.sample_spec_sha256,
+                previous_sample_spec_sha256=draft.previous_sample_spec_sha256,
+                reference_inventory_sha256=structural.reference_inventory_sha256,
+                approved_case_ids=frozenset(approved_case_ids & bound_cases),
+                review_decision_status=ReviewDecisionStatus.APPROVED,
+                case_eligibilities=case_eligibilities,
+            )
         except AuthorityBundleVerificationError as error:
             self._record_failure(str(error))
             raise
@@ -603,9 +737,9 @@ class AuthorityReferenceBundleVerifier:
             self._record_failure("AUTHORITY_BUNDLE_INVALID")
             raise AuthorityBundleVerificationError("AUTHORITY_BUNDLE_INVALID") from None
 
-    def _verify(
+    def verify_structure(
         self, *, directory: Path, sample: FixedSampleSpec
-    ) -> VerifiedAuthorityReferenceBundle:
+    ) -> _StructurallyVerifiedAuthorityBundle:
         try:
             relative = directory.relative_to(self._root)
             resolved = resolve_under(self._root, relative)
@@ -701,33 +835,79 @@ class AuthorityReferenceBundleVerifier:
             draft.validate_against(sample)
         except ValueError:
             raise AuthorityBundleVerificationError("AUTHORITY_BUNDLE_FACT_MISMATCH") from None
-        approved_case_ids: set[str] = set()
-        for decision in draft.review_decisions:
-            if decision.status is ReviewDecisionStatus.APPROVED:
-                approved_case_ids.update(decision.case_ids)
-        bound_cases = {item.case_id for item in draft.bindings}
-        case_eligibilities: dict[str, CaseEligibility] = {}
-        for case in sample.cases:
-            if case.case_id in bound_cases and case.case_id in approved_case_ids:
-                case_eligibilities[case.case_id] = CaseEligibility.AUTHORITY_APPROVED
-            elif case.case_id in bound_cases:
-                case_eligibilities[case.case_id] = CaseEligibility.BLOCKED_REFERENCE
-            else:
-                case_eligibilities[case.case_id] = CaseEligibility.FRAMEWORK_ONLY
-        overall_status = (
-            ReviewDecisionStatus.APPROVED if approved_case_ids else ReviewDecisionStatus.REJECTED
-        )
-        return VerifiedAuthorityReferenceBundle(
-            bundle_id=draft.bundle_id,
+        return _StructurallyVerifiedAuthorityBundle(
+            draft=draft,
             manifest_sha256=embedded,
-            sample_spec_version=draft.sample_spec_version,
-            sample_spec_sha256=draft.sample_spec_sha256,
-            previous_sample_spec_sha256=draft.previous_sample_spec_sha256,
             reference_inventory_sha256=str(manifest["reference_inventory_sha256"]),
-            approved_case_ids=frozenset(approved_case_ids & bound_cases),
-            review_decision_status=overall_status,
-            case_eligibilities=dict(case_eligibilities),
         )
+
+    def _verify_controlled_trust(self, verified: _StructurallyVerifiedAuthorityBundle) -> None:
+        try:
+            release = _load_controlled_authority_release()
+            release_facts = release["facts"]
+            if not isinstance(release_facts, list) or any(
+                not isinstance(item, dict) for item in release_facts
+            ):
+                raise ValueError
+            release["facts"] = sorted(
+                cast(list[dict[str, object]], release_facts),
+                key=lambda item: str(item["fact_id"]),
+            )
+            draft = verified.draft
+            reference = draft.references[0]
+            decision = draft.review_decisions[0]
+            fact_projection = sorted(
+                (
+                    {
+                        "document_date": str(fact.document_date),
+                        "effective_date": (
+                            str(fact.effective_date) if fact.effective_date is not None else None
+                        ),
+                        "fact_id": fact.fact_id,
+                        "fact_nature": fact.fact_nature.value,
+                        "known_from_date": str(fact.known_from_date),
+                        "pages": list(fact.pages),
+                        "paragraph_sha256": fact.paragraph_sha256,
+                        "publication_date": str(fact.publication_date),
+                        "usable_for_decisions_after": fact.usable_for_decisions_after,
+                    }
+                    for fact in draft.facts
+                ),
+                key=lambda item: str(item["fact_id"]),
+            )
+            actual = {
+                "approval": {
+                    "approval_statement_sha256": decision.approval_statement_sha256,
+                    "case_ids": list(decision.case_ids),
+                    "decided_at": str(decision.decided_at),
+                    "decision_id": decision.decision_id,
+                    "reviewer_role": decision.reviewer_role.value,
+                    "status": decision.status.value,
+                },
+                "bundle_id": draft.bundle_id,
+                "bundle_manifest_sha256": verified.manifest_sha256,
+                "facts": fact_projection,
+                "reference": {
+                    "announcement_id": reference.announcement_id,
+                    "announcement_number": reference.announcement_number,
+                    "canonical_locator": reference.canonical_locator,
+                    "material_sha256": reference.material_sha256,
+                    "p2b_manifest_sha256": reference.p2b_manifest_sha256,
+                    "p2f_manifest_sha256": reference.p2f_manifest_sha256,
+                    "reference_id": reference.reference_id,
+                },
+                "reference_inventory_sha256": verified.reference_inventory_sha256,
+                "sample": {
+                    "previous_sample_spec_sha256": draft.previous_sample_spec_sha256,
+                    "sample_spec_sha256": draft.sample_spec_sha256,
+                    "sample_spec_version": draft.sample_spec_version,
+                },
+                "schema_version": "authority-trust-release.v1",
+            }
+            if actual != release:
+                raise ValueError
+        except (IndexError, KeyError, TypeError, ValueError):
+            raise AuthorityBundleVerificationError("AUTHORITY_BUNDLE_TRUST_MISMATCH") from None
 
     def _record_failure(self, code: str) -> None:
         root = self._root / "authority-failures"
@@ -930,6 +1110,9 @@ def _fact_from_raw(raw: dict[str, object]) -> AuthorityReferenceFact:
 
 
 __all__ = [
+    "AUTHORITY_TRUST_RELEASE_BYTES_SHA256",
+    "CONTROLLED_AUTHORITY_BUNDLE_ID",
+    "CONTROLLED_AUTHORITY_BUNDLE_MANIFEST_SHA256",
     "AuthorityBundleIdempotencyConflictError",
     "AuthorityBundleVerificationError",
     "AuthorityCaseFactBinding",

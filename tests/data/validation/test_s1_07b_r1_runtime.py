@@ -392,7 +392,7 @@ def test_relative_output_root_returns_stable_error_before_authorization(
     assert claims.calls == 0
 
 
-def test_preflight_passes_then_missing_signer_consumes_exactly_once(
+def test_disabled_runner_blocks_before_authorization_claim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -427,12 +427,12 @@ def test_preflight_passes_then_missing_signer_consumes_exactly_once(
             reference_bundle_directory=bundle_dir,
         )
 
-    assert captured.value.code == "REAL_SIGNER_UNAVAILABLE"
-    assert claims.calls == 1
+    assert captured.value.code == "PROVIDER_RUNNER_NOT_ENABLED"
+    assert claims.calls == 0
     assert imports == []
 
 
-def test_concurrent_execute_consumes_one_authorization_only(
+def test_concurrent_blocked_execute_never_consumes_authorization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -475,8 +475,8 @@ def test_concurrent_execute_consumes_one_authorization_only(
     with ThreadPoolExecutor(max_workers=2) as pool:
         codes = sorted(pool.map(invoke, (first, second)))
 
-    assert codes == ["AUTHORIZATION_ALREADY_CONSUMED", "REAL_SIGNER_UNAVAILABLE"]
-    assert len(tuple((tmp_path / "claims").glob("*.json"))) == 1
+    assert codes == ["PROVIDER_RUNNER_NOT_ENABLED", "PROVIDER_RUNNER_NOT_ENABLED"]
+    assert len(tuple((tmp_path / "claims").glob("*.json"))) == 0
 
 
 def test_production_v3_remains_framework_only() -> None:

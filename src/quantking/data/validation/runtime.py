@@ -505,9 +505,9 @@ class RealValidationRuntime:
                 "selected case is not authority-approved",
             )
         if authorization is None:
+            _raise_preclaim_runtime_blocker(plan)
             raise RealRuntimeExecutionError(
-                "AUTHORIZATION_REQUIRED",
-                "matching version-scoped authorization is required",
+                "AUTHORIZATION_REQUIRED", "matching version-scoped authorization is required"
             )
         expected_versions = {field: str(getattr(plan, field)) for field in _RUNTIME_VERSION_FIELDS}
         if (
@@ -520,6 +520,7 @@ class RealValidationRuntime:
                 "RUNTIME_VERSION_MISMATCH",
                 "runtime versions do not match the current frozen plan",
             )
+        _raise_preclaim_runtime_blocker(plan)
         if (
             self._runtime_authorization_verifier is None
             or not self._runtime_authorization_verifier.verify(authorization, plan=plan)
@@ -556,6 +557,16 @@ class RealValidationRuntime:
             "REAL_SIGNER_UNAVAILABLE",
             "production REAL signer is not initialized; runner was not imported",
         )
+
+
+def _raise_preclaim_runtime_blocker(plan: RuntimeValidationPlan) -> None:
+    for code, message in (
+        ("AUTHORITATIVE_SAMPLE_FRAMEWORK_ONLY", "sample release is not validation-ready"),
+        ("PROVIDER_RUNNER_NOT_ENABLED", "provider runner is not enabled"),
+        ("REAL_SIGNER_NOT_INITIALIZED", "production REAL signer is not initialized"),
+    ):
+        if code in plan.blocking_reasons:
+            raise RealRuntimeExecutionError(code, message)
 
 
 def _package_version_failure(value: str | None) -> str | None:

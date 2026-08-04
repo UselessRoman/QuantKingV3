@@ -1,6 +1,6 @@
 # S1-07B 最终实现交接
 
-状态：S1-07B 最终实现已提交、等待主验收。权威核心样本 v4、首个 AUTHORITY_APPROVED
+状态：S1-07B-FINAL-R1 修复已提交、等待主验收。权威核心样本 v4、首个 AUTHORITY_APPROVED
 case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版。17 个
 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
 
@@ -180,13 +180,20 @@ st-603377-authority-v3/
 - `ReferenceFact` 分别表达文档身份、两个回溯有效事实和发布时继续实施事实。
 - `CaseFactBinding` 精确绑定 case、fact 和 purpose。
 - `ReviewDecision` 记录 `LOCAL_OWNER`、`APPROVED`、批准范围及批准语句的规范 SHA。
+- 生产 verifier 内部加载 Git 控制、字节 SHA 固定的 `authority_bundle.release.v1.json`；该
+  release 精确冻结 bundle manifest/inventory、v4 sample 血缘、CNINFO locator、公告标识、
+  P2B/P2F/PDF SHA、四项 fact ID/段落 SHA/页码/时间字段和批准声明 SHA。调用方不能注入、
+  替换或自行签发 trust policy。
+- self-signed manifest、手工 `LOCAL_OWNER/APPROVED` 或 public writer 只证明结构自洽；只有
+  与受控 release 完整相等的 bundle 才能产生 `AUTHORITY_APPROVED`。
 - 每个 fact 与 binding 的 purpose 必须精确等于被绑定 case 的 `ST`；正式 writer 在创建 final
   目录前以受控 v4 sample 验证该关系，并在 `.incomplete` 内运行完整 verifier。
 - 正式 builder 还逐字段复验 P2F 四条 sealed candidate 的 purpose、证券、公司、公告、日期、
   locator、材料 SHA、页码和段落 SHA；只复验整个 P2F 文件 SHA 不足以建立事实 binding。
 - 该批准只证明用户复核了固定样本事实，不得被当成 REAL provider signer。不生成或伪装任何
   REAL signer。reviewer decision 与 REAL provider identity 是两个独立概念。
-- bundle 使用 `.incomplete` → 验证 → manifest/SHA/COMPLETE → 原子完成。
+- bundle 使用 `.incomplete` → 结构验证 → manifest/SHA/COMPLETE → 原子完成；失败保留唯一
+  attempt 目录、原输入 inventory 和脱敏 `failure.json`，不删除或覆盖取证。
 - 已存在同 bundle ID 时，完全相同才允许幂等返回；内容冲突必须拒绝，不得覆盖。
 - 拒绝 symlink、junction、reparse point、路径逃逸、额外文件和证据篡改。
 - 缺文件、多文件、SHA 篡改、locator 替换、事实替换、decision 替换均拒绝。
@@ -206,6 +213,9 @@ output root、authorization ID。
   sample/reference 资格门。这只表示"可以进入 S1-07C 的 REAL runtime 前置检查"，不表示
   供应商包、REAL signer、QMT 或网络已可用。
 - 当前 provider package 仍为 `unavailable` 时，继续返回既有稳定阻断错误。
+- CLI、脚本和应用组合统一调用 `RealValidationRuntime`；旧 v2 sample 与 CLI 直接 runner import
+  路径已删除。任一 blocking reason 在 authorization claim、runner import 和 output/session
+  创建前拒绝。
 - 不执行真实 runner，不消费任何真实网络/QMT 授权。
 - 未选中的缺失 purpose 不阻断已获批准 case。缺失 purpose 仍保留在 coverage backlog，
   并阻断选择它们的运行计划。
@@ -277,17 +287,18 @@ SourceOverride 或 DatasetVersion。当前四来源仍不得凭离线框架升�
 
 ### 定向测试
 
+- S1-07B-FINAL-R1 独立攻击测试（受控 trust release、任意重新自签、时间关系、统一 CLI、
+  失败取证及线程/进程并发发布）：`tests/data/validation/test_s1_07b_final_r1.py` —
+  `14 passed`。
 - S1-07B 新增攻击测试（v4 sample、v3 bundle、时间语义、按 case 放行）：
   `tests/data/validation/test_s1_07b_final.py` — `46 passed`。
-- FINAL 与 Stage 1 状态组合：`89 passed`。
-- 全部 validation、S1-07A R2～R6、assessment persistence、DataCenter、migration、架构和
-  Stage 1 文档扩展回归：`324 passed`。
+- 全部 validation 与 Stage 1 文档回归：`261 passed`。
+- assessment persistence、DataCenter、migration 和架构扩展回归：`109 passed`。
 
 ### 完整质量门
 
-第一次执行在测试前因沙箱不能读取既有离线 uv 缓存而退出；授权读取本机离线工具链缓存后，
-原命令重跑。最终身份血缘补强后的首次门禁由 mypy 发现局部变量复用，修正后再次原样重跑
-退出码为 0。最终后端为 `1209 passed, 2 skipped, 3 deselected`；Ruff、format、mypy、
+前两次启动因宿主命令等待上限误设为 1 秒，在 Ruff 前被终止且没有测试失败；修正等待上限后
+原样完整运行退出码为 0。最终后端为 `1223 passed, 2 skipped, 3 deselected`；Ruff、format、mypy、
 架构边界和 Markdown 通过；前端为 `17 passed`，生产构建通过，Playwright 为 `1 passed`。
 
 ### Alembic
@@ -309,7 +320,7 @@ Alembic 唯一 head 仍为 `20260729_0012`；S1-07B-FINAL 没有新增 migration
 
 ## 结论
 
-- S1-07B 最终实现已提交、等待主验收。
+- S1-07B-FINAL-R1 修复已提交、等待主验收。
 - S1-07C/D、S1-08 未开始、未获授权。
 - Stage 1 尚未完成。
 - REAL 稳定运行数：0。

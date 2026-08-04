@@ -281,9 +281,9 @@ def _build_st_authority_draft():
         for fact in facts
     )
     approval_statement = (
-        "LOCAL_OWNER approves the ST authority reference bundle for case "
-        "st_warning_603377_sh binding CNINFO announcement 1225449700 "
-        "(临2026-110) to the v4 fixed sample."
+        "LOCAL_OWNER approves only the document identity, retrospective other-risk-warning "
+        "confirmations effective 2026-03-23 and 2026-04-18, and continuation at publication "
+        "for case st_warning_603377_sh; this approval is not REAL provider identity."
     )
     from quantking.data.adapters.warehouse.manifest import compute_sha256
 
@@ -293,7 +293,7 @@ def _build_st_authority_draft():
         )
 
     decision = ReviewDecision(
-        decision_id="local-owner-approval-st-603377-v1",
+        decision_id="local-owner-approval-st-603377-v3",
         reviewer_role=ReviewerRole.LOCAL_OWNER,
         status=ReviewDecisionStatus.APPROVED,
         case_ids=("st_warning_603377_sh",),
@@ -301,10 +301,10 @@ def _build_st_authority_draft():
         approval_statement_sha256=compute_sha256(
             _canonical({"approval_statement": approval_statement})
         ),
-        decided_at=TradingDate.from_iso("2026-07-31"),
+        decided_at=TradingDate.from_iso("2026-08-04"),
     )
     return AuthorityReferenceBundleDraft(
-        bundle_id="st-603377-authority-v1",
+        bundle_id="st-603377-authority-v3",
         sample_spec_version=sample.sample_spec_version,
         sample_spec_sha256=sample.sample_spec_sha256,
         previous_sample_spec_sha256=sample.previous_sample_spec_sha256,
@@ -345,7 +345,7 @@ def test_v3_authority_bundle_writer_produces_canonical_files(tmp_path: Path) -> 
     verified = AuthorityReferenceBundleVerifier(root=tmp_path).verify(
         directory=directory, sample=sample
     )
-    assert verified.bundle_id == "st-603377-authority-v1"
+    assert verified.bundle_id == "st-603377-authority-v3"
     assert verified.sample_spec_version == sample.sample_spec_version
     assert verified.sample_spec_sha256 == sample.sample_spec_sha256
     assert verified.review_decision_status.value == "APPROVED"
@@ -870,7 +870,7 @@ def test_runtime_plan_with_st_case_and_bundle_passes_sample_gate(tmp_path: Path)
     )
     assert "st_warning_603377_sh" in plan.case_ids
     assert "CASE_NOT_AUTHORITY_APPROVED" not in plan.blocking_reasons
-    assert plan.reference_bundle_id == "st-603377-authority-v1"
+    assert plan.reference_bundle_id == "st-603377-authority-v3"
     assert plan.reference_bundle_sha256
     # Package version is available, but signer is still not initialized.
     assert "REAL_SIGNER_NOT_INITIALIZED" in plan.blocking_reasons
@@ -998,8 +998,8 @@ def test_runtime_execute_with_approved_case_still_blocks_on_signer(
             case_ids=("st_warning_603377_sh",),
             reference_bundle_directory=bundle_dir,
         )
-    # Sample/reference gate passes, but authorization is required.
-    assert captured.value.code == "AUTHORIZATION_REQUIRED"
+    # Sample/reference gate passes, but the disabled runner blocks before claim.
+    assert captured.value.code == "PROVIDER_RUNNER_NOT_ENABLED"
 
 
 def test_runtime_execute_with_unapproved_case_fails_before_authorization(
