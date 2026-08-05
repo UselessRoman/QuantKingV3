@@ -1,4 +1,4 @@
-"""S1-03-R1 status must remain under repair and pending main acceptance."""
+"""S1-03-R1 status must reflect the independent offline main acceptance."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ def _read(relative: str) -> str:
     return (_ROOT / relative).read_text(encoding="utf-8")
 
 
-def test_s1_03_r1_is_under_repair_and_not_main_accepted() -> None:
+def test_s1_03_r1_is_main_accepted_without_claiming_real_capability() -> None:
     for relative in (
         "docs/stage1/TASKS.md",
         "docs/stage1/ACCEPTANCE.md",
@@ -19,9 +19,12 @@ def test_s1_03_r1_is_under_repair_and_not_main_accepted() -> None:
         "docs/stage1/DATA_CONTRACTS.md",
     ):
         text = _read(relative)
-        assert "S1-03-R1 修复中/待主验收" in text
-        assert "S1-03 已主验收" not in text
+        assert "S1-03-R1 已于 2026-08-05" in text or "S1-03-R1 已完成" in text
+        assert "S1-03-R1 修复中/待主验收" not in text
         assert "Stage 1 已完成" not in text
+    acceptance = _read("docs/stage1/S1-03_ACCEPTANCE.md")
+    assert "116 passed" in acceptance
+    assert "继续归入 S1-07C" in acceptance
 
 
 def test_s1_06_acceptance_does_not_authorize_external_work() -> None:

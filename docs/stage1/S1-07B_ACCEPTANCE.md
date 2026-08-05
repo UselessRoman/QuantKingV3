@@ -41,7 +41,7 @@ Stage 1 最终验收仍被 S1-07C/D、真实来源验证和剩余 source×datase
 - S1-07B 基线：`1b818018e9b8ca9f56353b0e78b37008912ba86d`。
 - S1-07B-R1 基线：`310b2758cdb4595fc3e89891c7ca0c30a927447e`。
 - 本任务在 R1 基础上完成：v4 权威核心样本定版、603377.SH ST 权威 case、reference
-  bundle v2 证据链、时间语义修正和运行时按 case 放行。
+  bundle v3 证据链、时间语义修正和运行时按 case 放行。
 - P2B（authority-discovery）提供 document-specific CNINFO locator 证据；P2D/P2E 提供
   接口/材料路径证据；P2F（authority-material-import）提供首个权威事实材料。它们不是白做。
 - 没有联网、QMT/MiniQMT、真实 XTQuant 或备用源调用；没有读取正式数据根、旧项目或备份根
@@ -148,7 +148,7 @@ case（`AUTHORITY_APPROVED`）。全局 release 资格为 `VALIDATION_READY_WITH
 `POINT_IN_TIME` 当时已知性、日线 OHLC/pre_close/volume/amount、供应商能力、字段单位、
 完整历史覆盖。
 
-## Reference bundle v2
+## Reference bundle v3
 
 ### 路径与凭证
 

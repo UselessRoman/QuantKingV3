@@ -4,7 +4,9 @@
 2026-07-16 在提交 `7e4e5b38b7fc91edaf8727ed55b1e26435373aea` 完成主验收，证据见
 [S1-01 主验收证据](S1-01_ACCEPTANCE.md)。
 S1-02 已于 2026-07-18 在提交 `79f9fa3e682e212cf74e7886a04c6fb52158f302`
-完成主验收，证据见 [S1-02 主验收证据](S1-02_ACCEPTANCE.md)。S1-03-R1 修复中/待主验收。
+完成主验收，证据见 [S1-02 主验收证据](S1-02_ACCEPTANCE.md)。S1-03-R1 已于 2026-08-05
+在 HEAD `c57328904397a55ec354e5f57fc15cd4f183f2a5` 完成独立主验收，证据见
+[S1-03 主验收证据](S1-03_ACCEPTANCE.md)；仅覆盖离线/防御性范围，五类真实能力继续归入 S1-07C。
 S1-04 已于 2026-07-22 在提交 `2f99491e9dc410acf85ca81c131a77cae08d0cc3`
 完成主验收，证据见 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。
 S1-05 已于 2026-07-27 在提交 `e580d6963e01b1301dc26f29ed57a0b5b4770a0f`
@@ -70,23 +72,23 @@ S1-02 完成只证明 Warehouse、发布和查询基础可用于后续任务，�
 
 ## S1-03 验收标准
 
-S1-03-R1 修复中/待主验收。当前离线门禁不得写成已经通过主验收：
+S1-03-R1 已于 2026-08-05 完成离线/防御性独立主验收；真实能力仍归入 S1-07C：
 
 | 验收项 | 状态 | 证据 |
 |---|---|---|
-| XTQuant 依赖只存在于适配器边界，生产加载延迟且仅允许 `xtquant.xtdata` | 待主验收 | `sources/xtquant.py`；边界测试 |
-| 六类合成响应映射到精确 Canonical schema、排序、主键和语义验证 | 待主验收 | `test_xtquant_mapping.py` |
-| 无法证实的 point-in-time、单位、因子和历史状态能力安全失败 | 待主验收 | 能力矩阵；`test_xtquant_adapter.py` |
-| 显式覆盖、回看、缺口与稳定分块的 provider-neutral 增量计划 | 待主验收 | `test_incremental_fetch_plan.py` |
-| Raw manifest/SHA/COMPLETE、失败证据及 `IngestionBatch` 终态 | 待主验收 | `test_xtquant_ingestion.py` |
-| Raw 请求信封、真实 row_count、落地后重建及 Gateway/Raw records 一致性 | 待主验收 | S1-03-R1 绑定与篡改回归 |
-| chunk/plan 直接构造、缺失/重复/错序和请求 SHA 复验 | 待主验收 | S1-03-R1 计划攻击回归 |
-| 合法空、意外空、部分响应与稳定脱敏错误严格区分 | 待主验收 | 适配器与集成回归 |
-| 不创建或发布任何 Canonical `DatasetVersion` | 待主验收 | 集成测试查询版本表为零行 |
-| 默认门禁无网络、QMT、正式根和真实 XTQuant 访问 | 待主验收 | 离线守卫；未运行 `real_xtquant` |
+| XTQuant 依赖只存在于适配器边界，生产加载延迟且仅允许 `xtquant.xtdata` | 已主验收 | `sources/xtquant.py`；边界测试 |
+| 六类合成响应映射到精确 Canonical schema、排序、主键和语义验证 | 已主验收 | `test_xtquant_mapping.py` |
+| 无法证实的 point-in-time、单位、因子和历史状态能力安全失败 | 已主验收 | 能力矩阵；`test_xtquant_adapter.py` |
+| 显式覆盖、回看、缺口与稳定分块的 provider-neutral 增量计划 | 已主验收 | `test_incremental_fetch_plan.py` |
+| Raw manifest/SHA/COMPLETE、失败证据及 `IngestionBatch` 终态 | 已主验收 | `test_xtquant_ingestion.py` |
+| Raw 请求信封、真实 row_count、落地后重建及 Gateway/Raw records 一致性 | 已主验收 | S1-03-R1 绑定与篡改回归 |
+| chunk/plan 直接构造、缺失/重复/错序和请求 SHA 复验 | 已主验收 | S1-03-R1 计划攻击回归 |
+| 合法空、意外空、部分响应与稳定脱敏错误严格区分 | 已主验收 | 适配器与集成回归 |
+| 不创建或发布任何 Canonical `DatasetVersion` | 已主验收 | 集成测试查询版本表为零行 |
+| 默认门禁无网络、QMT、正式根和真实 XTQuant 访问 | 已主验收 | 离线守卫；未运行 `real_xtquant` |
 
 真实 XTQuant 样本、QMT 或网络能力没有在本任务中验证。五类未充分证实的数据能力仍是独立显式缺口，
-不能由合成测试消除；是否阻断 S1-03 主验收由主验收 Agent 判定。
+不能由合成测试消除；这些缺口继续由 S1-07C 按项取得授权后复验。
 
 ## S1-04 验收标准
 
@@ -164,3 +166,7 @@ S1-07A 离线验证框架已完成主验收，证据见
 和按 case 放行运行时已定版。17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
 证据见 [S1-07B 主验收证据](S1-07B_ACCEPTANCE.md)。
 S1-07C/D、S1-08 尚未开始、未获授权，详见 [任务卡](TASKS.md)。
+
+后续实现交接、授权矩阵、任务拆分和独立主验收协议见
+[Stage 1 收口实施与主验收交接基线](STAGE1_COMPLETION_HANDOFF.md)。该文档用于导航和保存
+上下文，不替代本验收矩阵。

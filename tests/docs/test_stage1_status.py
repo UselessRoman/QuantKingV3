@@ -24,6 +24,7 @@ _REQUIRED_STAGE1_DOCS = (
     "S1-06_ACCEPTANCE.md",
     "S1-07A_ACCEPTANCE.md",
     "S1-07B_ACCEPTANCE.md",
+    "STAGE1_COMPLETION_HANDOFF.md",
 )
 
 # The canonical status phrase required across updated documents.
@@ -82,6 +83,16 @@ class TestStage1DocsExist:
         assert "Stage 1 已验收" not in text, "Stage 1 must not be described as accepted"
         assert "Stage 1 已完成验收" not in text
         assert "已获实施授权" in text
+
+    def test_stage1_completion_handoff_preserves_pending_and_authorization_boundaries(self) -> None:
+        text = _read(_STAGE1_DIR / "STAGE1_COMPLETION_HANDOFF.md")
+        assert "Stage 1 尚未完成" in text
+        assert "REAL 稳定运行数为 0" in text
+        assert "S1-07C" in text and "未开始、未授权" in text
+        assert "S1-07D" in text and "未开始、未授权" in text
+        assert "S1-08" in text and "未开始、未授权" in text
+        assert "不得自行宣称" in text
+        assert "H0：S1-03-R1 独立主验收复核" in text
 
     @pytest.mark.parametrize(
         "path",

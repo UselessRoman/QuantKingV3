@@ -1090,15 +1090,15 @@ def test_runtime_plan_package_unavailable_keeps_blocking(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_stage1_status_s1_07b_awaiting_acceptance() -> None:
-    """S1-07B final implementation is submitted but awaiting main acceptance."""
+def test_stage1_status_s1_07b_main_accepted() -> None:
+    """S1-07B is main accepted while later external work remains unauthorized."""
     from pathlib import Path as _Path
 
     acceptance = _Path(__file__).resolve().parents[3] / "docs" / "stage1" / "ACCEPTANCE.md"
     text = acceptance.read_text(encoding="utf-8")
     assert "S1-07A" in text and "主验收" in text
-    # S1-07B must not claim main acceptance yet.
-    assert "等待主验收" in text or "awaiting" in text.lower() or "待主验收" in text
+    assert "S1-07B" in text and "完成主验收" in text
+    assert "reference bundle v3" in text
     # S1-07C/D and S1-08 must remain unauthorized.
     assert "S1-07C" in text
     assert "尚未开始" in text or "未获授权" in text or "未开始" in text
