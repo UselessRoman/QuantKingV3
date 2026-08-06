@@ -371,7 +371,7 @@ def build_synthetic_evidence_bundle(
     attack = "arbitrary_payloads" if run_text == "different" else None
     built = build_deep_fake_run(root=root, run_index=run_index, attack=attack)
     untrusted = ValidationEvidenceVerifier(validation_root=root)
-    return built.directory, untrusted.verify(directory=built.directory)
+    return built.directory, untrusted.verify_v2(directory=built.directory)
 
 
 def verified_synthetic_assessment(

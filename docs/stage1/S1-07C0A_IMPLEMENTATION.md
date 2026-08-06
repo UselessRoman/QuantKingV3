@@ -1,6 +1,6 @@
 # S1-07C0A 实现证据：版本化运行证据合同
 
-状态：**C0A 实现完成、等待独立主验收**。本文不是主验收报告，不授予 C0B、S1-07C
+状态：C0A实现完成、等待独立主验收。本文不是主验收报告，不授予 C0B、S1-07C
 真实运行、S1-07D、S1-08 或 Stage 2 的实施权限，也不表示任何来源具有 REAL 或
 `PRODUCTION_READY` 能力。
 
@@ -17,7 +17,7 @@
 
 | 组件 | 既有合同 | C0A 新合同 | 策略 |
 |---|---|---|---|
-| request | `source-validation-request.v1` | `source-validation-request.v2` | v2 原样验证；v3 只接受 identity、排序 case 集及受控上下文完整绑定。 |
+| request | `source-validation-request.v1` | `source-validation-request.v2` | 既有 v1 原样验证；v3 只接受 identity、排序 case 集及受控上下文完整绑定。 |
 | run envelope | `source-validation-envelope.v2` | `source-validation-envelope.v3` | 按 manifest schema 分派，v2 路径未迁移、未重签。 |
 | result attestation | 无 schema discriminator 的 S1-07A attestation | `source-validation-result-attestation.v2` | v3 独立解析、签名与文件名；v2 Fake signer/字节锚保持有效。 |
 | assessment summary | `source-assessment-manifest.v2` | `source-assessment-manifest.v3` | v3 summary 列出每个 run 的完整身份和 frozen context；混用 v2/v3 拒绝。 |
@@ -34,7 +34,7 @@ v3 request 在执行前绑定 assessment、authorization、invocation、session�
 - fixed sample version/SHA；
 - reference bundle ID/manifest SHA；
 - source×dataset semantic/unit/coverage contract 版本与 SHA；
-- dataset promotion profile/config 版本与 SHA、所需 case 集和稳定运行数；
+- dataset promotion profile/config 版本与 SHA、所需 case 集、稳定运行数和受控最大差异数；
 - adapter/package/code/schema/rule/threshold/sample/config 版本。
 
 `request_sha256` 绑定每次 attempt 的全部身份；稳定 `run_fingerprint` 绑定相同的非身份合同
@@ -53,9 +53,11 @@ v3 attempt 明确为 `SUCCEEDED` 或 `FAILED`：
 - semantic、schema/unit、coverage、quality、difference gate 分别由语义违规列表、单位实测
   映射、Canonical 行覆盖、完整 QualityRun 与严格 DifferenceReport 重新计算。writer、envelope
   和 attestation 均不接受 gate 布尔值。
-- 只有 verifier 未来提供 `REAL` 身份、全部成功证据、完整且独立的稳定运行、且 selected case
-  精确满足 promotion profile 所有 required cases 时，才可推导 `PRODUCTION_READY`。单个
-  `AUTHORITY_APPROVED` case 仅可作为执行前置条件，绝不自动提升 source×dataset。
+- C0A 的独立 key-id trust policy 只承认 bundled Fake key，且永久推导为 `SYNTHETIC`；本阶段
+  拒绝一切 REAL profile。未来由另行授权任务提供的 REAL 身份、全部成功证据、完整且独立的
+  稳定运行、且 selected case 精确满足 promotion profile 所有 required cases 时，才可推导
+  `PRODUCTION_READY`。单个 `AUTHORITY_APPROVED` case 仅可作为执行前置条件，绝不自动提升
+  source×dataset。
 
 ## C0A 攻击回归
 
@@ -72,8 +74,10 @@ v3 attempt 明确为 `SUCCEEDED` 或 `FAILED`：
 
 实施对话的离线验证记录如下；它们不构成独立主验收：
 
-- C0A 定向攻击回归：`16 passed`。
-- 既有 S1-07A/S1-07B validation 回归：`202 passed`；S1-07A persistence/finalized-seal
+- C0A 初始定向攻击回归：`16 passed`；R1 的补充攻击回归见
+  [S1-07C0A-R1 实现证据](S1-07C0A-R1_IMPLEMENTATION.md)。
+- 既有 S1-07A/S1-07B validation 回归：`186 passed`；当时整个 validation 目录（含 C0A）为
+  `202 passed`。S1-07A persistence/finalized-seal
   集成回归：`53 passed`。
 - `scripts/quality.ps1`：退出码 0；后端 `1242 passed, 2 skipped, 3 deselected`，Ruff、
   format、mypy、架构边界、Markdown 链接和 `git diff --check` 均通过；前端 typecheck、

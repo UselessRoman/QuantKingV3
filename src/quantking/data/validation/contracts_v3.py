@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from quantking.common.ids import EntityId, parse_entity_id
 from quantking.common.time import UtcTimestamp
@@ -33,6 +33,7 @@ REQUEST_SCHEMA_V3 = "source-validation-request.v2"
 RUN_SCHEMA_V3 = "source-validation-envelope.v3"
 RESULT_ATTESTATION_SCHEMA_V3 = "source-validation-result-attestation.v2"
 ASSESSMENT_SCHEMA_V3 = "source-assessment-manifest.v3"
+FAKE_V3_RUNNER_KEY_ID = "quantking.fake-runner.v1"
 
 _CASE_ID = re.compile(r"^[a-z][a-z0-9_-]{2,63}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -185,6 +186,7 @@ class PromotionProfileV3:
     reference_bundle_id: str
     reference_bundle_manifest_sha256: str
     minimum_stability_runs: int = 3
+    maximum_total_differences: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, str) or not _SOURCE.fullmatch(self.source):
@@ -205,10 +207,17 @@ class PromotionProfileV3:
             or self.minimum_stability_runs < 1
         ):
             raise ValueError("minimum_stability_runs must be a positive integer")
+        if (
+            not isinstance(self.maximum_total_differences, int)
+            or isinstance(self.maximum_total_differences, bool)
+            or self.maximum_total_differences < 0
+        ):
+            raise ValueError("maximum_total_differences must be a non-negative integer")
 
     def to_dict(self) -> dict[str, object]:
         return {
             "dataset": self.dataset.value,
+            "maximum_total_differences": self.maximum_total_differences,
             "minimum_stability_runs": self.minimum_stability_runs,
             "promotion_config_version": self.promotion_config_version,
             "promotion_profile_version": self.promotion_profile_version,
@@ -614,11 +623,33 @@ class ResultAttestationV3:
             raw_success = raw["success_evidence"]
             if not isinstance(raw_identity, dict) or not isinstance(raw["selected_case_ids"], list):
                 raise ValueError
+            if raw_failure is not None and (
+                not isinstance(raw_failure, dict)
+                or set(raw_failure) != {"category", "retryable"}
+                or not isinstance(raw_failure["category"], str)
+                or not isinstance(raw_failure["retryable"], bool)
+            ):
+                raise ValueError
+            success_fields = {
+                "canonical_content_sha256",
+                "difference_manifest_sha256",
+                "difference_report_id",
+                "evidence_inventory_sha256",
+                "quality_manifest_sha256",
+                "quality_run_id",
+                "raw_manifest_sha256",
+                "schema_unit_evidence_sha256",
+                "semantic_evidence_sha256",
+            }
+            if raw_success is not None and (
+                not isinstance(raw_success, dict) or set(raw_success) != success_fields
+            ):
+                raise ValueError
             failure = (
                 None
                 if raw_failure is None
                 else ValidationFailure(
-                    category=str(raw_failure["category"]),
+                    category=raw_failure["category"],
                     retryable=raw_failure["retryable"],
                 )
             )
@@ -665,29 +696,40 @@ class ResultAttestationV3:
             raise ValueError("v3 result attestation is invalid") from error
 
 
+@runtime_checkable
 class V3ResultAttestationSigner(Protocol):
+    """Cryptographic verifier only; it does not declare an evidence identity."""
+
     @property
     def key_id(self) -> str: ...
 
-    @property
-    def evidence_kind(self) -> EvidenceKind: ...
-
     def verify(self, attestation: ResultAttestationV3) -> bool: ...
+
+
+class C0ARunnerTrustPolicy:
+    """C0A's independent, closed key-id binding.
+
+    This task deliberately contains no REAL trust profile.  The only
+    recognized key is the bundled Fake key, and the policy -- not the signer
+    object -- derives its identity as ``SYNTHETIC``.  Future REAL key
+    management belongs to separately authorized C0B work.
+    """
+
+    def evidence_kind_for(self, *, attestation_key_id: str, verifier_key_id: str) -> EvidenceKind:
+        if attestation_key_id != FAKE_V3_RUNNER_KEY_ID or verifier_key_id != FAKE_V3_RUNNER_KEY_ID:
+            raise ValueError("C0A trusts only the permanently SYNTHETIC Fake key")
+        return EvidenceKind.SYNTHETIC
 
 
 class FakeV3RunnerTrustStore:
     """The only bundled v3 signer; it is permanently SYNTHETIC."""
 
-    KEY_ID = "quantking.fake-runner.v1"
+    KEY_ID = FAKE_V3_RUNNER_KEY_ID
     _KEY = b"quantking-s1-07a-r2-fake-runner-key"
 
     @property
     def key_id(self) -> str:
         return self.KEY_ID
-
-    @property
-    def evidence_kind(self) -> EvidenceKind:
-        return EvidenceKind.SYNTHETIC
 
     def sign(self, attestation: ResultAttestationV3) -> ResultAttestationV3:
         if attestation.signer_key_id != self.key_id:
@@ -715,10 +757,12 @@ def dataclass_replace(value: ResultAttestationV3, **changes: object) -> ResultAt
 
 __all__ = [
     "ASSESSMENT_SCHEMA_V3",
+    "FAKE_V3_RUNNER_KEY_ID",
     "REQUEST_SCHEMA_V3",
     "RESULT_ATTESTATION_SCHEMA_V3",
     "RUN_SCHEMA_V3",
     "AttemptOutcomeV3",
+    "C0ARunnerTrustPolicy",
     "FakeV3RunnerTrustStore",
     "PromotionProfileV3",
     "ResultAttestationV3",

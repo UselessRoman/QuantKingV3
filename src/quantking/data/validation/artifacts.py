@@ -7,7 +7,7 @@ import os
 from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from quantking.common.ids import EntityId, parse_entity_id
 from quantking.common.paths import is_reparse_point, resolve_under
@@ -60,10 +60,10 @@ from quantking.data.validation.service import (
 
 if TYPE_CHECKING:
     from quantking.data.validation.artifacts_v3 import (
-        V3EvidenceTrustContext,
         ValidationEvidenceVerifierV3,
+        VerifiedAssessmentEvidenceV3,
+        VerifiedValidationRunV3,
     )
-    from quantking.data.validation.contracts_v3 import V3ResultAttestationSigner
 
 _RUN_SCHEMA = "source-validation-envelope.v2"
 _ASSESSMENT_SCHEMA = "source-assessment-manifest.v2"
@@ -212,7 +212,7 @@ class ValidationEvidenceWriter:
             runner_attestation_verifier=self._runner_trust,
         )
         runs = tuple(
-            verifier.verify_run(directory=child)
+            verifier.verify_run_v2(directory=child)
             for child in sorted(assessment_directory.iterdir(), key=lambda item: item.name)
             if child.is_dir()
             and not child.name.startswith("_assessment")
@@ -252,13 +252,13 @@ class ValidationEvidenceWriter:
                 raise ValidationEvidenceConflictError(
                     "assessment is already finalized with different run evidence"
                 )
-            return verifier.verify_assessment(assessment_directory=assessment_directory)
+            return verifier.verify_assessment_v2(assessment_directory=assessment_directory)
         incomplete = assessment_directory / "_assessment.incomplete"
         incomplete.mkdir(parents=False, exist_ok=False)
         (incomplete / "manifest.json").write_bytes(manifest_bytes)
         (incomplete / "COMPLETE").write_bytes(complete_bytes)
         os.replace(incomplete, directory)
-        return verifier.verify_assessment(assessment_directory=assessment_directory)
+        return verifier.verify_assessment_v2(assessment_directory=assessment_directory)
 
 
 class ValidationEvidenceVerifier:
@@ -289,10 +289,18 @@ class ValidationEvidenceVerifier:
             v3_runner_attestation_verifier=self._v3_runner_trust,
         )
 
-    def verify(self, *, directory: Path) -> VerifiedAssessmentEvidence:
+    def verify(
+        self, *, directory: Path
+    ) -> VerifiedAssessmentEvidence | VerifiedAssessmentEvidenceV3:
         if _schema_version_at(directory / "manifest.json") == "source-validation-envelope.v3":
-            return cast(VerifiedAssessmentEvidence, self._v3_verifier().verify(directory=directory))
-        run = self.verify_run(directory=directory)
+            return self._v3_verifier().verify(directory=directory)
+        return self.verify_v2(directory=directory)
+
+    def verify_v2(self, *, directory: Path) -> VerifiedAssessmentEvidence:
+        """Verify only the accepted v2 contract; reject v3 instead of narrowing it."""
+        if _schema_version_at(directory / "manifest.json") == "source-validation-envelope.v3":
+            raise ValidationEvidenceVerificationError("v3 evidence requires the v3 verifier result")
+        run = self.verify_run_v2(directory=directory)
         manifest = json.loads((directory / "manifest.json").read_bytes())
         sha = str(manifest["manifest_sha256"])
         relative = directory.relative_to(self._root).as_posix()
@@ -313,9 +321,15 @@ class ValidationEvidenceVerifier:
             _seal=_VERIFICATION_SEAL,
         )
 
-    def verify_run(self, *, directory: Path) -> VerifiedValidationRun:
+    def verify_run(self, *, directory: Path) -> VerifiedValidationRun | VerifiedValidationRunV3:
         if _schema_version_at(directory / "manifest.json") == "source-validation-envelope.v3":
-            return cast(VerifiedValidationRun, self._v3_verifier().verify_run(directory=directory))
+            return self._v3_verifier().verify_run(directory=directory)
+        return self.verify_run_v2(directory=directory)
+
+    def verify_run_v2(self, *, directory: Path) -> VerifiedValidationRun:
+        """Verify only the accepted v2 run contract."""
+        if _schema_version_at(directory / "manifest.json") == "source-validation-envelope.v3":
+            raise ValidationEvidenceVerificationError("v3 evidence requires the v3 verifier result")
         manifest, _embedded, files = self._verify_outer(directory)
         envelope = self._parse_envelope(manifest)
         sample = load_packaged_fixed_sample()
@@ -512,11 +526,18 @@ class ValidationEvidenceVerifier:
             _seal=_VERIFICATION_SEAL,
         )
 
-    def verify_assessment(self, *, assessment_directory: Path) -> VerifiedAssessmentEvidence:
+    def verify_assessment(
+        self, *, assessment_directory: Path
+    ) -> VerifiedAssessmentEvidence | VerifiedAssessmentEvidenceV3:
         if (assessment_directory / "_assessment-v3" / "manifest.json").is_file():
-            return cast(
-                VerifiedAssessmentEvidence,
-                self._v3_verifier().verify_assessment(assessment_directory=assessment_directory),
+            return self._v3_verifier().verify_assessment(assessment_directory=assessment_directory)
+        return self.verify_assessment_v2(assessment_directory=assessment_directory)
+
+    def verify_assessment_v2(self, *, assessment_directory: Path) -> VerifiedAssessmentEvidence:
+        """Verify only the accepted v2 assessment contract."""
+        if (assessment_directory / "_assessment-v3" / "manifest.json").is_file():
+            raise ValidationEvidenceVerificationError(
+                "v3 assessment requires the v3 verifier result"
             )
         summary = assessment_directory / "_assessment"
         manifest, embedded = _verify_summary(summary)
@@ -538,7 +559,7 @@ class ValidationEvidenceVerifier:
                 or run_manifest.get("run_id") != entry["run_id"]
             ):
                 raise ValidationEvidenceVerificationError("assessment run lineage mismatch")
-            runs.append(self.verify_run(directory=directory))
+            runs.append(self.verify_run_v2(directory=directory))
         run_tuple = tuple(runs)
         sample = load_packaged_fixed_sample()
         if (
@@ -577,12 +598,21 @@ class ValidationEvidenceVerifier:
         if self._v3_trust_context is None or self._v3_runner_trust is None:
             raise ValidationEvidenceVerificationError("v3 trust context is not configured")
         # Import lazily to avoid changing the completed v2 module import graph.
-        from quantking.data.validation.artifacts_v3 import ValidationEvidenceVerifierV3
+        from quantking.data.validation.artifacts_v3 import (
+            V3EvidenceTrustContext,
+            ValidationEvidenceVerifierV3,
+        )
+        from quantking.data.validation.contracts_v3 import V3ResultAttestationSigner
+
+        if not isinstance(self._v3_trust_context, V3EvidenceTrustContext) or not isinstance(
+            self._v3_runner_trust, V3ResultAttestationSigner
+        ):
+            raise ValidationEvidenceVerificationError("v3 trust configuration is invalid")
 
         return ValidationEvidenceVerifierV3(
             validation_root=self._root,
-            context=cast("V3EvidenceTrustContext", self._v3_trust_context),
-            runner_attestation_verifier=cast("V3ResultAttestationSigner", self._v3_runner_trust),
+            context=self._v3_trust_context,
+            runner_attestation_verifier=self._v3_runner_trust,
         )
 
     def _verify_outer(self, directory: Path) -> tuple[dict[str, object], str, dict[str, bytes]]:

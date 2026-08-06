@@ -8,12 +8,15 @@ database write path, or runtime registration.
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from uuid import UUID
 
@@ -34,8 +37,8 @@ from quantking.data.assessment.models import (
     EvidenceKind,
     SourceCandidateAssessment,
 )
-from quantking.data.comparison.verifier import DifferenceReportVerifier
-from quantking.data.models import DatasetKind
+from quantking.data.comparison.verifier import DifferenceReportVerifier, VerifiedDifferenceReport
+from quantking.data.models import DatasetKind, DataSource
 from quantking.data.validation.artifacts import (
     ValidationEvidenceConflictError,
     ValidationEvidenceVerificationError,
@@ -45,6 +48,7 @@ from quantking.data.validation.contracts_v3 import (
     ASSESSMENT_SCHEMA_V3,
     RUN_SCHEMA_V3,
     AttemptOutcomeV3,
+    C0ARunnerTrustPolicy,
     PromotionProfileV3,
     ResultAttestationV3,
     SourceDatasetContractV3,
@@ -60,6 +64,10 @@ from quantking.data.validation.contracts_v3 import (
 from quantking.data.validation.coverage import evaluate_fixed_sample_coverage
 from quantking.data.validation.models import AssessmentGates, ValidationFailure, ValidationVersions
 from quantking.data.validation.samples import FixedSampleSpec
+
+_V3_VERIFICATION_SEAL = object()
+_V3_ISSUER_KEY = os.urandom(32)
+_V3_ISSUING = ContextVar("v3_evidence_issuing", default=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +202,23 @@ class VerifiedValidationRunV3:
     difference_manifest_sha256: str | None
     difference_report_id: EntityId | None
     verification_reason: str | None
+    _seal: object = dataclass_field(repr=False, compare=False)
+    _issuer_binding: str | None = dataclass_field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._seal is not _V3_VERIFICATION_SEAL:
+            raise ValueError("v3 verified runs can only be issued by the deep verifier")
+        if not isinstance(self.evidence_kind, EvidenceKind):
+            raise TypeError("v3 verified run evidence_kind must be an EvidenceKind")
+        if not isinstance(self.gates, AssessmentGates):
+            raise TypeError("v3 verified run gates must be AssessmentGates")
+        expected = _v3_issuer_binding("verified-run", _verified_run_payload(self))
+        if self._issuer_binding is None and not _V3_ISSUING.get():
+            raise ValueError("v3 verified runs require the private verifier issuer")
+        if self._issuer_binding is None:
+            object.__setattr__(self, "_issuer_binding", expected)
+        elif not hmac.compare_digest(self._issuer_binding, expected):
+            raise ValueError("v3 verified run issuer binding is invalid")
 
     @property
     def failure(self) -> ValidationFailure | None:
@@ -216,6 +241,130 @@ class VerifiedAssessmentEvidenceV3:
     evidence_relative_path: str
     common_run_fingerprint: str | None
     context: V3EvidenceTrustContext
+    _seal: object = dataclass_field(repr=False, compare=False)
+    _issuer_binding: str | None = dataclass_field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._seal is not _V3_VERIFICATION_SEAL:
+            raise ValueError("v3 verified assessments can only be issued by the deep verifier")
+        if not self.verified_runs:
+            raise ValueError("v3 verified assessment requires at least one verified run")
+        if any(
+            run.identity.assessment_id != self.assessment.assessment_id
+            or run.envelope.source != self.assessment.source
+            or run.envelope.dataset is not self.assessment.dataset
+            for run in self.verified_runs
+        ):
+            raise ValueError("v3 verified runs must bind one assessment cell")
+        if (
+            self.assessment.evidence_relative_path != self.evidence_relative_path
+            or self.assessment.evidence_sha256 != self.evidence_manifest_sha256
+        ):
+            raise ValueError("v3 assessment must bind its verified manifest")
+        expected = _v3_issuer_binding("verified-assessment", _verified_assessment_payload(self))
+        if self._issuer_binding is None and not _V3_ISSUING.get():
+            raise ValueError("v3 verified assessments require the private verifier issuer")
+        if self._issuer_binding is None:
+            object.__setattr__(self, "_issuer_binding", expected)
+        elif not hmac.compare_digest(self._issuer_binding, expected):
+            raise ValueError("v3 verified assessment issuer binding is invalid")
+
+
+def _v3_issuer_binding(domain: str, payload: Mapping[str, object]) -> str:
+    return hmac.new(
+        _V3_ISSUER_KEY,
+        canonical_json({"domain": domain, "payload": dict(payload)}),
+        "sha256",
+    ).hexdigest()
+
+
+def _issue_v3[IssuerValue](factory: Callable[[], IssuerValue]) -> IssuerValue:
+    token = _V3_ISSUING.set(True)
+    try:
+        return factory()
+    finally:
+        _V3_ISSUING.reset(token)
+
+
+def _verified_run_payload(run: VerifiedValidationRunV3) -> dict[str, object]:
+    return {
+        "canonical_content_sha256": run.canonical_content_sha256,
+        "difference_manifest_sha256": run.difference_manifest_sha256,
+        "difference_report_id": (
+            str(run.difference_report_id) if run.difference_report_id is not None else None
+        ),
+        "envelope": run.envelope.to_payload(),
+        "evidence_kind": run.evidence_kind.value,
+        "evidence_manifest_sha256": run.evidence_manifest_sha256,
+        "gates": run.gates.to_dict(),
+        "quality_manifest_sha256": run.quality_manifest_sha256,
+        "quality_run_id": str(run.quality_run_id) if run.quality_run_id is not None else None,
+        "raw_manifest_sha256": run.raw_manifest_sha256,
+        "verification_reason": run.verification_reason,
+    }
+
+
+def _assessment_payload(assessment: SourceCandidateAssessment) -> dict[str, object]:
+    return {
+        "assessment_config_version": assessment.assessment_config_version,
+        "assessment_id": str(assessment.assessment_id),
+        "blocking_reason": assessment.blocking_reason,
+        "coverage_adequate": assessment.coverage_adequate,
+        "created_at": assessment.created_at.to_iso(),
+        "dataset": assessment.dataset.value,
+        "evidence_kind": assessment.evidence_kind.value,
+        "evidence_relative_path": assessment.evidence_relative_path,
+        "evidence_sha256": assessment.evidence_sha256,
+        "fixed_sample_differences_adequate": assessment.fixed_sample_differences_adequate,
+        "quality_passed": assessment.quality_passed,
+        "rule_version": assessment.rule_version,
+        "sample_spec_version": assessment.sample_spec_version,
+        "schema_unit_verified": assessment.schema_unit_verified,
+        "semantic_contract_verified": assessment.semantic_contract_verified,
+        "source": assessment.source,
+        "stability_runs": assessment.stability_runs,
+        "status": assessment.status.value,
+    }
+
+
+def _verified_assessment_payload(evidence: VerifiedAssessmentEvidenceV3) -> dict[str, object]:
+    return {
+        "assessment": _assessment_payload(evidence.assessment),
+        "common_run_fingerprint": evidence.common_run_fingerprint,
+        "context": {
+            "promotion_profile": evidence.context.promotion_profile.to_dict(),
+            "sample_spec_sha256": evidence.context.sample.sample_spec_sha256,
+            "sample_spec_version": evidence.context.sample.sample_spec_version,
+            "source_dataset_contract": evidence.context.source_dataset_contract.to_dict(),
+        },
+        "evidence_manifest_sha256": evidence.evidence_manifest_sha256,
+        "evidence_relative_path": evidence.evidence_relative_path,
+        "verified_runs": [_verified_run_payload(run) for run in evidence.verified_runs],
+    }
+
+
+def _difference_report_binds_attempt_source(
+    *,
+    report: VerifiedDifferenceReport,
+    source: str,
+    canonical_content_sha256: str,
+    quality_run_id: EntityId,
+) -> bool:
+    try:
+        source_id = DataSource(source)
+    except ValueError:
+        return False
+    if report.primary_source == source_id.value:
+        return (
+            report.primary_content_sha256 == canonical_content_sha256
+            and report.primary_quality_run_id == quality_run_id
+        )
+    if report.fallback_source == source_id.value:
+        return (
+            report.fallback_content_sha256 == canonical_content_sha256
+            and report.fallback_quality_run_id == quality_run_id
+        )
+    return False
 
 
 class ValidationEvidenceWriterV3:
@@ -341,6 +490,7 @@ class ValidationEvidenceVerifierV3:
         self._root = _validate_root(validation_root)
         self.context = context
         self._runner_trust = runner_attestation_verifier
+        self._runner_policy = C0ARunnerTrustPolicy()
 
     def verify(self, *, directory: Path) -> VerifiedAssessmentEvidenceV3:
         """Verify one v3 run as a deliberately BLOCKED one-run assessment.
@@ -359,13 +509,16 @@ class ValidationEvidenceVerifierV3:
             evidence_sha256=evidence_sha,
             created_at=run.envelope.ended_at,
         )
-        return VerifiedAssessmentEvidenceV3(
-            assessment=assessment,
-            verified_runs=(run,),
-            evidence_manifest_sha256=evidence_sha,
-            evidence_relative_path=directory.relative_to(self._root).as_posix(),
-            common_run_fingerprint=run.envelope.run_fingerprint,
-            context=self.context,
+        return _issue_v3(
+            lambda: VerifiedAssessmentEvidenceV3(
+                assessment=assessment,
+                verified_runs=(run,),
+                evidence_manifest_sha256=evidence_sha,
+                evidence_relative_path=directory.relative_to(self._root).as_posix(),
+                common_run_fingerprint=run.envelope.run_fingerprint,
+                context=self.context,
+                _seal=_V3_VERIFICATION_SEAL,
+            )
         )
 
     def verify_run(self, *, directory: Path) -> VerifiedValidationRunV3:
@@ -389,22 +542,29 @@ class ValidationEvidenceVerifierV3:
                 manifest=manifest,
                 signer=self._runner_trust,
             )
+            evidence_kind = self._runner_policy.evidence_kind_for(
+                attestation_key_id=attestation.signer_key_id,
+                verifier_key_id=self._runner_trust.key_id,
+            )
             if envelope.outcome is AttemptOutcomeV3.FAILED:
                 _verify_failed_attempt(envelope=envelope, files=files)
-                return VerifiedValidationRunV3(
-                    envelope=envelope,
-                    evidence_manifest_sha256=manifest_sha,
-                    evidence_kind=self._runner_trust.evidence_kind,
-                    gates=AssessmentGates.none_passed(),
-                    raw_manifest_sha256=None,
-                    canonical_content_sha256=None,
-                    quality_manifest_sha256=None,
-                    quality_run_id=None,
-                    difference_manifest_sha256=None,
-                    difference_report_id=None,
-                    verification_reason=envelope.failure.category
-                    if envelope.failure
-                    else "FAILED_ATTEMPT",
+                return _issue_v3(
+                    lambda: VerifiedValidationRunV3(
+                        envelope=envelope,
+                        evidence_manifest_sha256=manifest_sha,
+                        evidence_kind=evidence_kind,
+                        gates=AssessmentGates.none_passed(),
+                        raw_manifest_sha256=None,
+                        canonical_content_sha256=None,
+                        quality_manifest_sha256=None,
+                        quality_run_id=None,
+                        difference_manifest_sha256=None,
+                        difference_report_id=None,
+                        verification_reason=envelope.failure.category
+                        if envelope.failure
+                        else "FAILED_ATTEMPT",
+                        _seal=_V3_VERIFICATION_SEAL,
+                    )
                 )
             return self._verify_successful_attempt(
                 directory=directory,
@@ -412,6 +572,7 @@ class ValidationEvidenceVerifierV3:
                 manifest_sha=manifest_sha,
                 files=files,
                 attestation=attestation,
+                evidence_kind=evidence_kind,
             )
         except ValidationEvidenceVerificationError:
             raise
@@ -428,6 +589,7 @@ class ValidationEvidenceVerifierV3:
         manifest_sha: str,
         files: Mapping[str, bytes],
         attestation: ResultAttestationV3,
+        evidence_kind: EvidenceKind,
     ) -> VerifiedValidationRunV3:
         if attestation.success_evidence is None:
             raise ValidationEvidenceVerificationError(
@@ -478,8 +640,13 @@ class ValidationEvidenceVerifierV3:
             and report.schema_version == envelope.versions.schema_version
             and report.threshold_rule_version == envelope.versions.threshold_version
             and report.sample_spec_sha256 == expected_difference_sample_sha
-            and canonical.content_sha256
-            in {report.primary_content_sha256, report.fallback_content_sha256}
+            and report.total_differences <= self.context.promotion_profile.maximum_total_differences
+            and _difference_report_binds_attempt_source(
+                report=report,
+                source=envelope.source,
+                canonical_content_sha256=canonical.content_sha256,
+                quality_run_id=quality_id,
+            )
         )
         semantic_ok = _verify_semantic_evidence(
             payload=files["semantic/result.json"],
@@ -520,28 +687,31 @@ class ValidationEvidenceVerifierV3:
             ),
             calendar_rows=calendar_rows,
         )
-        return VerifiedValidationRunV3(
-            envelope=envelope,
-            evidence_manifest_sha256=manifest_sha,
-            evidence_kind=self._runner_trust.evidence_kind,
-            gates=AssessmentGates(
-                semantic_contract_verified=semantic_ok,
-                schema_unit_verified=schema_unit_ok,
-                coverage_adequate=coverage,
-                quality_passed=quality_ok,
-                fixed_sample_differences_adequate=difference_ok,
-            ),
-            raw_manifest_sha256=raw.manifest_sha,
-            canonical_content_sha256=canonical.content_sha256,
-            quality_manifest_sha256=quality_sha,
-            quality_run_id=quality_id,
-            difference_manifest_sha256=report.manifest_sha256,
-            difference_report_id=report.report_id,
-            verification_reason=(
-                None
-                if all((semantic_ok, schema_unit_ok, coverage, quality_ok, difference_ok))
-                else "SUCCESSFUL_ATTEMPT_WITH_BLOCKING_GATE"
-            ),
+        return _issue_v3(
+            lambda: VerifiedValidationRunV3(
+                envelope=envelope,
+                evidence_manifest_sha256=manifest_sha,
+                evidence_kind=evidence_kind,
+                gates=AssessmentGates(
+                    semantic_contract_verified=semantic_ok,
+                    schema_unit_verified=schema_unit_ok,
+                    coverage_adequate=coverage,
+                    quality_passed=quality_ok,
+                    fixed_sample_differences_adequate=difference_ok,
+                ),
+                raw_manifest_sha256=raw.manifest_sha,
+                canonical_content_sha256=canonical.content_sha256,
+                quality_manifest_sha256=quality_sha,
+                quality_run_id=quality_id,
+                difference_manifest_sha256=report.manifest_sha256,
+                difference_report_id=report.report_id,
+                verification_reason=(
+                    None
+                    if all((semantic_ok, schema_unit_ok, coverage, quality_ok, difference_ok))
+                    else "SUCCESSFUL_ATTEMPT_WITH_BLOCKING_GATE"
+                ),
+                _seal=_V3_VERIFICATION_SEAL,
+            )
         )
 
     def verify_assessment(self, *, assessment_directory: Path) -> VerifiedAssessmentEvidenceV3:
@@ -586,13 +756,16 @@ class ValidationEvidenceVerifierV3:
                 (run.envelope.ended_at for run in run_tuple), key=lambda item: item.value
             ),
         )
-        return VerifiedAssessmentEvidenceV3(
-            assessment=assessment,
-            verified_runs=run_tuple,
-            evidence_manifest_sha256=manifest_sha,
-            evidence_relative_path=summary_dir.relative_to(self._root).as_posix(),
-            common_run_fingerprint=_common_fingerprint_v3(run_tuple),
-            context=self.context,
+        return _issue_v3(
+            lambda: VerifiedAssessmentEvidenceV3(
+                assessment=assessment,
+                verified_runs=run_tuple,
+                evidence_manifest_sha256=manifest_sha,
+                evidence_relative_path=summary_dir.relative_to(self._root).as_posix(),
+                common_run_fingerprint=_common_fingerprint_v3(run_tuple),
+                context=self.context,
+                _seal=_V3_VERIFICATION_SEAL,
+            )
         )
 
 
@@ -751,13 +924,18 @@ def _parse_envelope_v3(manifest: Mapping[str, object]) -> ValidationRunEnvelopeV
         raw_cases = manifest["selected_case_ids"]
         if not isinstance(raw_identity, dict) or not isinstance(raw_cases, list):
             raise ValueError
-        if raw_failure is not None and not isinstance(raw_failure, Mapping):
+        if raw_failure is not None and (
+            not isinstance(raw_failure, Mapping)
+            or set(raw_failure) != {"category", "retryable"}
+            or not isinstance(raw_failure["category"], str)
+            or not isinstance(raw_failure["retryable"], bool)
+        ):
             raise ValueError
         failure = (
             None
             if raw_failure is None
             else ValidationFailure(
-                category=str(raw_failure["category"]), retryable=raw_failure["retryable"]
+                category=raw_failure["category"], retryable=raw_failure["retryable"]
             )
         )
         return ValidationRunEnvelopeV3(

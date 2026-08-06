@@ -112,6 +112,9 @@ def build_v3_run(
     selected_case_ids: tuple[str, ...] = ("calendar_sh",),
     failure: ValidationFailure | None = None,
     context: V3EvidenceTrustContext | None = None,
+    comparison_primary_source: DataSource = DataSource.XTQUANT,
+    comparison_fallback_source: DataSource = DataSource.BAOSTOCK,
+    comparison_has_difference: bool = False,
 ) -> BuiltV3Run:
     """Build a complete synthetic v3 success or a credential-free failure."""
     trust_context = context or build_v3_context()
@@ -183,6 +186,9 @@ def build_v3_run(
         request=request,
         signer=signer,
         context=trust_context,
+        comparison_primary_source=comparison_primary_source,
+        comparison_fallback_source=comparison_fallback_source,
+        comparison_has_difference=comparison_has_difference,
     )
 
 
@@ -247,6 +253,9 @@ def _write_successful_run(
     request: ValidationRequestManifestV3,
     signer: FakeV3RunnerTrustStore,
     context: V3EvidenceTrustContext,
+    comparison_primary_source: DataSource,
+    comparison_fallback_source: DataSource,
+    comparison_has_difference: bool,
 ) -> BuiltV3Run:
     cases = request.selected_cases
     rows = tuple(
@@ -317,23 +326,28 @@ def _write_successful_run(
         )
     )
     table = build_fake_exchange_calendar_table(rows)
+    fallback_rows = rows if not comparison_has_difference else rows[1:]
+    fallback_table = build_fake_exchange_calendar_table(fallback_rows)
+    _fallback_bytes, fallback_content_sha, _fallback_row_count = (
+        build_fake_exchange_calendar_parquet(fallback_rows)
+    )
     difference_root = root / f"_v3-difference-{envelope.identity.run_id.value.hex}"
     outcome = CrossSourceComparator().compare(
         request=CrossSourceComparisonRequest(
             dataset=envelope.dataset,
             schema_version=envelope.versions.schema_version,
-            primary_source=DataSource.XTQUANT,
-            fallback_source=DataSource.BAOSTOCK,
+            primary_source=comparison_primary_source,
+            fallback_source=comparison_fallback_source,
             primary_version_id=_id("data_version", 10, lane=8),
             fallback_version_id=_id("data_version", 11, lane=8),
             primary_batch_id=_id("data_batch", 10, lane=9),
             fallback_batch_id=_id("data_batch", 11, lane=9),
             primary_content_sha256=content_sha,
-            fallback_content_sha256=content_sha,
+            fallback_content_sha256=fallback_content_sha,
             primary_quality_run_id=quality.run_id,
             fallback_quality_run_id=_id("data_quality", 12, lane=6),
             primary_table=table,
-            fallback_table=table,
+            fallback_table=fallback_table,
             thresholds=default_thresholds(),
             sample_spec=envelope.selected_case_ids,
             created_at=envelope.ended_at,

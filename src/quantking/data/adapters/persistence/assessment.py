@@ -375,7 +375,7 @@ class SqliteSourceAssessmentPersistenceAdapter:
             runner_attestation_verifier=self._signer,
             signer_trust_policy=self._policy,
         )
-        evidence = verifier.verify_assessment(assessment_directory=directory)
+        evidence = verifier.verify_assessment_v2(assessment_directory=directory)
         _verify_exact_assessment_tree(directory)
         return evidence, _attestation_summary(self._policy, directory, evidence)
 
@@ -602,7 +602,7 @@ def _verify_sealed_archive(
             runner_attestation_verifier=signer,
             signer_trust_policy=policy,
         )
-        evidence = verifier.verify_assessment(assessment_directory=assessment_directory)
+        evidence = verifier.verify_assessment_v2(assessment_directory=assessment_directory)
         _verify_exact_assessment_tree(assessment_directory)
         summary = _attestation_summary(policy, assessment_directory, evidence)
         return evidence, summary

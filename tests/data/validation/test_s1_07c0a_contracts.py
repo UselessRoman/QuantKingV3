@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from quantking.data.assessment.models import AssessmentStatus, EvidenceKind
+from quantking.data.models import DataSource
 from quantking.data.validation.artifacts import (
     ValidationEvidenceVerificationError,
     ValidationEvidenceVerifier,
@@ -18,6 +19,7 @@ from quantking.data.validation.artifacts import (
 from quantking.data.validation.artifacts_v3 import (
     ValidationEvidenceVerifierV3,
     ValidationEvidenceWriterV3,
+    VerifiedAssessmentEvidenceV3,
 )
 from quantking.data.validation.contracts_v3 import (
     AttemptOutcomeV3,
@@ -119,7 +121,61 @@ def test_v2_artifacts_keep_accepted_bytes_and_v3_is_explicitly_dispatched(tmp_pa
         v3_trust_context=v3.context,
         v3_runner_attestation_verifier=FakeV3RunnerTrustStore(),
     ).verify(directory=v3.directory)
+    assert isinstance(dispatched, VerifiedAssessmentEvidenceV3)
     assert dispatched.assessment.evidence_kind is EvidenceKind.SYNTHETIC
+
+
+class _FakeSignerClaimingReal:
+    """Attack wrapper: it verifies Fake signatures but self-reports REAL."""
+
+    def __init__(self) -> None:
+        self._fake = FakeV3RunnerTrustStore()
+
+    @property
+    def key_id(self) -> str:
+        return self._fake.key_id
+
+    @property
+    def evidence_kind(self) -> EvidenceKind:
+        return EvidenceKind.REAL
+
+    def verify(self, attestation: object) -> bool:
+        from quantking.data.validation.contracts_v3 import ResultAttestationV3
+
+        return isinstance(attestation, ResultAttestationV3) and self._fake.verify(attestation)
+
+
+def test_v3_fake_key_is_permanently_synthetic_even_when_a_verifier_claims_real(
+    tmp_path: Path,
+) -> None:
+    first = build_v3_run(
+        root=tmp_path,
+        run_index=1,
+        selected_case_ids=("calendar_bj", "calendar_sh"),
+    )
+    build_v3_run(
+        root=tmp_path,
+        run_index=2,
+        selected_case_ids=("calendar_bj", "calendar_sh"),
+    )
+    build_v3_run(
+        root=tmp_path,
+        run_index=3,
+        selected_case_ids=("calendar_bj", "calendar_sh"),
+    )
+    verifier = ValidationEvidenceVerifierV3(
+        validation_root=tmp_path,
+        context=first.context,
+        runner_attestation_verifier=_FakeSignerClaimingReal(),
+    )
+    assessment = ValidationEvidenceWriterV3(validation_root=tmp_path).finalize_assessment(
+        assessment_directory=first.directory.parent,
+        verifier=verifier,
+    )
+    assert assessment.assessment.evidence_kind is EvidenceKind.SYNTHETIC
+    assert assessment.assessment.status is AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION
+    assert assessment.assessment.stability_runs == 3
+    assert all(run.evidence_kind is EvidenceKind.SYNTHETIC for run in assessment.verified_runs)
 
 
 @pytest.mark.parametrize(
@@ -187,6 +243,26 @@ def test_v3_rejects_reference_bundle_and_source_profile_substitution(tmp_path: P
     )
     with pytest.raises(ValidationEvidenceVerificationError):
         profile.verifier.verify_run(directory=profile.directory)
+
+
+@pytest.mark.parametrize(
+    "comparison_options",
+    (
+        {"comparison_has_difference": True},
+        {
+            "comparison_primary_source": DataSource.BAOSTOCK,
+            "comparison_fallback_source": DataSource.AKSHARE,
+        },
+    ),
+    ids=("difference-exceeds-profile-limit", "source-not-on-report-side"),
+)
+def test_v3_difference_gate_requires_zero_allowed_differences_and_attempt_side_lineage(
+    tmp_path: Path, comparison_options: dict[str, object]
+) -> None:
+    built = build_v3_run(root=tmp_path, run_index=1, **comparison_options)
+    verified = built.verifier.verify_run(directory=built.directory)
+    assert not verified.gates.fixed_sample_differences_adequate
+    assert verified.verification_reason == "SUCCESSFUL_ATTEMPT_WITH_BLOCKING_GATE"
 
 
 def test_v3_rejects_resigned_or_replaced_signer(tmp_path: Path) -> None:
@@ -259,6 +335,32 @@ def test_v3_writer_refuses_a_failed_attempt_with_success_credentials(tmp_path: P
                 "canonical/content.parquet": (b"smuggled", 1),
             },
         )
+
+
+def test_v3_failure_envelope_rejects_unknown_nested_fields(tmp_path: Path) -> None:
+    built = build_v3_run(root=tmp_path, run_index=1, outcome=AttemptOutcomeV3.FAILED)
+    manifest_path = built.directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["failure"]["untrusted_path"] = "C:/sensitive/provider-response.json"
+    manifest_path.write_bytes(canonical_json(manifest))
+    _rewrite_outer(built.directory)
+    with pytest.raises(ValidationEvidenceVerificationError, match="run envelope"):
+        built.verifier.verify_run(directory=built.directory)
+
+
+def test_v3_verified_results_reject_replace_based_gate_or_identity_forgery(tmp_path: Path) -> None:
+    built = build_v3_run(root=tmp_path, run_index=1)
+    run = built.verifier.verify_run(directory=built.directory)
+    with pytest.raises(ValueError, match="issuer binding"):
+        replace(run, evidence_kind=EvidenceKind.REAL)
+    with pytest.raises(ValueError, match="private verifier issuer"):
+        replace(run, _issuer_binding=None)
+
+    assessment = built.verifier.verify(directory=built.directory)
+    with pytest.raises(ValueError, match="issuer binding"):
+        replace(assessment, common_run_fingerprint="f" * 64)
+    with pytest.raises(ValueError, match="private verifier issuer"):
+        replace(assessment, _issuer_binding=None)
 
 
 def test_v3_assessment_rejects_forged_gates_and_recomputed_plain_sha(tmp_path: Path) -> None:
