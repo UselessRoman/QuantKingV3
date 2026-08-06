@@ -7,6 +7,7 @@ import os
 from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from quantking.common.ids import EntityId, parse_entity_id
 from quantking.common.paths import is_reparse_point, resolve_under
@@ -56,6 +57,13 @@ from quantking.data.validation.service import (
     assess_verified_runs,
     common_fingerprint,
 )
+
+if TYPE_CHECKING:
+    from quantking.data.validation.artifacts_v3 import (
+        V3EvidenceTrustContext,
+        ValidationEvidenceVerifierV3,
+    )
+    from quantking.data.validation.contracts_v3 import V3ResultAttestationSigner
 
 _RUN_SCHEMA = "source-validation-envelope.v2"
 _ASSESSMENT_SCHEMA = "source-assessment-manifest.v2"
@@ -260,19 +268,30 @@ class ValidationEvidenceVerifier:
         validation_root: Path,
         runner_attestation_verifier: ResultAttestationSigner | None = None,
         signer_trust_policy: SignerTrustPolicy | None = None,
+        v3_trust_context: object | None = None,
+        v3_runner_attestation_verifier: object | None = None,
     ) -> None:
         self._root = _validate_root(validation_root)
         self._runner_trust = runner_attestation_verifier
         self._signer_policy = signer_trust_policy or SignerTrustPolicy.synthetic_only()
+        # C0A deliberately accepts no bundled REAL signer.  These opaque,
+        # future-C0B injection points only select the separate v3 verifier;
+        # v2 trust and byte semantics remain untouched.
+        self._v3_trust_context = v3_trust_context
+        self._v3_runner_trust = v3_runner_attestation_verifier
 
     def with_trust_policy(self, policy: SignerTrustPolicy) -> ValidationEvidenceVerifier:
         return ValidationEvidenceVerifier(
             validation_root=self._root,
             runner_attestation_verifier=self._runner_trust,
             signer_trust_policy=policy,
+            v3_trust_context=self._v3_trust_context,
+            v3_runner_attestation_verifier=self._v3_runner_trust,
         )
 
     def verify(self, *, directory: Path) -> VerifiedAssessmentEvidence:
+        if _schema_version_at(directory / "manifest.json") == "source-validation-envelope.v3":
+            return cast(VerifiedAssessmentEvidence, self._v3_verifier().verify(directory=directory))
         run = self.verify_run(directory=directory)
         manifest = json.loads((directory / "manifest.json").read_bytes())
         sha = str(manifest["manifest_sha256"])
@@ -295,6 +314,8 @@ class ValidationEvidenceVerifier:
         )
 
     def verify_run(self, *, directory: Path) -> VerifiedValidationRun:
+        if _schema_version_at(directory / "manifest.json") == "source-validation-envelope.v3":
+            return cast(VerifiedValidationRun, self._v3_verifier().verify_run(directory=directory))
         manifest, _embedded, files = self._verify_outer(directory)
         envelope = self._parse_envelope(manifest)
         sample = load_packaged_fixed_sample()
@@ -492,6 +513,11 @@ class ValidationEvidenceVerifier:
         )
 
     def verify_assessment(self, *, assessment_directory: Path) -> VerifiedAssessmentEvidence:
+        if (assessment_directory / "_assessment-v3" / "manifest.json").is_file():
+            return cast(
+                VerifiedAssessmentEvidence,
+                self._v3_verifier().verify_assessment(assessment_directory=assessment_directory),
+            )
         summary = assessment_directory / "_assessment"
         manifest, embedded = _verify_summary(summary)
         declared = manifest["runs"]
@@ -545,6 +571,18 @@ class ValidationEvidenceVerifier:
             common_run_fingerprint=common_fingerprint(run_tuple),
             sample_eligibility=sample.eligibility,
             _seal=_VERIFICATION_SEAL,
+        )
+
+    def _v3_verifier(self) -> ValidationEvidenceVerifierV3:
+        if self._v3_trust_context is None or self._v3_runner_trust is None:
+            raise ValidationEvidenceVerificationError("v3 trust context is not configured")
+        # Import lazily to avoid changing the completed v2 module import graph.
+        from quantking.data.validation.artifacts_v3 import ValidationEvidenceVerifierV3
+
+        return ValidationEvidenceVerifierV3(
+            validation_root=self._root,
+            context=cast("V3EvidenceTrustContext", self._v3_trust_context),
+            runner_attestation_verifier=cast("V3ResultAttestationSigner", self._v3_runner_trust),
         )
 
     def _verify_outer(self, directory: Path) -> tuple[dict[str, object], str, dict[str, bytes]]:
@@ -678,6 +716,22 @@ def _read_file(path: Path) -> bytes:
         return path.read_bytes()
     except OSError as error:
         raise ValidationEvidenceVerificationError("required evidence file is missing") from error
+
+
+def _schema_version_at(path: Path) -> str | None:
+    """Read only the discriminator needed for version dispatch.
+
+    Deep structural verification is still performed by the selected verifier;
+    this helper must never be treated as evidence verification.
+    """
+    try:
+        parsed = json.loads(_read_file(path))
+    except (json.JSONDecodeError, ValidationEvidenceVerificationError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    value = parsed.get("manifest_schema_version")
+    return value if isinstance(value, str) else None
 
 
 def _verify_quality(

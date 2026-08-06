@@ -39,8 +39,20 @@ def build_fake_exchange_calendar_parquet(
     rows: tuple[tuple[str, date, bool], ...],
 ) -> tuple[bytes, str, int]:
     """Create strict Canonical bytes for offline Fake-runner tests."""
+    table = build_fake_exchange_calendar_table(rows)
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink)  # type: ignore[no-untyped-call]
+    return (
+        bytes(sink.getvalue()),
+        canonical_content_sha256(DatasetKind.EXCHANGE_CALENDAR, [table]),
+        table.num_rows,
+    )
+
+
+def build_fake_exchange_calendar_table(rows: tuple[tuple[str, date, bool], ...]) -> pa.Table:
+    """Create the strict table used by isolated validation contract fixtures."""
     dataset = DatasetKind.EXCHANGE_CALENDAR
-    table = pa.Table.from_arrays(
+    return pa.Table.from_arrays(
         [
             pa.array([row[0] for row in rows], type=pa.string()),
             pa.array([row[1] for row in rows], type=pa.date32()),
@@ -48,14 +60,12 @@ def build_fake_exchange_calendar_parquet(
         ],
         schema=canonical_schema(dataset.value),
     )
-    sink = pa.BufferOutputStream()
-    pq.write_table(table, sink)  # type: ignore[no-untyped-call]
-    return bytes(sink.getvalue()), canonical_content_sha256(dataset, [table]), table.num_rows
 
 
 __all__ = [
     "VerifiedCanonicalEvidence",
     "build_fake_exchange_calendar_parquet",
+    "build_fake_exchange_calendar_table",
     "verify_canonical_evidence",
     "verify_quality_row_evidence",
 ]
