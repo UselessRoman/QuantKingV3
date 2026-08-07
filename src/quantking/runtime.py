@@ -15,6 +15,7 @@ from quantking.common.time import utc_now
 from quantking.data.adapters.eod import EodWorkerHandler, register_eod_handler
 from quantking.data.adapters.eod_base import PublishedEodBaseResolver
 from quantking.data.adapters.persistence.assessment import (
+    MultiplexedV3SealedAssessmentTrustResolver,
     SealedAssessmentReadVerifier,
     V3SealedAssessmentTrustResolver,
 )
@@ -97,6 +98,7 @@ def build_eod_runtime(
     settings: AppSettings,
     *,
     gateway: MarketDataGateway | None = None,
+    real_v3_trust_resolver: V3SealedAssessmentTrustResolver | None = None,
 ) -> EodRuntime:
     """Build the production object graph without importing the XTQuant SDK.
 
@@ -137,17 +139,19 @@ def build_eod_runtime(
         progress_min_interval_ms=settings.job_progress_min_interval_ms,
     )
     jobs = JobService(SqliteUnitOfWorkFactory(jobs_engine), retry_policy=retry)
-    # Assessment reads deep-verify every v2 and C0B v3 seal.  The v3 resolver
-    # re-verifies the accepted S1-07B authority bundle for each read and owns
-    # only the fixed Fake/SYNTHETIC trust policy; any REAL or missing bundle
-    # configuration still fails closed.
+    # Assessment reads deep-verify every v2 and v3 seal.  C0B's accepted
+    # SYNTHETIC resolver is always explicit; C1A REAL rows remain fail-closed
+    # unless a caller injects its own verifier-owned REAL resolver.
     assessment_reader = SealedAssessmentReadVerifier(
         validation_root=data_root,
         signer=FakeRunnerTrustStore(),
         signer_trust_policy=SignerTrustPolicy.synthetic_only(),
         v3_trust_resolver=cast(
             V3SealedAssessmentTrustResolver,
-            ControlledFakeV3TrustResolver(reference_bundle_root=data_root),
+            MultiplexedV3SealedAssessmentTrustResolver(
+                synthetic_resolver=ControlledFakeV3TrustResolver(reference_bundle_root=data_root),
+                real_resolver=real_v3_trust_resolver,
+            ),
         ),
     )
     data_uow = DataSqliteUnitOfWorkFactory(

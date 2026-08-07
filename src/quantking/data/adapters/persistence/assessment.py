@@ -76,15 +76,64 @@ class AssessmentReadVerifier(Protocol):
 class V3SealedAssessmentTrustConfiguration(Protocol):
     """Verifier-owned v3 context and signer; never artifact or DB supplied."""
 
-    context: V3EvidenceTrustContext
-    signer: V3ResultAttestationSigner
-    runner_trust_policy: V3RunnerTrustPolicy
+    @property
+    def context(self) -> V3EvidenceTrustContext: ...
+
+    @property
+    def signer(self) -> V3ResultAttestationSigner: ...
+
+    @property
+    def runner_trust_policy(self) -> V3RunnerTrustPolicy: ...
 
 
 class V3SealedAssessmentTrustResolver(Protocol):
     """Resolves verifier-owned v3 trust afresh for every persisted-row read."""
 
     def resolve(self) -> V3SealedAssessmentTrustConfiguration: ...
+
+
+class V3SealedAssessmentRowTrustResolver(Protocol):
+    """Optional row-aware dispatcher for independently versioned v3 trust roots."""
+
+    def resolve_for_row(
+        self, row: SourceCandidateAssessmentRow
+    ) -> V3SealedAssessmentTrustConfiguration: ...
+
+
+class MultiplexedV3SealedAssessmentTrustResolver:
+    """Dispatch v3 evidence by the persisted evidence family, then deep-verify it.
+
+    The row is not trusted for authorization: it only chooses a verifier-owned
+    resolver.  The selected resolver subsequently re-verifies the seal, bundle,
+    contract, signer, and assessment, so changing the row's family still fails
+    closed.  C0B SYNTHETIC remains available while C1A REAL is opt-in.
+    """
+
+    def __init__(
+        self,
+        *,
+        synthetic_resolver: V3SealedAssessmentTrustResolver,
+        real_resolver: V3SealedAssessmentTrustResolver | None = None,
+    ) -> None:
+        self._synthetic = synthetic_resolver
+        self._real = real_resolver
+
+    def resolve_for_row(
+        self, row: SourceCandidateAssessmentRow
+    ) -> V3SealedAssessmentTrustConfiguration:
+        try:
+            kind = EvidenceKind(row.evidence_kind)
+        except ValueError as error:
+            raise ValueError("persisted v3 evidence kind is invalid") from error
+        if kind is EvidenceKind.SYNTHETIC:
+            return self._synthetic.resolve()
+        if kind is EvidenceKind.REAL and self._real is not None:
+            return self._real.resolve()
+        raise ValueError("persisted REAL v3 evidence has no configured trust resolver")
+
+    def resolve(self) -> V3SealedAssessmentTrustConfiguration:
+        """Prevent accidental static use; reads must dispatch on their sealed row."""
+        raise ValueError("multiplexed v3 trust requires persisted-row dispatch")
 
 
 class _ExclusiveFile(AbstractContextManager["_ExclusiveFile"]):
@@ -286,7 +335,10 @@ class SealedAssessmentReadVerifier:
                 signer: V3ResultAttestationSigner | None
                 policy: V3RunnerTrustPolicy | None
                 if self._v3_resolver is not None:
-                    resolved = self._v3_resolver.resolve()
+                    row_resolver = getattr(self._v3_resolver, "resolve_for_row", None)
+                    resolved = (
+                        row_resolver(row) if callable(row_resolver) else self._v3_resolver.resolve()
+                    )
                     context = resolved.context
                     signer = resolved.signer
                     policy = resolved.runner_trust_policy
@@ -1099,7 +1151,10 @@ def _canonical(value: object) -> bytes:
 
 __all__ = [
     "AssessmentReadVerifier",
+    "MultiplexedV3SealedAssessmentTrustResolver",
     "SealedAssessmentReadVerifier",
     "SqliteSourceAssessmentPersistenceAdapter",
     "SqliteV3SourceAssessmentPersistenceAdapter",
+    "V3SealedAssessmentRowTrustResolver",
+    "V3SealedAssessmentTrustResolver",
 ]
