@@ -11,6 +11,7 @@ requires-python = "==3.12.13"
 dependencies = [
     "alembic>=1.15,<2",
     "backtrader==1.9.78.123",
+    "cryptography>=48,<49",
     "duckdb>=1.2,<2",
     "fastapi>=0.115,<1",
     "lightgbm>=4.6,<5",

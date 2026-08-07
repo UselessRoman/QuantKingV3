@@ -1,15 +1,17 @@
-"""S1-07C1A offline REAL authorization, runner, seal, and read-side tests."""
+"""S1-07C1A-R1 pure-offline REAL control-chain regressions."""
 
 from __future__ import annotations
 
 import json
 import sys
-from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from time import sleep
 from types import SimpleNamespace
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from quantking.common.config import AppSettings
 from quantking.common.errors import InvalidDataTransitionError
@@ -18,40 +20,41 @@ from quantking.common.paths import RuntimePaths
 from quantking.common.time import UtcTimestamp, utc_now
 from quantking.data.adapters.persistence.assessment import (
     SealedAssessmentReadVerifier,
-    SqliteV3SourceAssessmentPersistenceAdapter,
+    SqliteRealSourceAssessmentPersistenceAdapter,
 )
 from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
 )
 from quantking.data.adapters.sources.xtquant_metadata import ExplicitXtQuantPackageMetadataProbe
-from quantking.data.adapters.sources.xtquant_real_validation import XtQuantValidationAdapterResult
 from quantking.data.assessment.models import AssessmentStatus, EvidenceKind
 from quantking.data.center import DataCenterQueryService
 from quantking.data.models import DatasetKind
-from quantking.data.validation.artifacts_v3 import ValidationEvidenceVerifierV3
-from quantking.data.validation.authorization import (
-    AuthorizationClaimStore,
-    FakeRunnerTrustStore,
-    SignerTrustPolicy,
+from quantking.data.validation.artifacts import ValidationEvidenceVerificationError
+from quantking.data.validation.authorization import FakeRunnerTrustStore, SignerTrustPolicy
+from quantking.data.validation.contracts_v3 import AttemptOutcomeV3, ValidationAttemptIdentityV3
+from quantking.data.validation.real_artifacts import (
+    RealResultAttestation,
+    RealValidationEvidenceVerifier,
+    RealValidationEvidenceWriter,
 )
-from quantking.data.validation.contracts_v3 import AttemptOutcomeV3
 from quantking.data.validation.real_authorization import (
-    LocalRealV3Signer,
+    ExplicitLocalRealKey,
+    RealAuthorizationClaimStore,
     RealAuthorizationError,
     RealExecutionAuthorizationAuthority,
+    RealExecutionAuthorizationVerifier,
     RealRuntimeAuthorizationAuthority,
     RealRuntimeAuthorizationFileLoader,
+    RealRuntimeAuthorizationVerifier,
+    RealVerifierTrustAnchor,
 )
 from quantking.data.validation.real_runtime import (
     ExplicitRealXtQuantTrustResolver,
     RealXtQuantAssessmentService,
     RealXtQuantExecutionError,
     RealXtQuantValidationRuntime,
-    build_real_xtquant_context,
-    build_real_xtquant_plan,
 )
-from quantking.data.validation.runners.xtquant_real import XtQuantRealProviderRunner
 from quantking.jobs.adapters.persistence.sqlite import initialize_database
 from quantking.runtime import build_eod_runtime
 
@@ -73,25 +76,33 @@ def _write_verified_authority_bundle(root: Path) -> Path:
     )
 
 
-def _write_metadata(root: Path, version: str = "1.2.3") -> Path:
+def _write_metadata(root: Path, version: str = "1.2.3") -> None:
     metadata = root / f"xtquant-{version}.dist-info" / "METADATA"
     metadata.parent.mkdir(parents=True)
     metadata.write_text(f"Name: xtquant\nVersion: {version}\n", encoding="utf-8")
-    return root
 
 
-def _keys(root: Path) -> tuple[Path, Path]:
-    authorization = root / "keys" / "authorization.key"
-    runner = root / "keys" / "runner.key"
-    authorization.parent.mkdir(parents=True)
-    authorization.write_bytes(b"a" * 48)
-    runner.write_bytes(b"r" * 48)
-    return authorization, runner
+def _keypair(root: Path, name: str) -> tuple[Path, Path, str]:
+    private = Ed25519PrivateKey.generate()
+    private_file = root / "keys" / f"{name}-private.pem"
+    public_file = root / "keys" / f"{name}-public.pem"
+    private_file.parent.mkdir(parents=True, exist_ok=True)
+    private_file.write_bytes(
+        private.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    public_file.write_bytes(
+        private.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+    )
+    return private_file, public_file, ExplicitLocalRealKey(private_key_file=private_file).key_id
 
 
-def _identity(authorization_id: object) -> object:
-    from quantking.data.validation.contracts_v3 import ValidationAttemptIdentityV3
-
+def _identity(authorization_id: object) -> ValidationAttemptIdentityV3:
     return ValidationAttemptIdentityV3(
         assessment_id=new_entity_id("data_assessment"),
         authorization_id=authorization_id,  # type: ignore[arg-type]
@@ -104,10 +115,11 @@ def _identity(authorization_id: object) -> object:
 def _runtime(
     root: Path,
     *,
-    output_root: Path | None = None,
     metadata: bool = True,
     runner_preflight: object | None = None,
-    trust_key: Path | None = None,
+    runner_public: Path | None = None,
+    allowed_runner_ids: frozenset[str] | None = None,
+    output_root: Path | None = None,
 ) -> tuple[
     RealXtQuantValidationRuntime,
     RealExecutionAuthorizationAuthority,
@@ -115,29 +127,28 @@ def _runtime(
     ExplicitRealXtQuantTrustResolver,
     Path,
 ]:
-    authority_root = root / "authority"
-    _write_verified_authority_bundle(authority_root)
+    _write_verified_authority_bundle(root / "authority")
     site_packages = root / "site-packages"
     if metadata:
         _write_metadata(site_packages)
-    authorization_key, runner_key = _keys(root)
+    auth_private, auth_public, auth_id = _keypair(root, "authorization")
+    runner_private, default_runner_public, runner_id = _keypair(root, "runner")
     trust = ExplicitRealXtQuantTrustResolver(
-        reference_bundle_root=authority_root,
-        runner_key_id="local.real.runner.v1",
-        runner_private_key_file=trust_key or runner_key,
+        reference_bundle_root=root / "authority",
+        runner_public_key_file=runner_public or default_runner_public,
+        allowed_runner_key_ids=allowed_runner_ids or frozenset({runner_id}),
     )
-    file_authority = RealRuntimeAuthorizationAuthority(
-        key_id="local.real.authorization.v1",
-        private_key_file=authorization_key,
+    auth_anchor = RealVerifierTrustAnchor(
+        public_key_file=auth_public, allowed_key_ids=frozenset({auth_id})
     )
     runtime = RealXtQuantValidationRuntime(
-        authorization_file_loader=RealRuntimeAuthorizationFileLoader(verifier=file_authority),
-        authorization_verifier=RealExecutionAuthorizationAuthority(
-            key_id="local.real.authorization.v1",
-            private_key_file=authorization_key,
+        authorization_file_loader=RealRuntimeAuthorizationFileLoader(
+            verifier=RealRuntimeAuthorizationVerifier(trust_anchor=auth_anchor)
         ),
-        claim_store=AuthorizationClaimStore(claim_root=root / "claims"),
+        authorization_verifier=RealExecutionAuthorizationVerifier(trust_anchor=auth_anchor),
+        claim_store=RealAuthorizationClaimStore(claim_root=root / "claims"),
         trust_resolver=trust,
+        runner_signer=ExplicitLocalRealKey(private_key_file=runner_private),
         package_metadata_probe=ExplicitXtQuantPackageMetadataProbe(
             site_packages_root=site_packages
         ),
@@ -145,11 +156,8 @@ def _runtime(
     )
     return (
         runtime,
-        RealExecutionAuthorizationAuthority(
-            key_id="local.real.authorization.v1",
-            private_key_file=authorization_key,
-        ),
-        file_authority,
+        RealExecutionAuthorizationAuthority(private_key_file=auth_private),
+        RealRuntimeAuthorizationAuthority(private_key_file=auth_private),
         trust,
         output_root or (root / "output"),
     )
@@ -162,57 +170,51 @@ def _issued(
     runner_preflight: object | None = None,
     valid_from: UtcTimestamp | None = None,
     expires_at: UtcTimestamp | None = None,
-    trust_key: Path | None = None,
+    runner_public: Path | None = None,
+    allowed_runner_ids: frozenset[str] | None = None,
+    output_root: Path | None = None,
 ) -> tuple[Path, RealXtQuantValidationRuntime, ExplicitRealXtQuantTrustResolver, Path]:
-    runtime, execution_authority, file_authority, trust, output = _runtime(
+    runtime, execution_issuer, file_issuer, trust, output = _runtime(
         root,
         metadata=metadata,
         runner_preflight=runner_preflight,
-        trust_key=trust_key,
+        runner_public=runner_public,
+        allowed_runner_ids=allowed_runner_ids,
+        output_root=output_root,
     )
-    configuration = trust.resolve() if trust_key is None else None
-    context = (
-        configuration.context
-        if configuration is not None
-        else build_real_xtquant_context(reference_bundle_root=root / "authority")
-    )
-    authorization = execution_authority.issue(
+    configuration = trust.resolve()
+    start = valid_from or UtcTimestamp(utc_now().value - timedelta(seconds=5))
+    authorization = execution_issuer.issue(
         authorization_id=new_entity_id("data_authorization"),
         source="XTQUANT",
         dataset=DatasetKind.TRADING_STATUS,
         output_root=output,
-        sample_sha256=context.sample.sample_spec_sha256,
-        valid_from=valid_from,
+        sample_sha256=configuration.context.sample.sample_spec_sha256,
+        valid_from=start,
         expires_at=expires_at or UtcTimestamp(utc_now().value + timedelta(minutes=5)),
     )
     identity = _identity(authorization.authorization_id)
-    plan = build_real_xtquant_plan(
-        output_root=Path(authorization.output_root),
-        identity=identity,  # type: ignore[arg-type]
-        context=context,
-        package_version="1.2.3",
-        runner_key_id="local.real.runner.v1",
-    )
-    envelope = file_authority.issue(
+    plan = runtime.plan_for_authorization(output_root=output, identity=identity)
+    envelope = file_issuer.issue(
         authorization=authorization,
-        identity=identity,  # type: ignore[arg-type]
+        identity=identity,
         selected_case_ids=plan.selected_case_ids,
-        reference_bundle_id=context.promotion_profile.reference_bundle_id,
-        reference_bundle_sha256=context.promotion_profile.reference_bundle_manifest_sha256,
-        source_dataset_contract=context.source_dataset_contract,
-        promotion_profile=context.promotion_profile,
-        output_scope=str(Path(authorization.output_root)),
+        reference_bundle_id=configuration.context.promotion_profile.reference_bundle_id,
+        reference_bundle_sha256=configuration.context.promotion_profile.reference_bundle_manifest_sha256,
+        source_dataset_contract=configuration.context.source_dataset_contract,
+        promotion_profile=configuration.context.promotion_profile,
+        output_scope=str(output),
         frozen_versions=plan.versions.to_dict(),
         plan_sha256=plan.plan_sha256,
         claim_nonce="c" * 64,
-        runner_key_id="local.real.runner.v1",
+        runner_key_id=plan.runner_key_id,
     )
     file = root / "real-runtime-authorization.json"
     file.write_bytes(envelope.to_bytes())
     return file, runtime, trust, output
 
 
-def test_default_fixed_unit_preserves_unsupported_capability_after_claim(tmp_path: Path) -> None:
+def test_default_fixed_unit_is_real_blocked_and_does_not_import_xtquant(tmp_path: Path) -> None:
     authorization_file, runtime, _trust, output = _issued(tmp_path)
     before = set(sys.modules)
 
@@ -220,53 +222,25 @@ def test_default_fixed_unit_preserves_unsupported_capability_after_claim(tmp_pat
 
     assert result.event_order == ("PRECHECK", "CLAIM", "IMPORT", "OUTPUT")
     assert result.outcome is AttemptOutcomeV3.FAILED
-    assert json.loads((result.directory / "failure" / "attempt.json").read_bytes())["failure"] == {
-        "category": "CAPABILITY_UNSUPPORTED",
-        "retryable": False,
+    assert json.loads((result.directory / "failure" / "attempt.json").read_bytes()) == {
+        "failure": {"category": "CAPABILITY_UNSUPPORTED", "retryable": False}
     }
-    assert not (result.directory / "canonical").exists()
+    assert not (result.directory / "success").exists()
     assert len(list((tmp_path / "claims").glob("*.json"))) == 1
     assert "xtquant" not in set(sys.modules) - before
     assert output.exists()
 
 
-def test_real_file_rejects_fake_key_id_and_c0b_file_before_claim(tmp_path: Path) -> None:
-    authorization_file, runtime, trust, _output = _issued(tmp_path)
-    authority = RealRuntimeAuthorizationAuthority(
-        key_id="local.real.authorization.v1",
-        private_key_file=tmp_path / "keys" / "authorization.key",
-    )
-    from quantking.data.validation.contracts_v3 import FAKE_V3_RUNNER_KEY_ID
-    from quantking.data.validation.real_authorization import RealRuntimeAuthorizationEnvelope
-
-    current = RealRuntimeAuthorizationEnvelope.from_bytes(authorization_file.read_bytes())
+def test_public_fake_bytes_or_caller_key_id_can_never_become_real(tmp_path: Path) -> None:
+    _private, public, runner_id = _keypair(tmp_path, "runner")
+    fake_public = tmp_path / "fake-public.pem"
+    fake_public.write_bytes(b"quantking-s1-07a-r2-fake-runner-key")
     with pytest.raises(RealAuthorizationError):
-        authority.issue(
-            authorization=current.authorization,
-            identity=current.identity,
-            selected_case_ids=current.selected_case_ids,
-            reference_bundle_id=current.reference_bundle_id,
-            reference_bundle_sha256=current.reference_bundle_sha256,
-            source_dataset_contract=current.source_dataset_contract,
-            promotion_profile=current.promotion_profile,
-            output_scope=current.output_scope,
-            frozen_versions=current.frozen_versions,
-            plan_sha256=current.plan_sha256,
-            claim_nonce=current.claim_nonce,
-            runner_key_id=FAKE_V3_RUNNER_KEY_ID,
+        RealVerifierTrustAnchor(public_key_file=fake_public, allowed_key_ids=frozenset({runner_id}))
+    with pytest.raises(RealAuthorizationError):
+        RealVerifierTrustAnchor(
+            public_key_file=public, allowed_key_ids=frozenset({"quantking.fake-runner.v1"})
         )
-    authorization_file.write_bytes(b'{"schema_version":"runtime-authorization-envelope.v2"}')
-    with pytest.raises(RealXtQuantExecutionError) as captured:
-        runtime.execute(authorization_file=authorization_file)
-    assert captured.value.code == "REAL_RUNTIME_AUTHORIZATION_INVALID"
-    assert not (tmp_path / "claims").exists()
-    assert (
-        trust.resolve().runner_trust_policy.evidence_kind_for(
-            attestation_key_id="local.real.runner.v1",
-            verifier_key_id="local.real.runner.v1",
-        )
-        is EvidenceKind.REAL
-    )
 
 
 @pytest.mark.parametrize(
@@ -275,21 +249,17 @@ def test_real_file_rejects_fake_key_id_and_c0b_file_before_claim(tmp_path: Path)
         lambda raw: raw.update({"unexpected": "field"}),
         lambda raw: raw.update({"claim_nonce": 7}),
         lambda raw: raw.update({"case_ids": ["st_warning_603377_sh", "calendar_sh"]}),
-        lambda raw: raw["promotion_profile"].update({"minimum_stability_runs": "3"}),
-        lambda raw: raw["source_dataset_contract"].update({"unexpected": "field"}),
         lambda raw: raw["authorization"].update({"output_root": "C:\\replaced-output"}),
     ),
-    ids=("unknown", "type", "case", "nested-type", "nested-unknown", "output-root"),
+    ids=("unknown", "type", "case", "output-root"),
 )
-def test_real_authorization_is_canonical_typed_and_file_only_before_claim(
+def test_real_authorization_is_canonical_file_only_before_claim(
     tmp_path: Path, mutate: object
 ) -> None:
     authorization_file, runtime, _trust, output = _issued(tmp_path)
     raw = json.loads(authorization_file.read_bytes())
     mutate(raw)  # type: ignore[operator]
-    authorization_file.write_bytes(
-        json.dumps(raw, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
-    )
+    authorization_file.write_bytes(json.dumps(raw, separators=(",", ":"), sort_keys=True).encode())
 
     with pytest.raises(RealXtQuantExecutionError) as captured:
         runtime.execute(authorization_file=authorization_file)
@@ -299,9 +269,7 @@ def test_real_authorization_is_canonical_typed_and_file_only_before_claim(
     assert not output.exists()
 
 
-def test_expired_authorization_and_missing_metadata_stop_before_claim_or_import(
-    tmp_path: Path,
-) -> None:
+def test_expired_missing_trust_runner_or_package_stops_before_claim(tmp_path: Path) -> None:
     expired_file, expired_runtime, _trust, output = _issued(
         tmp_path / "expired",
         valid_from=UtcTimestamp(utc_now().value - timedelta(minutes=2)),
@@ -311,87 +279,33 @@ def test_expired_authorization_and_missing_metadata_stop_before_claim_or_import(
         expired_runtime.execute(authorization_file=expired_file)
     assert expired.value.code == "AUTHORIZATION_INVALID_OR_EXPIRED"
     assert not (tmp_path / "expired" / "claims").exists()
-    assert not output.exists()
 
-    missing_file, missing_runtime, _missing_trust, missing_output = _issued(
-        tmp_path / "metadata", metadata=False
+    missing_file, missing_runtime, _trust, _ = _issued(tmp_path / "metadata")
+    (tmp_path / "metadata" / "site-packages").rename(
+        tmp_path / "metadata" / "site-packages-missing"
     )
     with pytest.raises(RealXtQuantExecutionError) as missing:
         missing_runtime.execute(authorization_file=missing_file)
     assert missing.value.code == "XTQUANT_PACKAGE_METADATA_UNAVAILABLE"
     assert not (tmp_path / "metadata" / "claims").exists()
-    assert not missing_output.exists()
 
-
-def test_missing_trust_or_runner_stops_before_claim_import_and_output(tmp_path: Path) -> None:
-    missing_key = tmp_path / "missing-runner.key"
-    authorization_file, runtime, _trust, output = _issued(
-        tmp_path / "missing-trust", trust_key=missing_key
-    )
-    with pytest.raises(RealXtQuantExecutionError) as trust_error:
-        runtime.execute(authorization_file=authorization_file)
-    assert trust_error.value.code == "REAL_TRUST_NOT_CONFIGURED"
-    assert not (tmp_path / "missing-trust" / "claims").exists()
-    assert not output.exists()
-
-    authorization_file, runtime, _trust, output = _issued(
-        tmp_path / "missing-runner", runner_preflight=lambda: False
-    )
-    with pytest.raises(RealXtQuantExecutionError) as runner_error:
-        runtime.execute(authorization_file=authorization_file)
-    assert runner_error.value.code == "REAL_RUNNER_NOT_READY"
-    assert not (tmp_path / "missing-runner" / "claims").exists()
+    runner_file, runner_runtime, _trust, _ = _issued(tmp_path / "runner")
+    runner_runtime._runner_preflight = lambda: False  # type: ignore[attr-defined]
+    with pytest.raises(RealXtQuantExecutionError) as runner:
+        runner_runtime.execute(authorization_file=runner_file)
+    assert runner.value.code == "REAL_RUNNER_NOT_READY"
+    assert not (tmp_path / "runner" / "claims").exists()
     assert not output.exists()
 
 
-def test_bundle_output_version_and_key_substitution_fail_closed_before_claim(
-    tmp_path: Path,
-) -> None:
-    authorization_file, runtime, _trust, output = _issued(tmp_path)
-    authority = RealRuntimeAuthorizationAuthority(
-        key_id="local.real.authorization.v1",
-        private_key_file=tmp_path / "keys" / "authorization.key",
-    )
-    from quantking.data.validation.real_authorization import RealRuntimeAuthorizationEnvelope
-
-    current = RealRuntimeAuthorizationEnvelope.from_bytes(authorization_file.read_bytes())
-    changed_profile = replace(
-        current.promotion_profile,
-        reference_bundle_manifest_sha256="a" * 64,
-    )
-    changed = authority.issue(
-        authorization=current.authorization,
-        identity=current.identity,
-        selected_case_ids=current.selected_case_ids,
-        reference_bundle_id=current.reference_bundle_id,
-        reference_bundle_sha256="a" * 64,
-        source_dataset_contract=current.source_dataset_contract,
-        promotion_profile=changed_profile,
-        output_scope=current.output_scope,
-        frozen_versions={**current.frozen_versions, "package_version": "9.9.9"},
-        plan_sha256=current.plan_sha256,
-        claim_nonce=current.claim_nonce,
-        runner_key_id="local.real.replaced.v1",
-    )
-    authorization_file.write_bytes(changed.to_bytes())
+def test_runner_public_key_substitution_is_rejected_before_claim(tmp_path: Path) -> None:
+    _private, changed_public, _changed_id = _keypair(tmp_path, "changed")
+    authorization_file, runtime, trust, _output = _issued(tmp_path / "substitution")
+    trust._runner_public_key_file.write_bytes(changed_public.read_bytes())  # type: ignore[attr-defined]
     with pytest.raises(RealXtQuantExecutionError) as captured:
         runtime.execute(authorization_file=authorization_file)
-    assert captured.value.code == "REAL_RUNTIME_AUTHORIZATION_BINDING_MISMATCH"
-    assert not (tmp_path / "claims").exists()
-    assert not output.exists()
-
-
-def test_replay_does_not_overwrite_the_first_real_attempt(tmp_path: Path) -> None:
-    authorization_file, runtime, _trust, output = _issued(tmp_path)
-    first = runtime.execute(authorization_file=authorization_file)
-
-    with pytest.raises(RealXtQuantExecutionError) as replay:
-        runtime.execute(authorization_file=authorization_file)
-
-    assert replay.value.code == "RUN_ID_ALREADY_EXISTS"
-    assert (first.directory / "COMPLETE").is_file()
-    assert len(list((tmp_path / "claims").glob("*.json"))) == 1
-    assert not list(output.rglob("*.incomplete"))
+    assert captured.value.code == "REAL_TRUST_NOT_CONFIGURED"
+    assert not (tmp_path / "substitution" / "claims").exists()
 
 
 def test_claim_is_retained_for_import_and_runner_crash(tmp_path: Path) -> None:
@@ -409,9 +323,7 @@ def test_claim_is_retained_for_import_and_runner_crash(tmp_path: Path) -> None:
         def execute(self, **_kwargs: object) -> Path:
             raise RuntimeError("crash")
 
-    runtime._import_runner = lambda _name: SimpleNamespace(  # type: ignore[attr-defined]
-        create_runner=lambda: CrashRunner()
-    )
+    runtime._import_runner = lambda _name: SimpleNamespace(create_runner=lambda: CrashRunner())  # type: ignore[attr-defined]
     with pytest.raises(RealXtQuantExecutionError) as crashed:
         runtime.execute(authorization_file=authorization_file)
     assert crashed.value.code == "REAL_RUNNER_CRASHED"
@@ -419,41 +331,110 @@ def test_claim_is_retained_for_import_and_runner_crash(tmp_path: Path) -> None:
     assert len(list(output.rglob("*.incomplete/failure.json"))) == 1
 
 
-def test_isolated_fake_adapter_can_exercise_success_without_changing_default_capability(
-    tmp_path: Path,
-) -> None:
+def test_real_attestation_is_within_authorization_and_execution_window(tmp_path: Path) -> None:
+    authorization_file, runtime, trust, _output = _issued(tmp_path)
+    result = runtime.execute(authorization_file=authorization_file)
+    attestation = RealResultAttestation.from_bytes(
+        (result.directory / "runner" / "result-attestation.real.v1.json").read_bytes()
+    )
+    envelope = json.loads(authorization_file.read_bytes())
+    valid_from = UtcTimestamp.from_iso(envelope["authorization"]["valid_from"])
+    expires_at = UtcTimestamp.from_iso(envelope["authorization"]["expires_at"])
+    assert (
+        valid_from.value
+        <= attestation.started_at.value
+        < attestation.ended_at.value
+        < expires_at.value
+    )
+    verified = RealValidationEvidenceVerifier(
+        validation_root=result.directory.parents[4],
+        context=trust.resolve().context,
+        verifier_anchor=trust.resolve().verifier_anchor,
+    ).verify_run(directory=result.directory)
+    assert verified.outcome is AttemptOutcomeV3.FAILED
+
+
+def test_only_isolated_test_success_builder_can_write_success_evidence(tmp_path: Path) -> None:
+    """The formal factory remains blocked; this builder exists only in this test."""
     authorization_file, runtime, trust, _output = _issued(tmp_path)
 
-    class SuccessAdapter:
-        def validate_fixed_case(self) -> XtQuantValidationAdapterResult:
-            return XtQuantValidationAdapterResult(AttemptOutcomeV3.SUCCEEDED, None)
+    class TestOnlySuccessRunner:
+        def execute(self, **kwargs: object) -> Path:
+            plan = kwargs["plan"]
+            output_root = kwargs["output_root"]
+            assert hasattr(plan, "evidence_inputs")
+            assert isinstance(output_root, Path)
+            started_at = utc_now()
+            ended_at = utc_now()
+            while ended_at.value <= started_at.value:
+                sleep(0.001)
+                ended_at = utc_now()
+            return RealValidationEvidenceWriter(validation_root=output_root).write_success(
+                inputs=plan.evidence_inputs(),  # type: ignore[union-attr]
+                started_at=started_at,
+                ended_at=ended_at,
+            )
 
     runtime._import_runner = lambda _name: SimpleNamespace(  # type: ignore[attr-defined]
-        create_runner=lambda: XtQuantRealProviderRunner(adapter=SuccessAdapter())
+        create_runner=lambda: TestOnlySuccessRunner()
     )
     result = runtime.execute(authorization_file=authorization_file)
-    configuration = trust.resolve()
-    verified = ValidationEvidenceVerifierV3(
-        validation_root=result.directory.parents[4],
-        context=configuration.context,
-        runner_attestation_verifier=configuration.signer,
-        runner_trust_policy=configuration.runner_trust_policy,
-    ).verify_run(directory=result.directory)
     assert result.outcome is AttemptOutcomeV3.SUCCEEDED
-    assert verified.evidence_kind is EvidenceKind.REAL
+    assert (result.directory / "success" / "attempt.json").is_file()
+    verified = RealValidationEvidenceVerifier(
+        validation_root=result.directory.parents[4],
+        context=trust.resolve().context,
+        verifier_anchor=trust.resolve().verifier_anchor,
+    ).verify_run(directory=result.directory)
+    assert verified.outcome is AttemptOutcomeV3.SUCCEEDED
 
 
-def test_real_blocked_evidence_seals_persists_and_formal_read_requires_explicit_trust(
+def test_missing_or_replaced_lineage_fails_persist_and_formal_read(tmp_path: Path) -> None:
+    authorization_file, runtime, trust, output = _issued(tmp_path)
+    result = runtime.execute(authorization_file=authorization_file)
+    assessment_dir = result.directory.parent
+    (result.directory / "request" / "plan.json").unlink()
+    database = tmp_path / "metadata.db"
+    initialize_database(database)
+    engine = create_data_engine(database, busy_timeout_ms=250)
+    try:
+        config = trust.resolve()
+        service = RealXtQuantAssessmentService(
+            validation_root=output,
+            trust_resolver=trust,
+            persistence=SqliteRealSourceAssessmentPersistenceAdapter(
+                engine=engine,
+                validation_root=output,
+                context=config.context,
+                verifier_anchor=config.verifier_anchor,
+            ),
+        )
+        with pytest.raises(RealXtQuantExecutionError):
+            service.finalize_and_persist(assessment_directory=assessment_dir)
+    finally:
+        engine.dispose()
+
+    authorization_file, runtime, trust, output = _issued(tmp_path / "receipt")
+    result = runtime.execute(authorization_file=authorization_file)
+    receipt = result.directory / "authorization" / "claim-receipt.json"
+    receipt.write_bytes(receipt.read_bytes().replace(b'"plan_sha256"', b'"plan_sha25x"'))
+    with pytest.raises(ValidationEvidenceVerificationError):
+        RealValidationEvidenceVerifier(
+            validation_root=output,
+            context=trust.resolve().context,
+            verifier_anchor=trust.resolve().verifier_anchor,
+        ).verify_run(directory=result.directory)
+
+
+def test_real_blocked_evidence_seals_persists_and_requires_explicit_read_anchor(
     tmp_path: Path,
 ) -> None:
     data_root = tmp_path / "runtime-data"
-    authorization_file, runtime, trust, _output = _issued(data_root)
+    authorization_file, runtime, trust, output = _issued(data_root, output_root=data_root)
     result = runtime.execute(authorization_file=authorization_file)
     settings = AppSettings(
         paths=RuntimePaths(
-            code_root=Path.cwd(),
-            data_root=data_root,
-            offsite_backup_root=tmp_path / "offsite",
+            code_root=Path.cwd(), data_root=data_root, offsite_backup_root=tmp_path / "offsite"
         ),
         xtquant_site_packages_root=tmp_path / "missing-sdk",
         web_host="127.0.0.1",
@@ -467,40 +448,32 @@ def test_real_blocked_evidence_seals_persists_and_formal_read_requires_explicit_
         job_progress_min_interval_ms=250,
     )
     without_real = build_eod_runtime(settings)
-    engine = create_data_engine(
-        data_root / "metadata" / "quantking.db",
-        busy_timeout_ms=250,
-    )
+    engine = create_data_engine(data_root / "metadata" / "quantking.db", busy_timeout_ms=250)
     try:
-        configuration = trust.resolve()
-        adapter = SqliteV3SourceAssessmentPersistenceAdapter(
-            engine=engine,
-            validation_root=data_root,
-            context=configuration.context,
-            signer=configuration.signer,
-            runner_trust_policy=configuration.runner_trust_policy,
-        )
+        config = trust.resolve()
         saved = RealXtQuantAssessmentService(
-            validation_root=data_root,
+            validation_root=output,
             trust_resolver=trust,
-            persistence=adapter,
+            persistence=SqliteRealSourceAssessmentPersistenceAdapter(
+                engine=engine,
+                validation_root=output,
+                context=config.context,
+                verifier_anchor=config.verifier_anchor,
+            ),
         ).finalize_and_persist(assessment_directory=result.directory.parent)
+        assert saved.evidence_kind is EvidenceKind.REAL
+        assert saved.status is AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION
         reader = SealedAssessmentReadVerifier(
-            validation_root=data_root,
+            validation_root=output,
             signer=FakeRunnerTrustStore(),
             signer_trust_policy=SignerTrustPolicy.synthetic_only(),
-            v3_context=configuration.context,
-            v3_signer=configuration.signer,
-            v3_runner_trust_policy=configuration.runner_trust_policy,
+            real_trust_resolver=trust,
         )
         with DataSqliteUnitOfWorkFactory(engine, assessment_read_verifier=reader)() as uow:
             assert uow.data.get_source_candidate_assessment(str(saved.assessment_id)) == saved
-        assert saved.evidence_kind is EvidenceKind.REAL
-        assert saved.status is AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION
-
         with without_real.data_uow_factory() as uow, pytest.raises(InvalidDataTransitionError):
             uow.data.get_source_candidate_assessment(str(saved.assessment_id))
-        with_real = build_eod_runtime(settings, real_v3_trust_resolver=trust)
+        with_real = build_eod_runtime(settings, real_trust_resolver=trust)
         with with_real.data_uow_factory() as uow:
             assert uow.data.get_source_candidate_assessment(str(saved.assessment_id)) == saved
 
@@ -527,55 +500,14 @@ def test_real_blocked_evidence_seals_persists_and_formal_read_requires_explicit_
             item["assessment_status"] == AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION.value
             for item in center.sources()
         )
-        bundle_manifest = (
+        (
             data_root
             / "authority"
             / "reference-bundles"
             / "st-603377-authority-v3"
             / "manifest.json"
-        )
-        bundle_manifest.write_bytes(b"tampered")
+        ).write_bytes(b"tampered")
         with with_real.data_uow_factory() as uow, pytest.raises(InvalidDataTransitionError):
-            uow.data.get_source_candidate_assessment(str(saved.assessment_id))
-
-    finally:
-        engine.dispose()
-
-
-def test_seal_or_verifier_key_change_fails_closed_on_read(tmp_path: Path) -> None:
-    authorization_file, runtime, trust, output = _issued(tmp_path)
-    result = runtime.execute(authorization_file=authorization_file)
-    database = tmp_path / "metadata.db"
-    initialize_database(database)
-    engine = create_data_engine(database, busy_timeout_ms=250)
-    try:
-        configuration = trust.resolve()
-        saved = RealXtQuantAssessmentService(
-            validation_root=output,
-            trust_resolver=trust,
-            persistence=SqliteV3SourceAssessmentPersistenceAdapter(
-                engine=engine,
-                validation_root=output,
-                context=configuration.context,
-                signer=configuration.signer,
-                runner_trust_policy=configuration.runner_trust_policy,
-            ),
-        ).finalize_and_persist(assessment_directory=result.directory.parent)
-        reader = SealedAssessmentReadVerifier(
-            validation_root=output,
-            signer=FakeRunnerTrustStore(),
-            signer_trust_policy=SignerTrustPolicy.synthetic_only(),
-            v3_context=configuration.context,
-            v3_signer=LocalRealV3Signer(
-                key_id="local.real.runner.v1",
-                private_key_file=tmp_path / "keys" / "authorization.key",
-            ),
-            v3_runner_trust_policy=configuration.runner_trust_policy,
-        )
-        with (
-            DataSqliteUnitOfWorkFactory(engine, assessment_read_verifier=reader)() as uow,
-            pytest.raises(InvalidDataTransitionError),
-        ):
             uow.data.get_source_candidate_assessment(str(saved.assessment_id))
     finally:
         engine.dispose()

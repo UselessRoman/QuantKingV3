@@ -55,6 +55,11 @@ from quantking.data.validation.contracts_v3 import (
     V3RunnerTrustPolicy,
 )
 from quantking.data.validation.models import VerifiedAssessmentEvidence
+from quantking.data.validation.real_artifacts import (
+    RealValidationEvidenceVerifier,
+    VerifiedRealAssessment,
+)
+from quantking.data.validation.real_authorization import RealVerifierTrustAnchor
 from quantking.data.validation.samples import load_packaged_fixed_sample
 from quantking.data.validation.service import assess_verified_runs, common_fingerprint
 
@@ -98,6 +103,22 @@ class V3SealedAssessmentRowTrustResolver(Protocol):
     def resolve_for_row(
         self, row: SourceCandidateAssessmentRow
     ) -> V3SealedAssessmentTrustConfiguration: ...
+
+
+class RealSealedAssessmentTrustConfiguration(Protocol):
+    """Verifier-owned R1 context and public trust anchor."""
+
+    @property
+    def context(self) -> V3EvidenceTrustContext: ...
+
+    @property
+    def verifier_anchor(self) -> RealVerifierTrustAnchor: ...
+
+
+class RealSealedAssessmentTrustResolver(Protocol):
+    """Resolves R1 REAL public verification trust for every formal read."""
+
+    def resolve(self) -> RealSealedAssessmentTrustConfiguration: ...
 
 
 class MultiplexedV3SealedAssessmentTrustResolver:
@@ -304,6 +325,7 @@ class SealedAssessmentReadVerifier:
         v3_signer: V3ResultAttestationSigner | None = None,
         v3_runner_trust_policy: V3RunnerTrustPolicy | None = None,
         v3_trust_resolver: V3SealedAssessmentTrustResolver | None = None,
+        real_trust_resolver: RealSealedAssessmentTrustResolver | None = None,
     ) -> None:
         self._root = validation_root.resolve(strict=False)
         self._signer = signer
@@ -318,6 +340,7 @@ class SealedAssessmentReadVerifier:
         self._v3_signer = v3_signer
         self._v3_policy = v3_runner_trust_policy
         self._v3_resolver = v3_trust_resolver
+        self._real_resolver = real_trust_resolver
 
     def verify_persisted_row(self, row: SourceCandidateAssessmentRow) -> SourceCandidateAssessment:
         try:
@@ -328,9 +351,23 @@ class SealedAssessmentReadVerifier:
                 raise ValueError("assessment seal mismatch")
             expected = _assessment_domain(row)
             original_relative = Path(expected.evidence_relative_path).parent
-            evidence: VerifiedAssessmentEvidence | VerifiedAssessmentEvidenceV3
+            evidence: (
+                VerifiedAssessmentEvidence | VerifiedAssessmentEvidenceV3 | VerifiedRealAssessment
+            )
             summary: _Summary
-            if Path(expected.evidence_relative_path).name == "_assessment-v3":
+            evidence_name = Path(expected.evidence_relative_path).name
+            if evidence_name == "_assessment-real-v1":
+                if self._real_resolver is None:
+                    raise ValueError("REAL sealed reader is not configured")
+                real = self._real_resolver.resolve()
+                evidence, summary = _verify_sealed_archive_real(
+                    seal=seal,
+                    original_relative=original_relative,
+                    context=real.context,
+                    verifier_anchor=real.verifier_anchor,
+                    workspace=self._root,
+                )
+            elif evidence_name == "_assessment-v3":
                 context: V3EvidenceTrustContext | None
                 signer: V3ResultAttestationSigner | None
                 policy: V3RunnerTrustPolicy | None
@@ -894,6 +931,203 @@ class SqliteV3SourceAssessmentPersistenceAdapter:
             )
 
 
+class SqliteRealSourceAssessmentPersistenceAdapter:
+    """Sole R1 REAL persistence path, dispatched separately from v2/v3.
+
+    The existing row schema already stores an immutable evidence-manifest SHA,
+    attestation SHA list and sealed archive SHA.  R1 places all three lineage
+    digests inside the attestation and manifests, so no query field or migration
+    is required.
+    """
+
+    def __init__(
+        self,
+        *,
+        engine: Engine,
+        validation_root: Path,
+        context: V3EvidenceTrustContext,
+        verifier_anchor: RealVerifierTrustAnchor,
+    ) -> None:
+        self._root = validation_root.resolve(strict=False)
+        self._context = context
+        self._anchor = verifier_anchor
+        self._session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def persist_from_directory(
+        self, absolute_assessment_directory: Path
+    ) -> SourceCandidateAssessment:
+        directory, relative = self._managed_path(absolute_assessment_directory)
+        if not directory.is_dir():
+            raise ValueError("REAL assessment directory is missing")
+        preliminary = self._snapshot(root=self._root, directory=directory)
+        with _AssessmentClaim(root=self._root, directory=directory, relative=relative) as claim:
+            try:
+                claimed = self._snapshot(
+                    root=claim.retained_root, directory=claim.retained_directory
+                )
+                if claimed != preliminary:
+                    raise InvalidDataTransitionError(
+                        "REAL assessment evidence changed during atomic claim"
+                    )
+                incomplete = self._build_seal(
+                    directory=claim.retained_directory, operation_id=claim.operation_id
+                )
+                final = self._verify_final(incomplete, relative, claimed)
+                seal, seal_sha = self._finalize_seal(incomplete)
+                with _ExclusiveFile(seal):
+                    if compute_sha256(seal.read_bytes()) != seal_sha:
+                        raise InvalidDataTransitionError(
+                            "finalized REAL assessment seal changed before lock"
+                        )
+                    locked = self._verify_final(seal, relative, claimed)
+                    if locked != final:
+                        raise InvalidDataTransitionError(
+                            "finalized REAL assessment seal verification drifted"
+                        )
+                    with suppress(FileNotFoundError):
+                        incomplete.unlink()
+                    saved = self._persist_transaction(
+                        evidence=locked[0], summary=locked[1], seal=seal, seal_sha=seal_sha
+                    )
+                    if compute_sha256(seal.read_bytes()) != seal_sha:
+                        raise InvalidDataTransitionError(
+                            "REAL assessment seal changed after database commit"
+                        )
+                    return saved
+            except InvalidDataTransitionError:
+                self._record_failure(claim.operation_id)
+                raise
+            except Exception:
+                self._record_failure(claim.operation_id)
+                raise InvalidDataTransitionError(
+                    "REAL assessment persistence failed safely"
+                ) from None
+
+    def _managed_path(self, directory: Path) -> tuple[Path, Path]:
+        if not isinstance(directory, Path) or not directory.is_absolute():
+            raise ValueError("REAL assessment directory must be absolute")
+        try:
+            relative = directory.relative_to(self._root)
+        except ValueError as error:
+            raise ValueError("REAL assessment directory is outside the managed root") from error
+        if not relative.parts or directory.name == "_assessment-real-v1":
+            raise ValueError("REAL assessment directory is invalid")
+        _reject_reparse_chain(directory.parent, self._root)
+        if directory.exists() and _is_reparse(directory):
+            raise ValueError("REAL assessment directory contains an unsafe reparse point")
+        return directory, relative
+
+    def _snapshot(self, *, root: Path, directory: Path) -> tuple[VerifiedRealAssessment, _Summary]:
+        evidence = RealValidationEvidenceVerifier(
+            validation_root=root, context=self._context, verifier_anchor=self._anchor
+        ).verify_assessment(assessment_directory=directory)
+        _verify_exact_assessment_tree_real(directory)
+        return evidence, _attestation_summary_real(directory, evidence)
+
+    def _build_seal(self, *, directory: Path, operation_id: str) -> Path:
+        seal_root = self._root / ".assessment-seals"
+        incomplete_root = seal_root / ".incomplete"
+        incomplete_root.mkdir(parents=True, exist_ok=True)
+        _reject_reparse_chain(incomplete_root, self._root)
+        target = incomplete_root / f"{operation_id}.zip"
+        with zipfile.ZipFile(target, "x", compression=zipfile.ZIP_STORED) as archive:
+            for path in _evidence_files(directory):
+                archive.write(path, path.relative_to(directory).as_posix())
+        _fsync_file(target)
+        return target
+
+    def _verify_final(
+        self,
+        seal: Path,
+        original_relative: Path,
+        expected: tuple[VerifiedRealAssessment, _Summary],
+    ) -> tuple[VerifiedRealAssessment, _Summary]:
+        actual = _verify_sealed_archive_real(
+            seal=seal,
+            original_relative=original_relative,
+            context=self._context,
+            verifier_anchor=self._anchor,
+            workspace=self._root,
+        )
+        if actual != expected:
+            raise InvalidDataTransitionError(
+                "REAL assessment evidence changed before atomic sealing"
+            )
+        return actual
+
+    def _finalize_seal(self, incomplete: Path) -> tuple[Path, str]:
+        payload = incomplete.read_bytes()
+        sha = compute_sha256(payload)
+        target = self._root / ".assessment-seals" / f"{sha}.zip"
+        if target.exists():
+            return target, sha
+        os.replace(incomplete, target)
+        return target, sha
+
+    def _persist_transaction(
+        self, *, evidence: VerifiedRealAssessment, summary: _Summary, seal: Path, seal_sha: str
+    ) -> SourceCandidateAssessment:
+        assessment = evidence.assessment
+        if (
+            assessment.evidence_relative_path != evidence.evidence_relative_path
+            or assessment.evidence_sha256 != evidence.manifest_sha256
+            or not assessment.evidence_relative_path.endswith("/_assessment-real-v1")
+            or not evidence.runs
+            or summary[0] != (EvidenceKind.REAL.value,)
+        ):
+            raise InvalidDataTransitionError("REAL assessment is not verifier-derived evidence")
+        values = {
+            **_assessment_row_values(assessment),
+            "signer_profiles_json": json.dumps(
+                list(summary[0]), separators=(",", ":"), sort_keys=True
+            ),
+            "result_attestation_sha256s_json": json.dumps(
+                list(summary[1]), separators=(",", ":"), sort_keys=True
+            ),
+            "persistence_trust_status": _TRUST_STATUS,
+            "sealed_evidence_relative_path": seal.relative_to(self._root).as_posix(),
+            "sealed_evidence_sha256": seal_sha,
+        }
+        expected_gate = tuple(values[column] for column in _GATE_COLUMNS)
+        session = self._session_factory()
+        gate = _SQLiteWriteGate()
+        try:
+            row = session.get(SourceCandidateAssessmentRow, str(assessment.assessment_id))
+            if row is not None:
+                if not _row_matches(row, values):
+                    raise InvalidDataTransitionError("REAL source assessment evidence is immutable")
+                return assessment
+            raw = session.connection().connection.driver_connection
+            if not isinstance(raw, sqlite3.Connection):
+                raise InvalidDataTransitionError("assessment write gate requires SQLite")
+            raw.create_function(_WRITE_GATE_NAME, _WRITE_GATE_ARGUMENTS, gate)
+            gate.arm(expected_gate)
+            session.add(SourceCandidateAssessmentRow(**values))
+            session.flush()
+            gate.assert_consumed()
+            gate.disarm()
+            if compute_sha256(seal.read_bytes()) != seal_sha:
+                raise InvalidDataTransitionError(
+                    "REAL assessment seal changed before database commit"
+                )
+            session.commit()
+            return assessment
+        except BaseException:
+            session.rollback()
+            raise
+        finally:
+            gate.disarm()
+            session.close()
+
+    def _record_failure(self, operation_id: str) -> None:
+        failure_root = self._root / ".assessment-failures"
+        failure_root.mkdir(parents=True, exist_ok=True)
+        with suppress(OSError):
+            (failure_root / f"{operation_id}.json").write_bytes(
+                _canonical({"category": "ASSESSMENT_PERSISTENCE_FAILED", "retryable": False})
+            )
+
+
 _GATE_COLUMNS = (
     "assessment_id",
     "source",
@@ -975,6 +1209,30 @@ def _verify_sealed_archive_v3(
         return evidence, summary
 
 
+def _verify_sealed_archive_real(
+    *,
+    seal: Path,
+    original_relative: Path,
+    context: V3EvidenceTrustContext,
+    verifier_anchor: RealVerifierTrustAnchor,
+    workspace: Path,
+) -> tuple[VerifiedRealAssessment, _Summary]:
+    """Extract and deeply verify the explicit R1 REAL evidence family."""
+    temporary_root = workspace / ".assessment-verification"
+    temporary_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=temporary_root) as temporary:
+        root = Path(temporary)
+        assessment_directory = root / original_relative
+        assessment_directory.mkdir(parents=True)
+        _extract_seal(seal, assessment_directory)
+        evidence = RealValidationEvidenceVerifier(
+            validation_root=root, context=context, verifier_anchor=verifier_anchor
+        ).verify_assessment(assessment_directory=assessment_directory)
+        _verify_exact_assessment_tree_real(assessment_directory)
+        summary = _attestation_summary_real(assessment_directory, evidence)
+        return evidence, summary
+
+
 def _extract_seal(seal: Path, target: Path) -> None:
     seen: set[str] = set()
     with zipfile.ZipFile(seal, "r") as archive:
@@ -1024,6 +1282,22 @@ def _verify_exact_assessment_tree_v3(directory: Path) -> None:
     actual = {item.name for item in directory.iterdir()}
     if actual != expected or any(not (directory / name).is_dir() for name in expected):
         raise InvalidDataTransitionError("v3 assessment tree contains undeclared entries")
+    _evidence_files(directory)
+
+
+def _verify_exact_assessment_tree_real(directory: Path) -> None:
+    manifest = json.loads((directory / "_assessment-real-v1" / "manifest.json").read_bytes())
+    runs = manifest.get("runs")
+    if not isinstance(runs, list):
+        raise InvalidDataTransitionError("REAL assessment tree is invalid")
+    expected = {"_assessment-real-v1"}
+    for item in runs:
+        if not isinstance(item, dict) or not isinstance(item.get("directory"), str):
+            raise InvalidDataTransitionError("REAL assessment tree is invalid")
+        expected.add(str(item["directory"]))
+    actual = {item.name for item in directory.iterdir()}
+    if actual != expected or any(not (directory / name).is_dir() for name in expected):
+        raise InvalidDataTransitionError("REAL assessment tree contains undeclared entries")
     _evidence_files(directory)
 
 
@@ -1105,6 +1379,23 @@ def _attestation_summary_v3(
     return tuple(sorted(profiles)), tuple(sorted(hashes))
 
 
+def _attestation_summary_real(directory: Path, evidence: VerifiedRealAssessment) -> _Summary:
+    manifest = json.loads((directory / "_assessment-real-v1" / "manifest.json").read_bytes())
+    entries = manifest.get("runs")
+    if not isinstance(entries, list) or len(entries) != len(evidence.runs):
+        raise InvalidDataTransitionError("REAL assessment run summary is invalid")
+    hashes: list[str] = []
+    for entry, run in zip(entries, evidence.runs, strict=True):
+        if not isinstance(entry, dict) or entry.get("manifest_sha256") != run.manifest_sha256:
+            raise InvalidDataTransitionError("REAL assessment run summary is invalid")
+        path = directory / str(entry["directory"]) / "runner" / "result-attestation.real.v1.json"
+        payload = path.read_bytes()
+        if compute_sha256(payload) != run.attestation_sha256:
+            raise InvalidDataTransitionError("REAL result attestation lineage is invalid")
+        hashes.append(run.attestation_sha256)
+    return (EvidenceKind.REAL.value,), tuple(sorted(hashes))
+
+
 def _resolve_managed_file(root: Path, relative: str) -> Path:
     candidate = root / relative
     try:
@@ -1152,7 +1443,9 @@ def _canonical(value: object) -> bytes:
 __all__ = [
     "AssessmentReadVerifier",
     "MultiplexedV3SealedAssessmentTrustResolver",
+    "RealSealedAssessmentTrustResolver",
     "SealedAssessmentReadVerifier",
+    "SqliteRealSourceAssessmentPersistenceAdapter",
     "SqliteSourceAssessmentPersistenceAdapter",
     "SqliteV3SourceAssessmentPersistenceAdapter",
     "V3SealedAssessmentRowTrustResolver",

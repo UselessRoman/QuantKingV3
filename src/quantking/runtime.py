@@ -16,6 +16,7 @@ from quantking.data.adapters.eod import EodWorkerHandler, register_eod_handler
 from quantking.data.adapters.eod_base import PublishedEodBaseResolver
 from quantking.data.adapters.persistence.assessment import (
     MultiplexedV3SealedAssessmentTrustResolver,
+    RealSealedAssessmentTrustResolver,
     SealedAssessmentReadVerifier,
     V3SealedAssessmentTrustResolver,
 )
@@ -99,6 +100,7 @@ def build_eod_runtime(
     *,
     gateway: MarketDataGateway | None = None,
     real_v3_trust_resolver: V3SealedAssessmentTrustResolver | None = None,
+    real_trust_resolver: RealSealedAssessmentTrustResolver | None = None,
 ) -> EodRuntime:
     """Build the production object graph without importing the XTQuant SDK.
 
@@ -140,8 +142,8 @@ def build_eod_runtime(
     )
     jobs = JobService(SqliteUnitOfWorkFactory(jobs_engine), retry_policy=retry)
     # Assessment reads deep-verify every v2 and v3 seal.  C0B's accepted
-    # SYNTHETIC resolver is always explicit; C1A REAL rows remain fail-closed
-    # unless a caller injects its own verifier-owned REAL resolver.
+    # SYNTHETIC v3 resolver is always explicit.  R1 REAL rows use their own
+    # public-key lineage contract and remain fail-closed unless injected.
     assessment_reader = SealedAssessmentReadVerifier(
         validation_root=data_root,
         signer=FakeRunnerTrustStore(),
@@ -153,6 +155,7 @@ def build_eod_runtime(
                 real_resolver=real_v3_trust_resolver,
             ),
         ),
+        real_trust_resolver=real_trust_resolver,
     )
     data_uow = DataSqliteUnitOfWorkFactory(
         data_engine,
