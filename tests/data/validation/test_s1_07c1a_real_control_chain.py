@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from datetime import timedelta
+from hashlib import sha256
 from pathlib import Path
 from time import sleep
 from types import SimpleNamespace
@@ -33,15 +34,19 @@ from quantking.data.models import DatasetKind
 from quantking.data.validation.artifacts import ValidationEvidenceVerificationError
 from quantking.data.validation.authorization import FakeRunnerTrustStore, SignerTrustPolicy
 from quantking.data.validation.contracts_v3 import AttemptOutcomeV3, ValidationAttemptIdentityV3
+from quantking.data.validation.models import ValidationFailure
 from quantking.data.validation.real_artifacts import (
     RealResultAttestation,
     RealValidationEvidenceVerifier,
     RealValidationEvidenceWriter,
+    canonical_json,
 )
 from quantking.data.validation.real_authorization import (
     ExplicitLocalRealKey,
     RealAuthorizationClaimStore,
     RealAuthorizationError,
+    RealClaimReceipt,
+    RealClaimReceiptIssuer,
     RealExecutionAuthorizationAuthority,
     RealExecutionAuthorizationVerifier,
     RealRuntimeAuthorizationAuthority,
@@ -137,6 +142,8 @@ def _runtime(
         reference_bundle_root=root / "authority",
         runner_public_key_file=runner_public or default_runner_public,
         allowed_runner_key_ids=allowed_runner_ids or frozenset({runner_id}),
+        authorization_public_key_file=auth_public,
+        allowed_authorization_key_ids=frozenset({auth_id}),
     )
     auth_anchor = RealVerifierTrustAnchor(
         public_key_file=auth_public, allowed_key_ids=frozenset({auth_id})
@@ -146,7 +153,10 @@ def _runtime(
             verifier=RealRuntimeAuthorizationVerifier(trust_anchor=auth_anchor)
         ),
         authorization_verifier=RealExecutionAuthorizationVerifier(trust_anchor=auth_anchor),
-        claim_store=RealAuthorizationClaimStore(claim_root=root / "claims"),
+        claim_store=RealAuthorizationClaimStore(
+            claim_root=root / "claims",
+            receipt_issuer=RealClaimReceiptIssuer(private_key_file=auth_private),
+        ),
         trust_resolver=trust,
         runner_signer=ExplicitLocalRealKey(private_key_file=runner_private),
         package_metadata_probe=ExplicitXtQuantPackageMetadataProbe(
@@ -212,6 +222,56 @@ def _issued(
     file = root / "real-runtime-authorization.json"
     file.write_bytes(envelope.to_bytes())
     return file, runtime, trust, output
+
+
+def _rewrite_test_only_run(
+    *,
+    key_root: Path,
+    directory: Path,
+    replacements: dict[str, bytes],
+    attestation_mutator: object | None = None,
+    manifest_mutator: object | None = None,
+) -> None:
+    """Test-only signed artifact constructor; production has no success writer."""
+    manifest = json.loads((directory / "manifest.json").read_bytes())
+    payloads = {
+        entry["relative_path"]: replacements.get(entry["relative_path"])
+        or (directory / entry["relative_path"]).read_bytes()
+        for entry in manifest["files"]
+    }
+    lineage = {
+        "authorization_envelope_sha256": sha256(
+            payloads["authorization/envelope.json"]
+        ).hexdigest(),
+        "plan_sha256": sha256(payloads["request/plan.json"]).hexdigest(),
+        "claim_receipt_sha256": sha256(payloads["authorization/claim-receipt.json"]).hexdigest(),
+    }
+    attestation = json.loads(payloads["runner/result-attestation.real.v2.json"])
+    attestation["lineage"] = lineage
+    if attestation_mutator is not None:
+        attestation_mutator(attestation)  # type: ignore[operator]
+    unsigned_attestation = dict(attestation)
+    unsigned_attestation.pop("signature")
+    signer = ExplicitLocalRealKey(private_key_file=key_root / "keys" / "runner-private.pem")
+    attestation["signature"] = signer.sign(
+        domain=RealValidationEvidenceWriter._DOMAIN, payload=unsigned_attestation
+    )
+    payloads["runner/result-attestation.real.v2.json"] = canonical_json(attestation)
+    manifest["lineage"] = lineage
+    if manifest_mutator is not None:
+        manifest_mutator(manifest)  # type: ignore[operator]
+    manifest["files"] = [
+        {"relative_path": name, "sha256": sha256(payload).hexdigest(), "size": len(payload)}
+        for name, payload in sorted(payloads.items())
+    ]
+    unsigned_manifest = dict(manifest)
+    unsigned_manifest.pop("manifest_sha256")
+    manifest_sha = sha256(canonical_json(unsigned_manifest)).hexdigest()
+    manifest["manifest_sha256"] = manifest_sha
+    for name, payload in payloads.items():
+        (directory / name).write_bytes(payload)
+    (directory / "manifest.json").write_bytes(canonical_json(manifest))
+    (directory / "COMPLETE").write_bytes(canonical_json({"manifest_sha256": manifest_sha}))
 
 
 def test_default_fixed_unit_is_real_blocked_and_does_not_import_xtquant(tmp_path: Path) -> None:
@@ -308,6 +368,18 @@ def test_runner_public_key_substitution_is_rejected_before_claim(tmp_path: Path)
     assert not (tmp_path / "substitution" / "claims").exists()
 
 
+def test_authorization_public_key_substitution_is_rejected_before_claim(tmp_path: Path) -> None:
+    _private, changed_public, _changed_id = _keypair(tmp_path, "changed-authorization")
+    authorization_file, runtime, trust, _output = _issued(tmp_path / "substitution")
+    trust._authorization_public_key_file.write_bytes(changed_public.read_bytes())  # type: ignore[attr-defined]
+
+    with pytest.raises(RealXtQuantExecutionError) as captured:
+        runtime.execute(authorization_file=authorization_file)
+
+    assert captured.value.code == "REAL_TRUST_NOT_CONFIGURED"
+    assert not (tmp_path / "substitution" / "claims").exists()
+
+
 def test_claim_is_retained_for_import_and_runner_crash(tmp_path: Path) -> None:
     authorization_file, runtime, _trust, output = _issued(tmp_path / "import")
     runtime._import_runner = lambda _name: (_ for _ in ()).throw(RuntimeError("missing"))  # type: ignore[attr-defined]
@@ -335,7 +407,7 @@ def test_real_attestation_is_within_authorization_and_execution_window(tmp_path:
     authorization_file, runtime, trust, _output = _issued(tmp_path)
     result = runtime.execute(authorization_file=authorization_file)
     attestation = RealResultAttestation.from_bytes(
-        (result.directory / "runner" / "result-attestation.real.v1.json").read_bytes()
+        (result.directory / "runner" / "result-attestation.real.v2.json").read_bytes()
     )
     envelope = json.loads(authorization_file.read_bytes())
     valid_from = UtcTimestamp.from_iso(envelope["authorization"]["valid_from"])
@@ -349,14 +421,82 @@ def test_real_attestation_is_within_authorization_and_execution_window(tmp_path:
     verified = RealValidationEvidenceVerifier(
         validation_root=result.directory.parents[4],
         context=trust.resolve().context,
-        verifier_anchor=trust.resolve().verifier_anchor,
+        runner_verifier_anchor=trust.resolve().runner_verifier_anchor,
+        authorization_verifier_anchor=trust.resolve().authorization_verifier_anchor,
     ).verify_run(directory=result.directory)
     assert verified.outcome is AttemptOutcomeV3.FAILED
 
 
-def test_only_isolated_test_success_builder_can_write_success_evidence(tmp_path: Path) -> None:
-    """The formal factory remains blocked; this builder exists only in this test."""
-    authorization_file, runtime, trust, _output = _issued(tmp_path)
+def test_formal_reader_rechecks_both_authorization_signatures(tmp_path: Path) -> None:
+    """A trusted runner cannot turn zeroed authorization signatures into REAL evidence."""
+    authorization_file, runtime, trust, output = _issued(tmp_path)
+    result = runtime.execute(authorization_file=authorization_file)
+    envelope = json.loads((result.directory / "authorization" / "envelope.json").read_bytes())
+    envelope["signature"] = "0" * 128
+    envelope["authorization"]["signature"] = "0" * 128
+    envelope_bytes = canonical_json(envelope)
+    receipt = json.loads((result.directory / "authorization" / "claim-receipt.json").read_bytes())
+    receipt["authorization_envelope_sha256"] = sha256(envelope_bytes).hexdigest()
+    receipt["signature"] = "0" * 128
+    _rewrite_test_only_run(
+        key_root=tmp_path,
+        directory=result.directory,
+        replacements={
+            "authorization/envelope.json": envelope_bytes,
+            "authorization/claim-receipt.json": canonical_json(receipt),
+        },
+    )
+
+    config = trust.resolve()
+    with pytest.raises(ValidationEvidenceVerificationError):
+        RealValidationEvidenceVerifier(
+            validation_root=output,
+            context=config.context,
+            runner_verifier_anchor=config.runner_verifier_anchor,
+            authorization_verifier_anchor=config.authorization_verifier_anchor,
+        ).verify_run(directory=result.directory)
+
+
+def test_formal_reader_rejects_claim_after_execution_even_when_reissued(tmp_path: Path) -> None:
+    """The authorized receipt signer cannot bypass the claim-to-execution ordering rule."""
+    authorization_file, runtime, trust, output = _issued(tmp_path)
+    result = runtime.execute(authorization_file=authorization_file)
+    previous = RealClaimReceipt.from_bytes(
+        (result.directory / "authorization" / "claim-receipt.json").read_bytes()
+    )
+    attestation = RealResultAttestation.from_bytes(
+        (result.directory / "runner" / "result-attestation.real.v2.json").read_bytes()
+    )
+    late_receipt = RealClaimReceiptIssuer(
+        private_key_file=tmp_path / "keys" / "authorization-private.pem"
+    ).issue(
+        authorization_id=previous.authorization_id,
+        invocation_id=previous.invocation_id,
+        run_id=previous.run_id,
+        claimed_at=UtcTimestamp(attestation.ended_at.value + timedelta(seconds=1)),
+        claim_nonce=previous.claim_nonce,
+        authorization_envelope_sha256=previous.authorization_envelope_sha256,
+        plan_sha256=previous.plan_sha256,
+    )
+    _rewrite_test_only_run(
+        key_root=tmp_path,
+        directory=result.directory,
+        replacements={"authorization/claim-receipt.json": late_receipt.to_bytes()},
+    )
+
+    config = trust.resolve()
+    with pytest.raises(ValidationEvidenceVerificationError):
+        RealValidationEvidenceVerifier(
+            validation_root=output,
+            context=config.context,
+            runner_verifier_anchor=config.runner_verifier_anchor,
+            authorization_verifier_anchor=config.authorization_verifier_anchor,
+        ).verify_run(directory=result.directory)
+
+
+def test_only_success_construction_is_rejected_by_formal_runtime_and_reader(tmp_path: Path) -> None:
+    """Only test code can form this malicious success-shaped artifact."""
+    authorization_file, runtime, _trust, _output = _issued(tmp_path)
 
     class TestOnlySuccessRunner:
         def execute(self, **kwargs: object) -> Path:
@@ -369,24 +509,30 @@ def test_only_isolated_test_success_builder_can_write_success_evidence(tmp_path:
             while ended_at.value <= started_at.value:
                 sleep(0.001)
                 ended_at = utc_now()
-            return RealValidationEvidenceWriter(validation_root=output_root).write_success(
+            directory = RealValidationEvidenceWriter(validation_root=output_root).write_failure(
                 inputs=plan.evidence_inputs(),  # type: ignore[union-attr]
+                failure=ValidationFailure(category="CAPABILITY_UNSUPPORTED", retryable=False),
                 started_at=started_at,
                 ended_at=ended_at,
             )
+            _rewrite_test_only_run(
+                key_root=tmp_path,
+                directory=directory,
+                replacements={},
+                attestation_mutator=lambda raw: raw.update(
+                    {"attempt_outcome": "SUCCEEDED", "failure": None}
+                ),
+                manifest_mutator=lambda raw: raw.update({"attempt_outcome": "SUCCEEDED"}),
+            )
+            return directory
 
     runtime._import_runner = lambda _name: SimpleNamespace(  # type: ignore[attr-defined]
         create_runner=lambda: TestOnlySuccessRunner()
     )
-    result = runtime.execute(authorization_file=authorization_file)
-    assert result.outcome is AttemptOutcomeV3.SUCCEEDED
-    assert (result.directory / "success" / "attempt.json").is_file()
-    verified = RealValidationEvidenceVerifier(
-        validation_root=result.directory.parents[4],
-        context=trust.resolve().context,
-        verifier_anchor=trust.resolve().verifier_anchor,
-    ).verify_run(directory=result.directory)
-    assert verified.outcome is AttemptOutcomeV3.SUCCEEDED
+    with pytest.raises(RealXtQuantExecutionError) as captured:
+        runtime.execute(authorization_file=authorization_file)
+    assert captured.value.code == "REAL_RUNNER_EVIDENCE_INVALID"
+    assert not hasattr(RealValidationEvidenceWriter, "write_success")
 
 
 def test_missing_or_replaced_lineage_fails_persist_and_formal_read(tmp_path: Path) -> None:
@@ -406,7 +552,8 @@ def test_missing_or_replaced_lineage_fails_persist_and_formal_read(tmp_path: Pat
                 engine=engine,
                 validation_root=output,
                 context=config.context,
-                verifier_anchor=config.verifier_anchor,
+                runner_verifier_anchor=config.runner_verifier_anchor,
+                authorization_verifier_anchor=config.authorization_verifier_anchor,
             ),
         )
         with pytest.raises(RealXtQuantExecutionError):
@@ -422,7 +569,8 @@ def test_missing_or_replaced_lineage_fails_persist_and_formal_read(tmp_path: Pat
         RealValidationEvidenceVerifier(
             validation_root=output,
             context=trust.resolve().context,
-            verifier_anchor=trust.resolve().verifier_anchor,
+            runner_verifier_anchor=trust.resolve().runner_verifier_anchor,
+            authorization_verifier_anchor=trust.resolve().authorization_verifier_anchor,
         ).verify_run(directory=result.directory)
 
 
@@ -458,7 +606,8 @@ def test_real_blocked_evidence_seals_persists_and_requires_explicit_read_anchor(
                 engine=engine,
                 validation_root=output,
                 context=config.context,
-                verifier_anchor=config.verifier_anchor,
+                runner_verifier_anchor=config.runner_verifier_anchor,
+                authorization_verifier_anchor=config.authorization_verifier_anchor,
             ),
         ).finalize_and_persist(assessment_directory=result.directory.parent)
         assert saved.evidence_kind is EvidenceKind.REAL

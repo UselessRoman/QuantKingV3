@@ -1,4 +1,4 @@
-"""S1-07C1A-R1 fixed offline REAL XTQuant control chain.
+"""S1-07C1A-R2 fixed offline REAL XTQuant control chain.
 
 The only shipped adapter stays CAPABILITY_UNSUPPORTED.  This runtime proves
 authorization, claim and forensic evidence controls without importing xtquant,
@@ -58,8 +58,8 @@ from quantking.data.validation.samples import CaseEligibility, load_fixed_sample
 
 _RUNNER_MODULE = "quantking.data.validation.runners.xtquant_real"
 _RUNNER_FACTORY = "create_runner"
-_RUNNER_ADAPTER_VERSION = "xtquant-readonly.s1-07c1a-r1.v1"
-_RUNNER_CODE_VERSION = "s1-07c1a-r1.xtquant.runtime.v1"
+_RUNNER_ADAPTER_VERSION = "xtquant-readonly.s1-07c1a-r2.v1"
+_RUNNER_CODE_VERSION = "s1-07c1a-r2.xtquant.runtime.v1"
 _RUNNER_RULE_VERSION = "quality-rules.v1"
 _RUNNER_THRESHOLD_VERSION = "comparison-thresholds.v1"
 _SOURCE = "XTQUANT"
@@ -81,10 +81,11 @@ class RealXtQuantExecutionError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class RealXtQuantTrustConfiguration:
-    """Read-side trust: public anchor only, never a private signing key."""
+    """Read-side trust has separate authorization and runner public anchors."""
 
     context: V3EvidenceTrustContext
-    verifier_anchor: RealVerifierTrustAnchor
+    runner_verifier_anchor: RealVerifierTrustAnchor
+    authorization_verifier_anchor: RealVerifierTrustAnchor
 
 
 class RealXtQuantTrustResolver(Protocol):
@@ -100,19 +101,27 @@ class ExplicitRealXtQuantTrustResolver:
         reference_bundle_root: Path,
         runner_public_key_file: Path,
         allowed_runner_key_ids: frozenset[str],
+        authorization_public_key_file: Path,
+        allowed_authorization_key_ids: frozenset[str],
     ) -> None:
         if not isinstance(reference_bundle_root, Path) or not reference_bundle_root.is_absolute():
             raise ValueError("reference bundle root must be an absolute Path")
         self._reference_bundle_root = reference_bundle_root
         self._runner_public_key_file = runner_public_key_file
         self._allowed_runner_key_ids = frozenset(allowed_runner_key_ids)
+        self._authorization_public_key_file = authorization_public_key_file
+        self._allowed_authorization_key_ids = frozenset(allowed_authorization_key_ids)
 
     def resolve(self) -> RealXtQuantTrustConfiguration:
         return RealXtQuantTrustConfiguration(
             context=build_real_xtquant_context(reference_bundle_root=self._reference_bundle_root),
-            verifier_anchor=RealVerifierTrustAnchor(
+            runner_verifier_anchor=RealVerifierTrustAnchor(
                 public_key_file=self._runner_public_key_file,
                 allowed_key_ids=self._allowed_runner_key_ids,
+            ),
+            authorization_verifier_anchor=RealVerifierTrustAnchor(
+                public_key_file=self._authorization_public_key_file,
+                allowed_key_ids=self._allowed_authorization_key_ids,
             ),
         )
 
@@ -142,7 +151,7 @@ def build_real_xtquant_context(*, reference_bundle_root: Path) -> V3EvidenceTrus
         source_dataset_contract=SourceDatasetContractV3(
             source=_SOURCE,
             dataset=_DATASET,
-            contract_version="xtquant-trading-status-real-contract.c1a-r1.v1",
+            contract_version="xtquant-trading-status-real-contract.c1a-r2.v1",
             semantic_rule_version="semantic-contract-rules.v1",
             unit_rule_version="unit-contract-rules.v1",
             coverage_rule_version="coverage-rules.v1",
@@ -151,8 +160,8 @@ def build_real_xtquant_context(*, reference_bundle_root: Path) -> V3EvidenceTrus
         promotion_profile=PromotionProfileV3(
             source=_SOURCE,
             dataset=_DATASET,
-            promotion_profile_version="xtquant-trading-status-real-promotion.c1a-r1.v1",
-            promotion_config_version="real-validation-config.c1a-r1.v1",
+            promotion_profile_version="xtquant-trading-status-real-promotion.c1a-r2.v1",
+            promotion_config_version="real-validation-config.c1a-r2.v1",
             required_case_ids=_CASE_IDS,
             reference_bundle_id=verified.bundle_id,
             reference_bundle_manifest_sha256=verified.manifest_sha256,
@@ -202,6 +211,7 @@ def _plan_unsigned(
         "output_scope": str(output_root.resolve(strict=False)),
         "promotion_profile": context.promotion_profile.to_dict(),
         "runner_key_id": runner_key_id,
+        "sample_spec_sha256": context.sample.sample_spec_sha256,
         "source": _SOURCE,
         "source_dataset_contract": context.source_dataset_contract.to_dict(),
         "versions": versions.to_dict(),
@@ -355,6 +365,7 @@ class RealXtQuantValidationRuntime:
         _assert_runner_ready(
             trust=trust, signer=self._runner_signer, runner_preflight=self._runner_preflight
         )
+        _assert_authorization_ready(trust=trust, verifier=self._authorization_verifier)
         return build_real_xtquant_plan(
             output_root=output_root,
             identity=identity,
@@ -422,17 +433,23 @@ class RealXtQuantValidationRuntime:
             )
         events.append("OUTPUT")
         try:
+            output_trust = self._trust_resolver.resolve()
             verified = RealValidationEvidenceVerifier(
                 validation_root=plan.output_root,
-                context=plan.context,
-                verifier_anchor=self._trust_resolver.resolve().verifier_anchor,
+                context=output_trust.context,
+                runner_verifier_anchor=output_trust.runner_verifier_anchor,
+                authorization_verifier_anchor=output_trust.authorization_verifier_anchor,
             ).verify_run(directory=directory)
         except Exception:
             self._write_incomplete(plan, "REAL_RUNNER_EVIDENCE_INVALID")
             raise RealXtQuantExecutionError(
                 "REAL_RUNNER_EVIDENCE_INVALID", "fixed REAL evidence is invalid"
             ) from None
-        if verified.identity != plan.identity:
+        if (
+            verified.identity != plan.identity
+            or verified.outcome is not AttemptOutcomeV3.FAILED
+            or verified.failure is None
+        ):
             self._write_incomplete(plan, "REAL_RUNNER_IDENTITY_MISMATCH")
             raise RealXtQuantExecutionError(
                 "REAL_RUNNER_IDENTITY_MISMATCH", "REAL evidence identity is invalid"
@@ -454,6 +471,7 @@ class RealXtQuantValidationRuntime:
         _assert_runner_ready(
             trust=trust, signer=self._runner_signer, runner_preflight=self._runner_preflight
         )
+        _assert_authorization_ready(trust=trust, verifier=self._authorization_verifier)
         try:
             package_version = self._package_probe.exact_version()
         except XtQuantPackageMetadataError:
@@ -553,7 +571,8 @@ class RealXtQuantAssessmentService:
             verifier = RealValidationEvidenceVerifier(
                 validation_root=self._root,
                 context=trust.context,
-                verifier_anchor=trust.verifier_anchor,
+                runner_verifier_anchor=trust.runner_verifier_anchor,
+                authorization_verifier_anchor=trust.authorization_verifier_anchor,
             )
             RealValidationEvidenceWriter(validation_root=self._root).finalize_assessment(
                 assessment_directory=assessment_directory, verifier=verifier
@@ -572,14 +591,24 @@ def _assert_runner_ready(
     runner_preflight: Callable[[], bool],
 ) -> None:
     if (
-        signer.key_id != trust.verifier_anchor.key_id
-        or signer.key_id not in trust.verifier_anchor.allowed_key_ids
+        signer.key_id != trust.runner_verifier_anchor.key_id
+        or signer.key_id not in trust.runner_verifier_anchor.allowed_key_ids
     ):
         raise RealXtQuantExecutionError(
             "REAL_SIGNER_NOT_READY", "REAL signer is not independently trusted"
         )
     if not runner_preflight():
         raise RealXtQuantExecutionError("REAL_RUNNER_NOT_READY", "fixed REAL runner is unavailable")
+
+
+def _assert_authorization_ready(
+    *, trust: RealXtQuantTrustConfiguration, verifier: RealExecutionAuthorizationVerifier
+) -> None:
+    if verifier.key_id != trust.authorization_verifier_anchor.key_id:
+        raise RealXtQuantExecutionError(
+            "REAL_AUTHORIZATION_TRUST_NOT_READY",
+            "REAL authorization trust is not independently configured",
+        )
 
 
 def _fixed_runner_is_available() -> bool:
@@ -602,7 +631,7 @@ def _fixed_runner_is_available() -> bool:
 def _output_directory(root: Path, identity: ValidationAttemptIdentityV3) -> Path:
     return (
         root
-        / "source-assessments-real-v1"
+        / "source-assessments-real-v2"
         / "xtquant"
         / "trading_status"
         / path_safe_id(str(identity.assessment_id))

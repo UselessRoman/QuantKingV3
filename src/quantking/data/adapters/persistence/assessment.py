@@ -106,13 +106,16 @@ class V3SealedAssessmentRowTrustResolver(Protocol):
 
 
 class RealSealedAssessmentTrustConfiguration(Protocol):
-    """Verifier-owned R1 context and public trust anchor."""
+    """Verifier-owned R2 context and separate public trust anchors."""
 
     @property
     def context(self) -> V3EvidenceTrustContext: ...
 
     @property
-    def verifier_anchor(self) -> RealVerifierTrustAnchor: ...
+    def runner_verifier_anchor(self) -> RealVerifierTrustAnchor: ...
+
+    @property
+    def authorization_verifier_anchor(self) -> RealVerifierTrustAnchor: ...
 
 
 class RealSealedAssessmentTrustResolver(Protocol):
@@ -356,7 +359,7 @@ class SealedAssessmentReadVerifier:
             )
             summary: _Summary
             evidence_name = Path(expected.evidence_relative_path).name
-            if evidence_name == "_assessment-real-v1":
+            if evidence_name == "_assessment-real-v2":
                 if self._real_resolver is None:
                     raise ValueError("REAL sealed reader is not configured")
                 real = self._real_resolver.resolve()
@@ -364,7 +367,8 @@ class SealedAssessmentReadVerifier:
                     seal=seal,
                     original_relative=original_relative,
                     context=real.context,
-                    verifier_anchor=real.verifier_anchor,
+                    runner_verifier_anchor=real.runner_verifier_anchor,
+                    authorization_verifier_anchor=real.authorization_verifier_anchor,
                     workspace=self._root,
                 )
             elif evidence_name == "_assessment-v3":
@@ -946,11 +950,13 @@ class SqliteRealSourceAssessmentPersistenceAdapter:
         engine: Engine,
         validation_root: Path,
         context: V3EvidenceTrustContext,
-        verifier_anchor: RealVerifierTrustAnchor,
+        runner_verifier_anchor: RealVerifierTrustAnchor,
+        authorization_verifier_anchor: RealVerifierTrustAnchor,
     ) -> None:
         self._root = validation_root.resolve(strict=False)
         self._context = context
-        self._anchor = verifier_anchor
+        self._runner_anchor = runner_verifier_anchor
+        self._authorization_anchor = authorization_verifier_anchor
         self._session_factory = sessionmaker(bind=engine, expire_on_commit=False)
 
     def persist_from_directory(
@@ -1010,7 +1016,7 @@ class SqliteRealSourceAssessmentPersistenceAdapter:
             relative = directory.relative_to(self._root)
         except ValueError as error:
             raise ValueError("REAL assessment directory is outside the managed root") from error
-        if not relative.parts or directory.name == "_assessment-real-v1":
+        if not relative.parts or directory.name == "_assessment-real-v2":
             raise ValueError("REAL assessment directory is invalid")
         _reject_reparse_chain(directory.parent, self._root)
         if directory.exists() and _is_reparse(directory):
@@ -1019,7 +1025,10 @@ class SqliteRealSourceAssessmentPersistenceAdapter:
 
     def _snapshot(self, *, root: Path, directory: Path) -> tuple[VerifiedRealAssessment, _Summary]:
         evidence = RealValidationEvidenceVerifier(
-            validation_root=root, context=self._context, verifier_anchor=self._anchor
+            validation_root=root,
+            context=self._context,
+            runner_verifier_anchor=self._runner_anchor,
+            authorization_verifier_anchor=self._authorization_anchor,
         ).verify_assessment(assessment_directory=directory)
         _verify_exact_assessment_tree_real(directory)
         return evidence, _attestation_summary_real(directory, evidence)
@@ -1046,7 +1055,8 @@ class SqliteRealSourceAssessmentPersistenceAdapter:
             seal=seal,
             original_relative=original_relative,
             context=self._context,
-            verifier_anchor=self._anchor,
+            runner_verifier_anchor=self._runner_anchor,
+            authorization_verifier_anchor=self._authorization_anchor,
             workspace=self._root,
         )
         if actual != expected:
@@ -1071,7 +1081,7 @@ class SqliteRealSourceAssessmentPersistenceAdapter:
         if (
             assessment.evidence_relative_path != evidence.evidence_relative_path
             or assessment.evidence_sha256 != evidence.manifest_sha256
-            or not assessment.evidence_relative_path.endswith("/_assessment-real-v1")
+            or not assessment.evidence_relative_path.endswith("/_assessment-real-v2")
             or not evidence.runs
             or summary[0] != (EvidenceKind.REAL.value,)
         ):
@@ -1214,10 +1224,11 @@ def _verify_sealed_archive_real(
     seal: Path,
     original_relative: Path,
     context: V3EvidenceTrustContext,
-    verifier_anchor: RealVerifierTrustAnchor,
+    runner_verifier_anchor: RealVerifierTrustAnchor,
+    authorization_verifier_anchor: RealVerifierTrustAnchor,
     workspace: Path,
 ) -> tuple[VerifiedRealAssessment, _Summary]:
-    """Extract and deeply verify the explicit R1 REAL evidence family."""
+    """Extract and deeply verify the explicit R2 REAL evidence family."""
     temporary_root = workspace / ".assessment-verification"
     temporary_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=temporary_root) as temporary:
@@ -1226,7 +1237,10 @@ def _verify_sealed_archive_real(
         assessment_directory.mkdir(parents=True)
         _extract_seal(seal, assessment_directory)
         evidence = RealValidationEvidenceVerifier(
-            validation_root=root, context=context, verifier_anchor=verifier_anchor
+            validation_root=root,
+            context=context,
+            runner_verifier_anchor=runner_verifier_anchor,
+            authorization_verifier_anchor=authorization_verifier_anchor,
         ).verify_assessment(assessment_directory=assessment_directory)
         _verify_exact_assessment_tree_real(assessment_directory)
         summary = _attestation_summary_real(assessment_directory, evidence)
@@ -1286,11 +1300,11 @@ def _verify_exact_assessment_tree_v3(directory: Path) -> None:
 
 
 def _verify_exact_assessment_tree_real(directory: Path) -> None:
-    manifest = json.loads((directory / "_assessment-real-v1" / "manifest.json").read_bytes())
+    manifest = json.loads((directory / "_assessment-real-v2" / "manifest.json").read_bytes())
     runs = manifest.get("runs")
     if not isinstance(runs, list):
         raise InvalidDataTransitionError("REAL assessment tree is invalid")
-    expected = {"_assessment-real-v1"}
+    expected = {"_assessment-real-v2"}
     for item in runs:
         if not isinstance(item, dict) or not isinstance(item.get("directory"), str):
             raise InvalidDataTransitionError("REAL assessment tree is invalid")
@@ -1380,7 +1394,7 @@ def _attestation_summary_v3(
 
 
 def _attestation_summary_real(directory: Path, evidence: VerifiedRealAssessment) -> _Summary:
-    manifest = json.loads((directory / "_assessment-real-v1" / "manifest.json").read_bytes())
+    manifest = json.loads((directory / "_assessment-real-v2" / "manifest.json").read_bytes())
     entries = manifest.get("runs")
     if not isinstance(entries, list) or len(entries) != len(evidence.runs):
         raise InvalidDataTransitionError("REAL assessment run summary is invalid")
@@ -1388,7 +1402,7 @@ def _attestation_summary_real(directory: Path, evidence: VerifiedRealAssessment)
     for entry, run in zip(entries, evidence.runs, strict=True):
         if not isinstance(entry, dict) or entry.get("manifest_sha256") != run.manifest_sha256:
             raise InvalidDataTransitionError("REAL assessment run summary is invalid")
-        path = directory / str(entry["directory"]) / "runner" / "result-attestation.real.v1.json"
+        path = directory / str(entry["directory"]) / "runner" / "result-attestation.real.v2.json"
         payload = path.read_bytes()
         if compute_sha256(payload) != run.attestation_sha256:
             raise InvalidDataTransitionError("REAL result attestation lineage is invalid")

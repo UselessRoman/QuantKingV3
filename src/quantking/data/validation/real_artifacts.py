@@ -1,6 +1,6 @@
-"""R1-specific immutable REAL evidence and lineage verifier.
+"""R2-specific immutable REAL evidence and lineage verifier.
 
-The C0B v2/v3 artifact contracts remain byte-for-byte untouched.  REAL R1
+The C0B v2/v3 artifact contracts remain byte-for-byte untouched.  REAL R2
 uses this explicit family because every run must carry an authorization-file,
 plan, and immutable claim-receipt lineage into the sealed read path.
 """
@@ -34,13 +34,15 @@ from quantking.data.validation.models import ValidationFailure, ValidationVersio
 from quantking.data.validation.real_authorization import (
     ExplicitLocalRealKey,
     RealClaimReceipt,
+    RealClaimReceiptVerifier,
     RealRuntimeAuthorizationEnvelope,
+    RealRuntimeAuthorizationVerifier,
     RealVerifierTrustAnchor,
 )
 
-REAL_RUN_SCHEMA = "source-validation-real-envelope.v1"
-REAL_RESULT_ATTESTATION_SCHEMA = "source-validation-real-result-attestation.v1"
-REAL_ASSESSMENT_SCHEMA = "source-assessment-real-manifest.v1"
+REAL_RUN_SCHEMA = "source-validation-real-envelope.v2"
+REAL_RESULT_ATTESTATION_SCHEMA = "source-validation-real-result-attestation.v2"
+REAL_ASSESSMENT_SCHEMA = "source-assessment-real-manifest.v2"
 _SOURCE = "XTQUANT"
 _DATASET = DatasetKind.TRADING_STATUS
 _CASE_IDS = ("st_warning_603377_sh",)
@@ -50,16 +52,7 @@ _FILES_FAILURE = frozenset(
         "authorization/envelope.json",
         "failure/attempt.json",
         "request/plan.json",
-        "runner/result-attestation.real.v1.json",
-    }
-)
-_FILES_SUCCESS = frozenset(
-    {
-        "authorization/claim-receipt.json",
-        "authorization/envelope.json",
-        "request/plan.json",
-        "runner/result-attestation.real.v1.json",
-        "success/attempt.json",
+        "runner/result-attestation.real.v2.json",
     }
 )
 
@@ -144,14 +137,10 @@ class RealResultAttestation:
             or len(self.signature) != 128
         ):
             raise ValueError("REAL result attestation is invalid")
-        if self.outcome is AttemptOutcomeV3.FAILED:
-            if not isinstance(self.failure, ValidationFailure):
-                raise ValueError("REAL failed result requires a failure")
-        elif self.outcome is AttemptOutcomeV3.SUCCEEDED:
-            if self.failure is not None:
-                raise ValueError("REAL successful result cannot include a failure")
-        else:
-            raise ValueError("REAL result outcome is invalid")
+        if self.outcome is not AttemptOutcomeV3.FAILED or not isinstance(
+            self.failure, ValidationFailure
+        ):
+            raise ValueError("C1A REAL result must be a capability-blocked failure")
         object.__setattr__(self, "versions", MappingProxyType(dict(sorted(self.versions.items()))))
 
     def unsigned_payload(self) -> dict[str, object]:
@@ -308,7 +297,7 @@ class VerifiedRealAssessment:
 class RealValidationEvidenceWriter:
     """Production writer: it obtains timestamps from the runner's injected clock."""
 
-    _DOMAIN = "quantking.s1-07c1a-r1.real-result-attestation.v1"
+    _DOMAIN = "quantking.s1-07c1a-r2.real-result-attestation.v2"
 
     def __init__(self, *, validation_root: Path) -> None:
         self._root = _validate_root(validation_root)
@@ -323,23 +312,7 @@ class RealValidationEvidenceWriter:
     ) -> Path:
         return self._write(
             inputs=inputs,
-            outcome=AttemptOutcomeV3.FAILED,
             failure=failure,
-            started_at=started_at,
-            ended_at=ended_at,
-        )
-
-    def write_success(
-        self,
-        *,
-        inputs: RealRunInputs,
-        started_at: UtcTimestamp,
-        ended_at: UtcTimestamp,
-    ) -> Path:
-        return self._write(
-            inputs=inputs,
-            outcome=AttemptOutcomeV3.SUCCEEDED,
-            failure=None,
             started_at=started_at,
             ended_at=ended_at,
         )
@@ -348,15 +321,15 @@ class RealValidationEvidenceWriter:
         self,
         *,
         inputs: RealRunInputs,
-        outcome: AttemptOutcomeV3,
-        failure: ValidationFailure | None,
+        failure: ValidationFailure,
         started_at: UtcTimestamp,
         ended_at: UtcTimestamp,
     ) -> Path:
         if not (
-            inputs.valid_from.value <= started_at.value < ended_at.value < inputs.expires_at.value
-            and inputs.valid_from.value
+            inputs.valid_from.value
             <= inputs.claim_receipt.claimed_at.value
+            <= started_at.value
+            < ended_at.value
             < inputs.expires_at.value
         ):
             raise ValueError("REAL evidence timestamps are outside the authorization window")
@@ -367,7 +340,7 @@ class RealValidationEvidenceWriter:
             dataset=_DATASET,
             selected_case_ids=_CASE_IDS,
             versions=inputs.versions.to_dict(),
-            outcome=outcome,
+            outcome=AttemptOutcomeV3.FAILED,
             failure=failure,
             started_at=started_at,
             ended_at=ended_at,
@@ -386,17 +359,11 @@ class RealValidationEvidenceWriter:
             "authorization/envelope.json": inputs.authorization_bytes,
             "authorization/claim-receipt.json": inputs.claim_receipt.to_bytes(),
             "request/plan.json": inputs.plan_bytes,
-            "runner/result-attestation.real.v1.json": attestation.to_bytes(),
+            "runner/result-attestation.real.v2.json": attestation.to_bytes(),
         }
-        if outcome is AttemptOutcomeV3.FAILED:
-            assert failure is not None
-            files["failure/attempt.json"] = canonical_json(
-                {"failure": {"category": failure.category, "retryable": failure.retryable}}
-            )
-        else:
-            files["success/attempt.json"] = canonical_json(
-                {"status": "SUCCESS_EVIDENCE_REQUIRES_SEPARATE_QUALITY_GATES"}
-            )
+        files["failure/attempt.json"] = canonical_json(
+            {"failure": {"category": failure.category, "retryable": failure.retryable}}
+        )
         return self._write_files(inputs=inputs, attestation=attestation, files=files)
 
     def _write_files(
@@ -406,10 +373,7 @@ class RealValidationEvidenceWriter:
         attestation: RealResultAttestation,
         files: Mapping[str, bytes],
     ) -> Path:
-        expected_files = (
-            _FILES_FAILURE if attestation.outcome is AttemptOutcomeV3.FAILED else _FILES_SUCCESS
-        )
-        if set(files) != expected_files:
+        if attestation.outcome is not AttemptOutcomeV3.FAILED or set(files) != _FILES_FAILURE:
             raise ValueError("REAL evidence file shape is invalid")
         inventory = [
             {"relative_path": name, "sha256": _sha(payload), "size": len(payload)}
@@ -473,14 +437,14 @@ class RealValidationEvidenceWriter:
         manifest_sha = _sha(canonical_json(summary))
         manifest = canonical_json({**summary, "manifest_sha256": manifest_sha})
         complete = canonical_json({"manifest_sha256": manifest_sha})
-        directory = assessment_directory / "_assessment-real-v1"
+        directory = assessment_directory / "_assessment-real-v2"
         if directory.exists():
             if (directory / "manifest.json").read_bytes() != manifest:
                 raise ValidationEvidenceConflictError(
                     "REAL assessment is already finalized with different evidence"
                 )
             return verifier.verify_assessment(assessment_directory=assessment_directory)
-        incomplete = assessment_directory / "_assessment-real-v1.incomplete"
+        incomplete = assessment_directory / "_assessment-real-v2.incomplete"
         incomplete.mkdir(parents=False, exist_ok=False)
         (incomplete / "manifest.json").write_bytes(manifest)
         (incomplete / "COMPLETE").write_bytes(complete)
@@ -496,11 +460,19 @@ class RealValidationEvidenceVerifier:
         *,
         validation_root: Path,
         context: V3EvidenceTrustContext,
-        verifier_anchor: RealVerifierTrustAnchor,
+        runner_verifier_anchor: RealVerifierTrustAnchor,
+        authorization_verifier_anchor: RealVerifierTrustAnchor,
     ) -> None:
         self._root = _validate_root(validation_root)
         self.context = context
-        self._anchor = verifier_anchor
+        self._runner_anchor = runner_verifier_anchor
+        self._authorization_anchor = authorization_verifier_anchor
+        self._runtime_authorization_verifier = RealRuntimeAuthorizationVerifier(
+            trust_anchor=authorization_verifier_anchor
+        )
+        self._claim_receipt_verifier = RealClaimReceiptVerifier(
+            trust_anchor=authorization_verifier_anchor
+        )
 
     def verify_run(self, *, directory: Path) -> VerifiedRealRun:
         try:
@@ -540,17 +512,23 @@ class RealValidationEvidenceVerifier:
             identity = ValidationAttemptIdentityV3.from_dict(_mapping(manifest["identity"]))
             lineage = _lineage_from_mapping(_mapping(manifest["lineage"]))
             files = _verified_files(directory=directory, entries=manifest["files"])
-            expected_names = (
-                _FILES_FAILURE
-                if manifest["attempt_outcome"] == AttemptOutcomeV3.FAILED.value
-                else _FILES_SUCCESS
-            )
-            if set(files) != expected_names:
+            if (
+                manifest["attempt_outcome"] != AttemptOutcomeV3.FAILED.value
+                or set(files) != _FILES_FAILURE
+            ):
                 raise ValueError
             envelope_raw = files["authorization/envelope.json"]
             if _sha(envelope_raw) != lineage.authorization_envelope_sha256:
                 raise ValueError
             envelope = RealRuntimeAuthorizationEnvelope.from_bytes(envelope_raw)
+            if (
+                not self._runtime_authorization_verifier.verify_real_file_authorization(envelope)
+                or envelope.authorization_key_id != self._authorization_anchor.key_id
+                or envelope.authorization.signer_key_id != self._authorization_anchor.key_id
+                or envelope.runner_key_id != self._runner_anchor.key_id
+                or envelope.authorization.sample_sha256 != self.context.sample.sample_spec_sha256
+            ):
+                raise ValueError
             plan_raw = files["request/plan.json"]
             if not _plan_sha_matches(plan_raw, lineage.plan_sha256) or not _plan_binds(
                 plan_raw, identity, envelope, self.context
@@ -567,15 +545,19 @@ class RealValidationEvidenceVerifier:
                 or receipt.claim_nonce != envelope.claim_nonce
                 or receipt.authorization_envelope_sha256 != lineage.authorization_envelope_sha256
                 or receipt.plan_sha256 != lineage.plan_sha256
+                or receipt.authorization_key_id != envelope.authorization_key_id
+                or not self._claim_receipt_verifier.verify(receipt)
             ):
                 raise ValueError
-            attestation_raw = files["runner/result-attestation.real.v1.json"]
+            attestation_raw = files["runner/result-attestation.real.v2.json"]
             attestation = RealResultAttestation.from_bytes(attestation_raw)
             if (
                 attestation.identity != identity
                 or attestation.lineage != lineage
-                or attestation.signer_key_id != self._anchor.key_id
-                or not self._anchor.verify(
+                or attestation.signer_key_id != self._runner_anchor.key_id
+                or attestation.signer_key_id != envelope.runner_key_id
+                or dict(attestation.versions) != dict(envelope.frozen_versions)
+                or not self._runner_anchor.verify(
                     domain=self._DOMAIN,
                     payload=attestation.unsigned_payload(),
                     signature=attestation.signature,
@@ -586,8 +568,6 @@ class RealValidationEvidenceVerifier:
                 or not (
                     envelope.authorization.valid_from.value
                     <= receipt.claimed_at.value
-                    < envelope.authorization.expires_at.value
-                    and envelope.authorization.valid_from.value
                     <= attestation.started_at.value
                     < attestation.ended_at.value
                     < envelope.authorization.expires_at.value
@@ -612,7 +592,7 @@ class RealValidationEvidenceVerifier:
 
     def verify_assessment(self, *, assessment_directory: Path) -> VerifiedRealAssessment:
         try:
-            summary_dir = assessment_directory / "_assessment-real-v1"
+            summary_dir = assessment_directory / "_assessment-real-v2"
             manifest = _load_canonical(summary_dir / "manifest.json")
             complete = _load_canonical(summary_dir / "COMPLETE")
             expected = {
@@ -677,7 +657,7 @@ class RealValidationEvidenceVerifier:
 def _run_directory(root: Path, identity: ValidationAttemptIdentityV3) -> Path:
     return (
         root
-        / "source-assessments-real-v1"
+        / "source-assessments-real-v2"
         / "xtquant"
         / "trading_status"
         / path_safe_id(str(identity.assessment_id))
@@ -756,10 +736,8 @@ def _verify_result_file_shape(
         }
         if _load_canonical_bytes(files["failure/attempt.json"]) != expected:
             raise ValueError("REAL failure evidence is invalid")
-    elif _load_canonical_bytes(files["success/attempt.json"]) != {
-        "status": "SUCCESS_EVIDENCE_REQUIRES_SEPARATE_QUALITY_GATES"
-    }:
-        raise ValueError("REAL success evidence is invalid")
+    else:
+        raise ValueError("C1A REAL success evidence is forbidden")
 
 
 def _plan_binds(
@@ -777,6 +755,7 @@ def _plan_binds(
         "plan_sha256",
         "promotion_profile",
         "runner_key_id",
+        "sample_spec_sha256",
         "source",
         "source_dataset_contract",
         "versions",
@@ -794,6 +773,8 @@ def _plan_binds(
         and raw["case_ids"] == list(_CASE_IDS)
         and raw["output_scope"] == envelope.output_scope
         and raw["runner_key_id"] == envelope.runner_key_id
+        and raw["sample_spec_sha256"] == context.sample.sample_spec_sha256
+        and raw["sample_spec_sha256"] == envelope.authorization.sample_sha256
         and raw["source_dataset_contract"] == context.source_dataset_contract.to_dict()
         and raw["promotion_profile"] == context.promotion_profile.to_dict()
         and raw["versions"] == dict(envelope.frozen_versions)

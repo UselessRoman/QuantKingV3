@@ -1,4 +1,4 @@
-"""C1A-R1 REAL-only authorization, Ed25519 trust, and claim lineage.
+"""C1A-R2 REAL-only authorization, Ed25519 trust, and claim lineage.
 
 This module is intentionally separate from C0B's HMAC/Fake authorization
 contracts.  REAL keys are asymmetric: writers load an explicit private PEM,
@@ -45,7 +45,7 @@ from quantking.data.validation.contracts_v3 import (
 REAL_RUNTIME_AUTHORIZATION_SCHEMA = "runtime-authorization-envelope.real.v2"
 REAL_RUNTIME_AUTHORIZATION_PURPOSE = "S1-07C1A_R1_XTQUANT_TRADING_STATUS_REAL"
 REAL_EXECUTION_AUTHORIZATION_SCHEMA = "real-execution-authorization.v1"
-REAL_CLAIM_RECEIPT_SCHEMA = "real-authorization-claim-receipt.v1"
+REAL_CLAIM_RECEIPT_SCHEMA = "real-authorization-claim-receipt.v2"
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _KEY_ID = re.compile(r"^real-ed25519-sha256-[0-9a-f]{64}$")
@@ -339,6 +339,11 @@ class RealExecutionAuthorizationVerifier:
     def __init__(self, *, trust_anchor: RealVerifierTrustAnchor) -> None:
         self._anchor = trust_anchor
 
+    @property
+    def key_id(self) -> str:
+        """Verifier-owned authorization key identity, never caller input."""
+        return self._anchor.key_id
+
     def verify(
         self,
         authorization: RealExecutionAuthorization,
@@ -545,10 +550,20 @@ class RealRuntimeAuthorizationVerifier(RealRuntimeAuthorizationFileVerifier):
     def __init__(self, *, trust_anchor: RealVerifierTrustAnchor) -> None:
         self._anchor = trust_anchor
 
+    @property
+    def key_id(self) -> str:
+        """Verifier-owned authorization key identity, never caller input."""
+        return self._anchor.key_id
+
     def verify_real_file_authorization(self, envelope: RealRuntimeAuthorizationEnvelope) -> bool:
         return (
             envelope.authorization_key_id == self._anchor.key_id
             and envelope.authorization.signer_key_id == self._anchor.key_id
+            and self._anchor.verify(
+                domain=RealExecutionAuthorizationVerifier._DOMAIN,
+                payload=envelope.authorization.unsigned_payload(),
+                signature=envelope.authorization.signature,
+            )
             and self._anchor.verify(
                 domain=self._DOMAIN,
                 payload=envelope.unsigned_payload(),
@@ -661,6 +676,8 @@ class RealClaimReceipt:
     claim_nonce: str
     authorization_envelope_sha256: str
     plan_sha256: str
+    authorization_key_id: str
+    signature: str
     schema_version: str = REAL_CLAIM_RECEIPT_SCHEMA
 
     def __post_init__(self) -> None:
@@ -677,13 +694,17 @@ class RealClaimReceipt:
                     self.plan_sha256,
                 )
             )
+            or not _KEY_ID.fullmatch(self.authorization_key_id)
+            or not isinstance(self.signature, str)
+            or not re.fullmatch(r"[0-9a-f]{128}", self.signature)
         ):
             raise RealAuthorizationError("REAL claim receipt is invalid")
 
-    def to_dict(self) -> dict[str, str]:
+    def unsigned_payload(self) -> dict[str, str]:
         return {
             "authorization_envelope_sha256": self.authorization_envelope_sha256,
             "authorization_id": str(self.authorization_id),
+            "authorization_key_id": self.authorization_key_id,
             "claim_nonce": self.claim_nonce,
             "claimed_at": self.claimed_at.to_iso(),
             "invocation_id": str(self.invocation_id),
@@ -691,6 +712,9 @@ class RealClaimReceipt:
             "run_id": str(self.run_id),
             "schema_version": self.schema_version,
         }
+
+    def to_dict(self) -> dict[str, str]:
+        return {**self.unsigned_payload(), "signature": self.signature}
 
     def to_bytes(self) -> bytes:
         return _canonical(self.to_dict())
@@ -706,12 +730,14 @@ class RealClaimReceipt:
             expected = {
                 "authorization_envelope_sha256",
                 "authorization_id",
+                "authorization_key_id",
                 "claim_nonce",
                 "claimed_at",
                 "invocation_id",
                 "plan_sha256",
                 "run_id",
                 "schema_version",
+                "signature",
             }
             if (
                 not isinstance(raw, dict)
@@ -728,19 +754,80 @@ class RealClaimReceipt:
                 claim_nonce=raw["claim_nonce"],
                 authorization_envelope_sha256=raw["authorization_envelope_sha256"],
                 plan_sha256=raw["plan_sha256"],
+                authorization_key_id=raw["authorization_key_id"],
+                signature=raw["signature"],
                 schema_version=raw["schema_version"],
             )
         except (TypeError, ValueError) as error:
             raise RealAuthorizationError("REAL claim receipt is invalid") from error
 
 
-class RealAuthorizationClaimStore:
-    """One-time, immutable R1 receipt store; C0B's claim store is untouched."""
+class RealClaimReceiptIssuer:
+    """Explicit authorization-key issuer for immutable claim receipts."""
 
-    def __init__(self, *, claim_root: Path) -> None:
+    _DOMAIN = "quantking.s1-07c1a-r2.claim-receipt.v2"
+
+    def __init__(self, *, private_key_file: Path) -> None:
+        self._key = ExplicitLocalRealKey(private_key_file=private_key_file)
+
+    @property
+    def key_id(self) -> str:
+        return self._key.key_id
+
+    def issue(
+        self,
+        *,
+        authorization_id: EntityId,
+        invocation_id: EntityId,
+        run_id: EntityId,
+        claimed_at: UtcTimestamp,
+        claim_nonce: str,
+        authorization_envelope_sha256: str,
+        plan_sha256: str,
+    ) -> RealClaimReceipt:
+        unsigned = RealClaimReceipt(
+            authorization_id=authorization_id,
+            invocation_id=invocation_id,
+            run_id=run_id,
+            claimed_at=claimed_at,
+            claim_nonce=claim_nonce,
+            authorization_envelope_sha256=authorization_envelope_sha256,
+            plan_sha256=plan_sha256,
+            authorization_key_id=self.key_id,
+            signature="0" * 128,
+        )
+        return replace(
+            unsigned,
+            signature=self._key.sign(domain=self._DOMAIN, payload=unsigned.unsigned_payload()),
+        )
+
+
+class RealClaimReceiptVerifier:
+    """Read-side proof verifier; it never accepts an unsigned claim."""
+
+    _DOMAIN = RealClaimReceiptIssuer._DOMAIN
+
+    def __init__(self, *, trust_anchor: RealVerifierTrustAnchor) -> None:
+        self._anchor = trust_anchor
+
+    def verify(self, receipt: RealClaimReceipt) -> bool:
+        return receipt.authorization_key_id == self._anchor.key_id and self._anchor.verify(
+            domain=self._DOMAIN,
+            payload=receipt.unsigned_payload(),
+            signature=receipt.signature,
+        )
+
+
+class RealAuthorizationClaimStore:
+    """One-time, immutable R2 receipt store with an issuance proof."""
+
+    def __init__(self, *, claim_root: Path, receipt_issuer: RealClaimReceiptIssuer) -> None:
         if not isinstance(claim_root, Path) or not claim_root.is_absolute():
             raise ValueError("claim_root must be an absolute Path")
+        if not isinstance(receipt_issuer, RealClaimReceiptIssuer):
+            raise ValueError("receipt_issuer must be an explicit REAL issuer")
         self._root = claim_root
+        self._receipt_issuer = receipt_issuer
 
     def claim(
         self,
@@ -759,7 +846,13 @@ class RealAuthorizationClaimStore:
             at=at,
         ):
             raise RealAuthorizationError("AUTHORIZATION_INVALID_OR_EXPIRED")
-        receipt = RealClaimReceipt(
+        if (
+            envelope.authorization_key_id != verifier.key_id
+            or envelope.authorization.signer_key_id != verifier.key_id
+            or self._receipt_issuer.key_id != verifier.key_id
+        ):
+            raise RealAuthorizationError("AUTHORIZATION_CLAIM_ISSUER_UNTRUSTED")
+        receipt = self._receipt_issuer.issue(
             authorization_id=envelope.authorization.authorization_id,
             invocation_id=envelope.identity.invocation_id,
             run_id=envelope.identity.run_id,
@@ -829,6 +922,8 @@ __all__ = [
     "RealAuthorizationClaimStore",
     "RealAuthorizationError",
     "RealClaimReceipt",
+    "RealClaimReceiptIssuer",
+    "RealClaimReceiptVerifier",
     "RealExecutionAuthorization",
     "RealExecutionAuthorizationAuthority",
     "RealExecutionAuthorizationVerifier",
