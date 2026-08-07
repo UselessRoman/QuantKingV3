@@ -1,6 +1,8 @@
 # S1-07C0A 实现证据：版本化运行证据合同
 
-状态：C0A实现完成、等待独立主验收。本文不是主验收报告，不授予 C0B、S1-07C
+状态：S1-07C0A-R1 已于 2026-08-07 完成独立主验收，结果提交为
+`5a48909355d7a023fd404780688d070106a2522f`，证据见
+[S1-07C0A-R1 主验收证据](S1-07C0A-R1_ACCEPTANCE.md)。本记录不授予 C0B、S1-07C
 真实运行、S1-07D、S1-08 或 Stage 2 的实施权限，也不表示任何来源具有 REAL 或
 `PRODUCTION_READY` 能力。
 
@@ -89,4 +91,4 @@ v3 attempt 明确为 `SUCCEEDED` 或 `FAILED`：
 
 本任务没有实现 runtime authorization 文件加载、REAL signer allowlist、provider runner、
 授权 claim 流程、assessment seal 持久化、DataCenter 深验注入、数据库迁移或任何真实执行。
-后续任务须在 C0A 独立主验收后获得新的明确授权；当前 REAL marker 执行数为 0。
+后续任务仍须获得新的明确授权；当前 REAL marker 执行数为 0。

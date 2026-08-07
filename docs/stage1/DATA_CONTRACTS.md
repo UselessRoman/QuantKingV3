@@ -18,7 +18,8 @@ BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
 S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` 完成主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED
 case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版；
 17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
-S1-07C/D、S1-08 尚未开始、未获授权。
+S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 完成纯离线
+独立主验收；C0B、真实运行尚未开始、未获授权；除 C0A 外，S1-07C/D、S1-08 尚未开始、未获授权。
 
 S1-07B 的固定样本版本链为：v1 → v2 → v3 → v4。v4 原样继承 v3 的 11 个 framework case
 （保持 `FRAMEWORK_ONLY`），并新增 603377.SH ST 权威 case（`AUTHORITY_APPROVED`）。v4

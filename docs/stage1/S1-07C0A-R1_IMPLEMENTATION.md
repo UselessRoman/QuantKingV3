@@ -1,7 +1,9 @@
 # S1-07C0A-R1 实现证据：v3 信任合同收紧
 
-状态：C0A实现完成、等待独立主验收。本文记录 R1 修复，不构成独立主验收，不授予 C0B、REAL
-signer/runner、授权 claim、持久化、CLI、DataCenter、API、Web 或任何真实来源访问权限。
+状态：已于 2026-08-07 完成独立主验收，结果提交为
+`5a48909355d7a023fd404780688d070106a2522f`，证据见
+[S1-07C0A-R1 主验收证据](S1-07C0A-R1_ACCEPTANCE.md)。本记录不授予 C0B、REAL signer/runner、
+授权 claim、持久化、CLI、DataCenter、API、Web 或任何真实来源访问权限。
 
 ## 任务与边界
 
