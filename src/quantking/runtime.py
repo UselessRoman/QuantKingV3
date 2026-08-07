@@ -14,6 +14,7 @@ from quantking.common.errors import ConfigurationError
 from quantking.common.time import utc_now
 from quantking.data.adapters.eod import EodWorkerHandler, register_eod_handler
 from quantking.data.adapters.eod_base import PublishedEodBaseResolver
+from quantking.data.adapters.persistence.assessment import SealedAssessmentReadVerifier
 from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
@@ -46,6 +47,7 @@ from quantking.data.quality.engine import QualityEngine
 from quantking.data.quality.references import PublishedReferenceLoader
 from quantking.data.quality.rules import default_rule_set
 from quantking.data.quality.runner import QualityRunner
+from quantking.data.validation.authorization import FakeRunnerTrustStore, SignerTrustPolicy
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     create_sqlite_engine,
@@ -131,7 +133,19 @@ def build_eod_runtime(
         progress_min_interval_ms=settings.job_progress_min_interval_ms,
     )
     jobs = JobService(SqliteUnitOfWorkFactory(jobs_engine), retry_policy=retry)
-    data_uow = DataSqliteUnitOfWorkFactory(data_engine)
+    # Assessment reads must deep-verify the same finalized seals trusted by
+    # the write adapter.  This composition root intentionally has no v3/REAL
+    # trust configuration: an unconfigured v3 row fails closed rather than
+    # trusting database status, gate, or evidence_kind columns.
+    assessment_reader = SealedAssessmentReadVerifier(
+        validation_root=data_root,
+        signer=FakeRunnerTrustStore(),
+        signer_trust_policy=SignerTrustPolicy.synthetic_only(),
+    )
+    data_uow = DataSqliteUnitOfWorkFactory(
+        data_engine,
+        assessment_read_verifier=assessment_reader,
+    )
     ingestion = XtQuantIngestionService(
         gateway=gateway or _gateway(settings),
         raw_publisher=RawBatchPublisher(data_root=data_root),

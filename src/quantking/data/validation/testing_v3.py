@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 from uuid import UUID
 
 from quantking.common.ids import EntityId, parse_entity_id
@@ -45,6 +46,8 @@ from quantking.data.validation.contracts_v3 import (
     ResultAttestationV3,
     SourceDatasetContractV3,
     SuccessEvidenceBindingV3,
+    V3ResultAttestationSigner,
+    V3RunnerTrustPolicy,
     ValidationAttemptIdentityV3,
     ValidationRequestManifestV3,
     canonical_json,
@@ -104,6 +107,10 @@ class BuiltV3Run:
     envelope: ValidationRunEnvelopeV3
 
 
+class _TestingV3Signer(V3ResultAttestationSigner, Protocol):
+    def sign(self, attestation: ResultAttestationV3) -> ResultAttestationV3: ...
+
+
 def build_v3_run(
     *,
     root: Path,
@@ -115,21 +122,25 @@ def build_v3_run(
     comparison_primary_source: DataSource = DataSource.XTQUANT,
     comparison_fallback_source: DataSource = DataSource.BAOSTOCK,
     comparison_has_difference: bool = False,
+    identity_override: ValidationAttemptIdentityV3 | None = None,
+    versions_override: ValidationVersions | None = None,
+    signer_override: _TestingV3Signer | None = None,
+    runner_trust_policy: V3RunnerTrustPolicy | None = None,
 ) -> BuiltV3Run:
     """Build a complete synthetic v3 success or a credential-free failure."""
     trust_context = context or build_v3_context()
-    signer = FakeV3RunnerTrustStore()
+    signer = signer_override or FakeV3RunnerTrustStore()
     sample = trust_context.sample
     start = UtcTimestamp(datetime(2026, 8, 6, 0, 0, run_index * 2, tzinfo=UTC))
     end = UtcTimestamp(start.value + timedelta(seconds=1))
-    identity = ValidationAttemptIdentityV3(
+    identity = identity_override or ValidationAttemptIdentityV3(
         assessment_id=_id("data_assessment", 1, lane=1),
         authorization_id=_id("data_authorization", run_index, lane=2),
         invocation_id=_id("data_invocation", run_index, lane=3),
         session_id=_id("data_session", run_index, lane=4),
         run_id=_id("data_validation", run_index, lane=5),
     )
-    versions = ValidationVersions(
+    versions = versions_override or ValidationVersions(
         adapter_version="xtquant-readonly.s1-07c.v1",
         package_version="1.0.0",
         code_version="s1-07c0a.contract.v1",
@@ -178,7 +189,12 @@ def build_v3_run(
     )
     if outcome is AttemptOutcomeV3.FAILED:
         return _write_failed_run(
-            root=root, envelope=envelope, request=request, signer=signer, context=trust_context
+            root=root,
+            envelope=envelope,
+            request=request,
+            signer=signer,
+            context=trust_context,
+            runner_trust_policy=runner_trust_policy,
         )
     return _write_successful_run(
         root=root,
@@ -189,6 +205,7 @@ def build_v3_run(
         comparison_primary_source=comparison_primary_source,
         comparison_fallback_source=comparison_fallback_source,
         comparison_has_difference=comparison_has_difference,
+        runner_trust_policy=runner_trust_policy,
     )
 
 
@@ -197,8 +214,9 @@ def _write_failed_run(
     root: Path,
     envelope: ValidationRunEnvelopeV3,
     request: ValidationRequestManifestV3,
-    signer: FakeV3RunnerTrustStore,
+    signer: _TestingV3Signer,
     context: V3EvidenceTrustContext,
+    runner_trust_policy: V3RunnerTrustPolicy | None,
 ) -> BuiltV3Run:
     failure = envelope.failure
     assert failure is not None
@@ -243,7 +261,14 @@ def _write_failed_run(
             0,
         ),
     }
-    return _write(root=root, envelope=envelope, files=files, context=context, signer=signer)
+    return _write(
+        root=root,
+        envelope=envelope,
+        files=files,
+        context=context,
+        signer=signer,
+        runner_trust_policy=runner_trust_policy,
+    )
 
 
 def _write_successful_run(
@@ -251,11 +276,12 @@ def _write_successful_run(
     root: Path,
     envelope: ValidationRunEnvelopeV3,
     request: ValidationRequestManifestV3,
-    signer: FakeV3RunnerTrustStore,
+    signer: _TestingV3Signer,
     context: V3EvidenceTrustContext,
     comparison_primary_source: DataSource,
     comparison_fallback_source: DataSource,
     comparison_has_difference: bool,
+    runner_trust_policy: V3RunnerTrustPolicy | None,
 ) -> BuiltV3Run:
     cases = request.selected_cases
     rows = tuple(
@@ -465,7 +491,14 @@ def _write_successful_run(
         )
     )
     files["runner/result-attestation.v2.json"] = (attestation.to_bytes(), 1)
-    return _write(root=root, envelope=envelope, files=files, context=context, signer=signer)
+    return _write(
+        root=root,
+        envelope=envelope,
+        files=files,
+        context=context,
+        signer=signer,
+        runner_trust_policy=runner_trust_policy,
+    )
 
 
 def _write(
@@ -474,7 +507,8 @@ def _write(
     envelope: ValidationRunEnvelopeV3,
     files: dict[str, tuple[bytes, int]],
     context: V3EvidenceTrustContext,
-    signer: FakeV3RunnerTrustStore,
+    signer: _TestingV3Signer,
+    runner_trust_policy: V3RunnerTrustPolicy | None,
 ) -> BuiltV3Run:
     directory = ValidationEvidenceWriterV3(validation_root=root).write(
         envelope=envelope, files=files
@@ -483,6 +517,7 @@ def _write(
         validation_root=root,
         context=context,
         runner_attestation_verifier=signer,
+        runner_trust_policy=runner_trust_policy,
     )
     return BuiltV3Run(
         directory=directory,

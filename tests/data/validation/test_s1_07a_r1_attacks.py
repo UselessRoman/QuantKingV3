@@ -221,8 +221,8 @@ def test_missing_runner_is_stable_sanitized_and_does_not_load_sdk(tmp_path: Path
             invocation_id=new_entity_id("data_invocation"),
             authorization_claim_store=AuthorizationClaimStore(claim_root=tmp_path / "claims"),
         )
-    assert captured.value.code == "PROVIDER_PACKAGE_VERSION_UNRESOLVED"
-    assert str(captured.value) == "provider package version is not an exact stable version"
+    assert captured.value.code == "LEGACY_AUTHORIZATION_DTO_REJECTED"
+    assert "strict file runtime" in str(captured.value)
     assert "Traceback" not in str(captured.value)
     assert not ({"xtquant", "baostock", "akshare", "tushare"} & (set(sys.modules) - before))
 

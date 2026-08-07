@@ -54,6 +54,7 @@ from quantking.data.validation.contracts_v3 import (
     SourceDatasetContractV3,
     SuccessEvidenceBindingV3,
     V3ResultAttestationSigner,
+    V3RunnerTrustPolicy,
     ValidationAttemptIdentityV3,
     ValidationRequestManifestV3,
     canonical_json,
@@ -486,11 +487,12 @@ class ValidationEvidenceVerifierV3:
         validation_root: Path,
         context: V3EvidenceTrustContext,
         runner_attestation_verifier: V3ResultAttestationSigner,
+        runner_trust_policy: V3RunnerTrustPolicy | None = None,
     ) -> None:
         self._root = _validate_root(validation_root)
         self.context = context
         self._runner_trust = runner_attestation_verifier
-        self._runner_policy = C0ARunnerTrustPolicy()
+        self._runner_policy = runner_trust_policy or C0ARunnerTrustPolicy()
 
     def verify(self, *, directory: Path) -> VerifiedAssessmentEvidenceV3:
         """Verify one v3 run as a deliberately BLOCKED one-run assessment.

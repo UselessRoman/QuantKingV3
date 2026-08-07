@@ -31,6 +31,11 @@ from quantking.data.validation.authorization import (
     AuthorizationVerifier,
     ExecutionAuthorization,
 )
+from quantking.data.validation.contracts_v3 import (
+    PromotionProfileV3,
+    SourceDatasetContractV3,
+    ValidationAttemptIdentityV3,
+)
 from quantking.data.validation.samples import (
     CaseEligibility,
     FixedSampleCase,
@@ -226,10 +231,30 @@ class RuntimeValidationPlan:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeAuthorizationEnvelope:
+    """Version-scoped authorization, with a strict file-only C0B form.
+
+    The four original fields are retained solely for the already accepted
+    readiness runtime, which is permanently fail-closed.  An authorization
+    that can reach the C0B controlled runner must be created from the strict,
+    canonical representation below and loaded by
+    :class:`RuntimeAuthorizationFileLoader`; a caller-constructed DTO is not
+    an executable authorization.
+    """
+
     authorization: ExecutionAuthorization
     plan_sha256: str
     frozen_versions: Mapping[str, str]
     signature: str
+    schema_version: str | None = None
+    purpose: str | None = None
+    identity: ValidationAttemptIdentityV3 | None = None
+    selected_case_ids: tuple[str, ...] | None = None
+    reference_bundle_id: str | None = None
+    reference_bundle_sha256: str | None = None
+    source_dataset_contract: SourceDatasetContractV3 | None = None
+    promotion_profile: PromotionProfileV3 | None = None
+    output_scope: str | None = None
+    claim_nonce: str | None = None
 
     def __post_init__(self) -> None:
         expected = {
@@ -252,6 +277,239 @@ class RuntimeAuthorizationEnvelope:
         for digest in (self.plan_sha256, self.signature):
             if not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ValueError("runtime authorization digest is invalid")
+
+        strict_values = (
+            self.schema_version,
+            self.purpose,
+            self.identity,
+            self.selected_case_ids,
+            self.reference_bundle_id,
+            self.reference_bundle_sha256,
+            self.source_dataset_contract,
+            self.promotion_profile,
+            self.output_scope,
+            self.claim_nonce,
+        )
+        if any(value is not None for value in strict_values) and not all(
+            value is not None for value in strict_values
+        ):
+            raise ValueError("runtime authorization strict fields are incomplete")
+        if all(value is not None for value in strict_values):
+            assert self.identity is not None
+            assert self.selected_case_ids is not None
+            assert self.reference_bundle_id is not None
+            assert self.reference_bundle_sha256 is not None
+            assert self.source_dataset_contract is not None
+            assert self.promotion_profile is not None
+            assert self.output_scope is not None
+            assert self.claim_nonce is not None
+            if self.schema_version != "runtime-authorization-envelope.v2":
+                raise ValueError("runtime authorization schema version is unsupported")
+            if self.purpose != "S1-07C0B_FAKE_PROVIDER":
+                raise ValueError("runtime authorization purpose is invalid")
+            if self.identity.authorization_id != self.authorization.authorization_id:
+                raise ValueError("runtime authorization identity does not bind authorization")
+            if (
+                self.source_dataset_contract.source != self.authorization.source
+                or self.source_dataset_contract.dataset is not self.authorization.dataset
+                or self.promotion_profile.source != self.authorization.source
+                or self.promotion_profile.dataset is not self.authorization.dataset
+            ):
+                raise ValueError("runtime authorization source/dataset binding is invalid")
+            if (
+                self.reference_bundle_id != self.promotion_profile.reference_bundle_id
+                or self.reference_bundle_sha256
+                != self.promotion_profile.reference_bundle_manifest_sha256
+            ):
+                raise ValueError("runtime authorization reference bundle binding is invalid")
+            if self.selected_case_ids != tuple(sorted(set(self.selected_case_ids))):
+                raise ValueError("runtime authorization case IDs must be sorted and unique")
+            if not self.selected_case_ids:
+                raise ValueError("runtime authorization requires case IDs")
+            if self.output_scope != self.authorization.output_root:
+                raise ValueError("runtime authorization output scope is invalid")
+            if not re.fullmatch(r"[0-9a-f]{64}", self.reference_bundle_sha256):
+                raise ValueError("runtime authorization bundle SHA is invalid")
+            if not re.fullmatch(r"[0-9a-f]{64}", self.claim_nonce):
+                raise ValueError("runtime authorization claim nonce is invalid")
+
+    @property
+    def is_strict_file_authorization(self) -> bool:
+        return self.schema_version is not None
+
+    def unsigned_payload(self) -> dict[str, object]:
+        if not self.is_strict_file_authorization:
+            raise ValueError("legacy runtime authorization has no file payload")
+        assert self.identity is not None
+        assert self.selected_case_ids is not None
+        assert self.reference_bundle_id is not None
+        assert self.reference_bundle_sha256 is not None
+        assert self.source_dataset_contract is not None
+        assert self.promotion_profile is not None
+        assert self.output_scope is not None
+        assert self.claim_nonce is not None
+        return {
+            "authorization": json.loads(self.authorization.to_bytes()),
+            "case_ids": list(self.selected_case_ids),
+            "claim_nonce": self.claim_nonce,
+            "frozen_versions": dict(self.frozen_versions),
+            "identity": self.identity.to_dict(),
+            "output_scope": self.output_scope,
+            "plan_sha256": self.plan_sha256,
+            "promotion_profile": self.promotion_profile.to_dict(),
+            "purpose": self.purpose,
+            "reference_bundle_id": self.reference_bundle_id,
+            "reference_bundle_sha256": self.reference_bundle_sha256,
+            "schema_version": self.schema_version,
+            "source_dataset_contract": self.source_dataset_contract.to_dict(),
+        }
+
+    def to_bytes(self) -> bytes:
+        return _canonical({**self.unsigned_payload(), "signature": self.signature})
+
+    @classmethod
+    def from_bytes(cls, payload: bytes) -> RuntimeAuthorizationEnvelope:
+        try:
+            parsed = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("runtime authorization is invalid JSON") from error
+        expected = {
+            "authorization",
+            "case_ids",
+            "claim_nonce",
+            "frozen_versions",
+            "identity",
+            "output_scope",
+            "plan_sha256",
+            "promotion_profile",
+            "purpose",
+            "reference_bundle_id",
+            "reference_bundle_sha256",
+            "schema_version",
+            "source_dataset_contract",
+            "signature",
+        }
+        if (
+            not isinstance(parsed, dict)
+            or payload != _canonical(parsed)
+            or set(parsed) != expected
+            or not isinstance(parsed["authorization"], dict)
+            or not isinstance(parsed["identity"], dict)
+            or not isinstance(parsed["source_dataset_contract"], dict)
+            or not isinstance(parsed["promotion_profile"], dict)
+            or not isinstance(parsed["frozen_versions"], dict)
+            or not isinstance(parsed["case_ids"], list)
+            or set(parsed["source_dataset_contract"])
+            != {
+                "contract_version",
+                "coverage_rule_version",
+                "dataset",
+                "expected_schema_version",
+                "semantic_rule_version",
+                "source",
+                "unit_rule_version",
+            }
+            or set(parsed["promotion_profile"])
+            != {
+                "dataset",
+                "maximum_total_differences",
+                "minimum_stability_runs",
+                "promotion_config_version",
+                "promotion_profile_version",
+                "reference_bundle_id",
+                "reference_bundle_manifest_sha256",
+                "required_case_ids",
+                "source",
+            }
+        ):
+            raise ValueError("runtime authorization fields do not match the strict schema")
+        contract = parsed["source_dataset_contract"]
+        profile = parsed["promotion_profile"]
+        try:
+            return cls(
+                authorization=ExecutionAuthorization.from_bytes(
+                    _canonical(parsed["authorization"])
+                ),
+                plan_sha256=str(parsed["plan_sha256"]),
+                frozen_versions=MappingProxyType(
+                    {str(key): str(value) for key, value in parsed["frozen_versions"].items()}
+                ),
+                signature=str(parsed["signature"]),
+                schema_version=str(parsed["schema_version"]),
+                purpose=str(parsed["purpose"]),
+                identity=ValidationAttemptIdentityV3.from_dict(parsed["identity"]),
+                selected_case_ids=tuple(str(value) for value in parsed["case_ids"]),
+                reference_bundle_id=str(parsed["reference_bundle_id"]),
+                reference_bundle_sha256=str(parsed["reference_bundle_sha256"]),
+                source_dataset_contract=SourceDatasetContractV3(
+                    source=str(contract["source"]),
+                    dataset=DatasetKind(str(contract["dataset"])),
+                    contract_version=str(contract["contract_version"]),
+                    semantic_rule_version=str(contract["semantic_rule_version"]),
+                    unit_rule_version=str(contract["unit_rule_version"]),
+                    coverage_rule_version=str(contract["coverage_rule_version"]),
+                    expected_schema_version=str(contract["expected_schema_version"]),
+                ),
+                promotion_profile=PromotionProfileV3(
+                    source=str(profile["source"]),
+                    dataset=DatasetKind(str(profile["dataset"])),
+                    promotion_profile_version=str(profile["promotion_profile_version"]),
+                    promotion_config_version=str(profile["promotion_config_version"]),
+                    required_case_ids=tuple(str(value) for value in profile["required_case_ids"]),
+                    reference_bundle_id=str(profile["reference_bundle_id"]),
+                    reference_bundle_manifest_sha256=str(
+                        profile["reference_bundle_manifest_sha256"]
+                    ),
+                    minimum_stability_runs=int(profile["minimum_stability_runs"]),
+                    maximum_total_differences=int(profile["maximum_total_differences"]),
+                ),
+                output_scope=str(parsed["output_scope"]),
+                claim_nonce=str(parsed["claim_nonce"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("runtime authorization is invalid") from error
+
+
+class RuntimeAuthorizationFileVerifier(Protocol):
+    """Verifies a strict envelope signature; implementations own their keys."""
+
+    def verify_file_authorization(self, envelope: RuntimeAuthorizationEnvelope) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedRuntimeAuthorizationEnvelope:
+    """Opaque result of the only C0B authorization-file loading entrance."""
+
+    envelope: RuntimeAuthorizationEnvelope
+    _seal: object
+
+    def __post_init__(self) -> None:
+        if self._seal is not _LOADED_AUTHORIZATION_SEAL:
+            raise ValueError("runtime authorization must be loaded from a managed file")
+
+
+_LOADED_AUTHORIZATION_SEAL = object()
+
+
+class RuntimeAuthorizationFileLoader:
+    """Strict canonical file loader used by every executable C0B path."""
+
+    def __init__(self, *, verifier: RuntimeAuthorizationFileVerifier) -> None:
+        self._verifier = verifier
+
+    def load(self, path: Path) -> LoadedRuntimeAuthorizationEnvelope:
+        if not isinstance(path, Path) or not path.is_absolute() or is_reparse_point(path):
+            raise ValueError("runtime authorization file is unsafe")
+        try:
+            envelope = RuntimeAuthorizationEnvelope.from_bytes(path.read_bytes())
+        except (OSError, ValueError) as error:
+            raise ValueError("runtime authorization file is invalid") from error
+        trusted = envelope.is_strict_file_authorization and (
+            self._verifier.verify_file_authorization(envelope)
+        )
+        if not trusted:
+            raise ValueError("runtime authorization file is untrusted")
+        return LoadedRuntimeAuthorizationEnvelope(envelope, _LOADED_AUTHORIZATION_SEAL)
 
 
 class RuntimeAuthorizationVerifier(Protocol):
@@ -608,11 +866,14 @@ def _validate_output_root(output_root: Path) -> None:
 
 __all__ = [
     "ControlledRunnerRegistry",
+    "LoadedRuntimeAuthorizationEnvelope",
     "LocalPackageVersionProbe",
     "RealRuntimeExecutionError",
     "RealValidationRuntime",
     "RunnerDescriptor",
     "RuntimeAuthorizationEnvelope",
+    "RuntimeAuthorizationFileLoader",
+    "RuntimeAuthorizationFileVerifier",
     "RuntimeAuthorizationVerifier",
     "RuntimeValidationPlan",
     "ValidationSource",

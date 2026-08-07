@@ -362,10 +362,10 @@ def test_execute_does_not_consume_authorization_when_preflight_is_blocked(
     }
     with pytest.raises(ValidationExecutionError) as first:
         execute(**arguments, invocation_id=new_entity_id("data_invocation"))
-    assert first.value.code == "PROVIDER_PACKAGE_VERSION_UNRESOLVED"
+    assert first.value.code == "LEGACY_AUTHORIZATION_DTO_REJECTED"
     with pytest.raises(ValidationExecutionError) as second:
         execute(**arguments, invocation_id=new_entity_id("data_invocation"))
-    assert second.value.code == "PROVIDER_PACKAGE_VERSION_UNRESOLVED"
+    assert second.value.code == "LEGACY_AUTHORIZATION_DTO_REJECTED"
     assert not (tmp_path / "claims" / "authorization-claims.sqlite3").exists()
 
 
@@ -401,7 +401,9 @@ def test_cli_valid_authorization_is_hard_blocked_consistently(
     )
     captured = capsys.readouterr()
     assert exit_code == 2
-    assert '"error_code": "PROVIDER_PACKAGE_VERSION_UNRESOLVED"' in captured.err
+    # C0B closes the legacy ExecutionAuthorization CLI payload; the old
+    # readiness command remains fail-closed and cannot reach any runner.
+    assert '"error_code": "AUTHORIZATION_REQUIRED"' in captured.err
     assert "Traceback" not in captured.err
 
 

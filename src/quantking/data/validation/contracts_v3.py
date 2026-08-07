@@ -706,6 +706,15 @@ class V3ResultAttestationSigner(Protocol):
     def verify(self, attestation: ResultAttestationV3) -> bool: ...
 
 
+@runtime_checkable
+class V3RunnerTrustPolicy(Protocol):
+    """Maps an independently verified key ID to an evidence kind."""
+
+    def evidence_kind_for(
+        self, *, attestation_key_id: str, verifier_key_id: str
+    ) -> EvidenceKind: ...
+
+
 class C0ARunnerTrustPolicy:
     """C0A's independent, closed key-id binding.
 
@@ -769,6 +778,7 @@ __all__ = [
     "SourceDatasetContractV3",
     "SuccessEvidenceBindingV3",
     "V3ResultAttestationSigner",
+    "V3RunnerTrustPolicy",
     "ValidationAttemptIdentityV3",
     "ValidationRequestManifestV3",
     "canonical_json",

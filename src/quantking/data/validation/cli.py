@@ -17,6 +17,12 @@ from quantking.data.validation.authorization import (
     AuthorizationClaimStore,
     AuthorizationVerifier,
     ExecutionAuthorization,
+    FakeAuthorizationAuthority,
+)
+from quantking.data.validation.controlled_runtime import (
+    ControlledExecutionError,
+    ControlledFakeValidationRuntime,
+    FakeRuntimeAuthorizationAuthority,
 )
 from quantking.data.validation.runtime import (
     ControlledRunnerRegistry,
@@ -24,8 +30,10 @@ from quantking.data.validation.runtime import (
     RealRuntimeExecutionError,
     RealValidationRuntime,
     RuntimeAuthorizationEnvelope,
+    RuntimeAuthorizationFileLoader,
     ValidationSource,
 )
+from quantking.data.validation.testing_v3 import build_v3_context
 
 REAL_EXECUTION_ACK = "I_ACKNOWLEDGE_AUTHORIZED_REAL_SOURCE_VALIDATION"
 _SDK_PACKAGES = {
@@ -157,6 +165,20 @@ def execute(
 ) -> Path:
     if acknowledgement != REAL_EXECUTION_ACK:
         raise ValueError("exact real-execution acknowledgement is required")
+    if any(
+        value is not None
+        for value in (
+            authorization,
+            authorization_verifier,
+            invocation_id,
+            authorization_claim_store,
+            runtime_authorization,
+        )
+    ):
+        raise ValidationExecutionError(
+            "LEGACY_AUTHORIZATION_DTO_REJECTED",
+            "executable authorization must be loaded only by the C0B strict file runtime",
+        )
     if runtime is not None and type(runtime) is not RealValidationRuntime:
         raise TypeError("runtime must be the controlled RealValidationRuntime")
     runtime = runtime or RealValidationRuntime(
@@ -261,17 +283,45 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--directory", required=True, type=Path)
     command = sub.add_parser("status")
     command.add_argument("--validation-root", type=Path)
+    command = sub.add_parser("fake-execute")
+    command.add_argument("--authorization-file", required=True, type=Path)
     return parser
 
 
-def _load_authorization(path: Path) -> ExecutionAuthorization:
+def _load_authorization(path: Path) -> RuntimeAuthorizationEnvelope:
     try:
-        return ExecutionAuthorization.from_bytes(path.read_bytes())
+        return RuntimeAuthorizationEnvelope.from_bytes(path.read_bytes())
     except (OSError, ValueError):
         raise ValidationExecutionError(
             "AUTHORIZATION_REQUIRED",
-            "matching one-time scoped authorization is required before runner import",
+            "a canonical runtime authorization envelope is required",
         ) from None
+
+
+def _execute_fake(authorization_file: Path) -> Path:
+    """C0B's only executable CLI path; it has no source, SDK, or output flags."""
+    file_authority = FakeRuntimeAuthorizationAuthority()
+    loader = RuntimeAuthorizationFileLoader(verifier=file_authority)
+    try:
+        loaded = loader.load(authorization_file)
+    except ValueError:
+        raise ValidationExecutionError(
+            "AUTHORIZATION_REQUIRED", "a trusted canonical runtime authorization is required"
+        ) from None
+    context = build_v3_context()
+    try:
+        result = ControlledFakeValidationRuntime(
+            context=context,
+            authorization_file_loader=loader,
+            authorization_verifier=FakeAuthorizationAuthority(),
+            claim_store=AuthorizationClaimStore(
+                claim_root=Path(loaded.envelope.authorization.output_root)
+                / ".runtime-authorization-claims"
+            ),
+        ).execute(authorization_file=authorization_file)
+    except ControlledExecutionError as error:
+        raise ValidationExecutionError(error.code, str(error)) from None
+    return result.directory
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -300,11 +350,13 @@ def main(argv: list[str] | None = None) -> int:
                     dataset=DatasetKind(args.dataset),
                     output_root=args.output_root,
                     acknowledgement=args.ack,
-                    authorization=authorization,
+                    runtime_authorization=authorization,
                     case_ids=tuple(args.case_ids) if args.case_ids else None,
                     reference_bundle_root=args.reference_bundle_root,
                 )
             )
+        elif args.action == "fake-execute":
+            result = str(_execute_fake(args.authorization_file))
         elif args.action == "verify":
             result = verify(validation_root=args.validation_root, directory=args.directory)
         else:

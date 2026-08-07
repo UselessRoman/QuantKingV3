@@ -192,7 +192,7 @@ def test_blocked_public_runtime_does_not_consume_persistent_claim(tmp_path: Path
             invocation_id=new_entity_id("data_invocation"),
             authorization_claim_store=AuthorizationClaimStore(claim_root=claim_root),
         )
-    assert first.value.code == "PROVIDER_PACKAGE_VERSION_UNRESOLVED"
+    assert first.value.code == "LEGACY_AUTHORIZATION_DTO_REJECTED"
     assert (
         _claim(AuthorizationClaimStore(claim_root=claim_root), authority, authorization, tmp_path)
         == "CLAIMED"
@@ -229,7 +229,7 @@ def test_legacy_fake_runner_cannot_bypass_public_runtime_preflight(
             invocation_id=new_entity_id("data_invocation"),
             authorization_claim_store=AuthorizationClaimStore(claim_root=claim_root),
         )
-    assert getattr(captured.value, "code", None) == "PROVIDER_PACKAGE_VERSION_UNRESOLVED"
+    assert getattr(captured.value, "code", None) == "LEGACY_AUTHORIZATION_DTO_REJECTED"
     assert (
         _claim(AuthorizationClaimStore(claim_root=claim_root), authority, authorization, tmp_path)
         == "CLAIMED"
