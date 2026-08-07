@@ -22,22 +22,46 @@ from quantking.data.validation.contracts_v3 import AttemptOutcomeV3, FakeV3Runne
 from quantking.data.validation.controlled_runtime import (
     ControlledExecutionError,
     ControlledFakeValidationRuntime,
+    ControlledV3RunnerTrustPolicy,
     FakeRuntimeAuthorizationAuthority,
+    build_controlled_fake_context,
     build_controlled_fake_plan_sha,
 )
 from quantking.data.validation.runtime import RuntimeAuthorizationFileLoader
-from quantking.data.validation.testing_v3 import build_v3_context
+
+
+def _write_verified_authority_bundle(root: Path) -> Path:
+    """Write the accepted S1-07B ST bundle into this isolated test root."""
+    from scripts.build_s1_07b_reference_bundle import (
+        EXPECTED_P2B_MANIFEST_SHA,
+        EXPECTED_P2F_MANIFEST_SHA,
+        EXPECTED_PDF_SHA,
+        _build_draft,
+    )
+
+    from quantking.data.validation.authority_bundle import AuthorityReferenceBundleWriter
+    from quantking.data.validation.samples import load_fixed_sample_v4
+
+    return AuthorityReferenceBundleWriter(root=root).write(
+        _build_draft(EXPECTED_PDF_SHA, EXPECTED_P2B_MANIFEST_SHA, EXPECTED_P2F_MANIFEST_SHA),
+        sample=load_fixed_sample_v4(),
+    )
 
 
 def _issued(
     tmp_path: Path,
+    *,
+    output_root: Path | None = None,
+    authority_root: Path | None = None,
 ) -> tuple[
     Path,
     ControlledFakeValidationRuntime,
     FakeRuntimeAuthorizationAuthority,
 ]:
-    output = tmp_path / "controlled-output"
-    context = build_v3_context()
+    output = output_root or tmp_path / "controlled-output"
+    authority_root = authority_root or tmp_path / "authority"
+    _write_verified_authority_bundle(authority_root)
+    context = build_controlled_fake_context(reference_bundle_root=authority_root)
     execution_authority = FakeAuthorizationAuthority()
     runtime_authority = FakeRuntimeAuthorizationAuthority()
     identity = SimpleNamespace(
@@ -49,7 +73,7 @@ def _issued(
     )
     authorization = execution_authority.issue(
         source="XTQUANT",
-        dataset=DatasetKind.EXCHANGE_CALENDAR,
+        dataset=DatasetKind.TRADING_STATUS,
         output_root=output,
         sample_sha256=context.sample.sample_spec_sha256,
     )
@@ -66,10 +90,10 @@ def _issued(
     )
     plan_sha = build_controlled_fake_plan_sha(
         source="XTQUANT",
-        dataset=DatasetKind.EXCHANGE_CALENDAR,
+        dataset=DatasetKind.TRADING_STATUS,
         output_root=Path(authorization.output_root),
         identity=attempt_identity,
-        selected_case_ids=("calendar_sh",),
+        selected_case_ids=("st_warning_603377_sh",),
         context=context,
     )
     envelope = runtime_authority.issue(
@@ -86,14 +110,14 @@ def _issued(
             "config_version": context.promotion_profile.promotion_config_version,
         },
         identity=attempt_identity,
-        selected_case_ids=("calendar_sh",),
+        selected_case_ids=("st_warning_603377_sh",),
         context=context,
         claim_nonce="c" * 64,
     )
     authorization_file = tmp_path / "runtime-authorization.json"
     authorization_file.write_bytes(envelope.to_bytes())
     runtime = ControlledFakeValidationRuntime(
-        context=context,
+        reference_bundle_root=authority_root,
         authorization_file_loader=RuntimeAuthorizationFileLoader(verifier=runtime_authority),
         authorization_verifier=execution_authority,
         claim_store=AuthorizationClaimStore(claim_root=tmp_path / "claims"),
@@ -144,11 +168,105 @@ def test_strict_authorization_rejects_unknown_or_substituted_fields_before_claim
     assert not (tmp_path / "controlled-output").exists()
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda raw: raw["promotion_profile"].update({"minimum_stability_runs": "3"}),
+        lambda raw: raw["frozen_versions"].update({"package_version": 1}),
+        lambda raw: raw["identity"].update({"run_id": 7}),
+        lambda raw: raw["authorization"].update({"output_root": 7}),
+    ),
+    ids=(
+        "profile-int-as-string",
+        "version-string-as-int",
+        "identity-string-as-int",
+        "nested-text-as-int",
+    ),
+)
+def test_signed_authorization_rejects_json_type_normalization_before_claim(
+    tmp_path: Path, mutation: object
+) -> None:
+    """Preserving the old signature cannot turn a differently typed JSON value valid."""
+    authorization_file, runtime, _authority = _issued(tmp_path)
+    raw = json.loads(authorization_file.read_bytes())
+    mutation(raw)  # type: ignore[operator]
+    altered = json.dumps(raw, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    assert altered != authorization_file.read_bytes()
+    authorization_file.write_bytes(altered)
+
+    with pytest.raises(ControlledExecutionError) as captured:
+        runtime.execute(authorization_file=authorization_file)
+
+    assert captured.value.code == "RUNTIME_AUTHORIZATION_INVALID"
+    assert not (tmp_path / "claims").exists()
+    assert not (tmp_path / "controlled-output").exists()
+
+
+def test_framework_only_case_is_rejected_by_authority_preflight_before_claim(
+    tmp_path: Path,
+) -> None:
+    authorization_file, runtime, runtime_authority = _issued(tmp_path)
+    from quantking.data.validation.runtime import RuntimeAuthorizationEnvelope
+
+    current = RuntimeAuthorizationEnvelope.from_bytes(authorization_file.read_bytes())
+    context = build_controlled_fake_context(
+        reference_bundle_root=runtime._reference_bundle_root  # type: ignore[attr-defined]
+    )
+    altered = runtime_authority.issue(
+        authorization=current.authorization,
+        plan_sha256=build_controlled_fake_plan_sha(
+            source=current.authorization.source,
+            dataset=current.authorization.dataset,
+            output_root=Path(current.authorization.output_root),
+            identity=current.identity,  # type: ignore[arg-type]
+            selected_case_ids=("calendar_sh",),
+            context=context,
+        ),
+        frozen_versions=current.frozen_versions,
+        identity=current.identity,  # type: ignore[arg-type]
+        selected_case_ids=("calendar_sh",),
+        context=context,
+        claim_nonce=current.claim_nonce or "c" * 64,
+    )
+    authorization_file.write_bytes(altered.to_bytes())
+
+    with pytest.raises(ControlledExecutionError) as captured:
+        runtime.execute(authorization_file=authorization_file)
+
+    assert captured.value.code == "CASE_NOT_AUTHORITY_APPROVED"
+    assert not (tmp_path / "claims").exists()
+    assert not (tmp_path / "controlled-output").exists()
+
+
+def test_missing_authority_bundle_creates_no_preclaim_output_or_failure_file(
+    tmp_path: Path,
+) -> None:
+    authorization_file, original, authority = _issued(tmp_path)
+    missing_root = tmp_path / "missing-authority-root"
+    imports: list[str] = []
+    runtime = ControlledFakeValidationRuntime(
+        reference_bundle_root=missing_root,
+        authorization_file_loader=RuntimeAuthorizationFileLoader(verifier=authority),
+        authorization_verifier=original._authorization_verifier,  # type: ignore[attr-defined]
+        claim_store=original._claim_store,  # type: ignore[attr-defined]
+        import_runner=lambda name: imports.append(name),
+    )
+
+    with pytest.raises(ControlledExecutionError) as captured:
+        runtime.execute(authorization_file=authorization_file)
+
+    assert captured.value.code == "AUTHORITY_BUNDLE_INVALID"
+    assert imports == []
+    assert not missing_root.exists()
+    assert not (tmp_path / "claims").exists()
+    assert not (tmp_path / "controlled-output").exists()
+
+
 def test_authorization_replay_and_concurrent_claim_have_one_winner(tmp_path: Path) -> None:
     authorization_file, first, authority = _issued(tmp_path)
     # Both runtimes use the same exact file and claims root for this replay.
     second = ControlledFakeValidationRuntime(
-        context=first._context,  # type: ignore[attr-defined]
+        reference_bundle_root=first._reference_bundle_root,  # type: ignore[attr-defined]
         authorization_file_loader=RuntimeAuthorizationFileLoader(verifier=authority),
         authorization_verifier=first._authorization_verifier,  # type: ignore[attr-defined]
         claim_store=first._claim_store,  # type: ignore[attr-defined]
@@ -221,17 +339,30 @@ def test_fake_key_stays_synthetic_even_when_wrapped_as_real(tmp_path: Path) -> N
 
     verified = ValidationEvidenceVerifierV3(
         validation_root=result.directory.parents[4],
-        context=runtime._context,  # type: ignore[attr-defined]
+        context=build_controlled_fake_context(
+            reference_bundle_root=runtime._reference_bundle_root  # type: ignore[attr-defined]
+        ),
         runner_attestation_verifier=FakeV3RunnerTrustStore(),
     ).verify_run(directory=result.directory)
     assert verified.evidence_kind.value == "SYNTHETIC"
 
 
 def test_cli_fake_execute_accepts_only_the_strict_file(tmp_path: Path) -> None:
-    authorization_file, _runtime, _authority = _issued(tmp_path)
+    authorization_file, runtime, _authority = _issued(tmp_path)
     from quantking.data.validation.cli import main
 
-    assert main(["fake-execute", "--authorization-file", str(authorization_file)]) == 0
+    assert (
+        main(
+            [
+                "fake-execute",
+                "--authorization-file",
+                str(authorization_file),
+                "--reference-bundle-root",
+                str(runtime._reference_bundle_root),  # type: ignore[attr-defined]
+            ]
+        )
+        == 0
+    )
     assert list((tmp_path / "controlled-output").rglob("COMPLETE"))
 
 
@@ -260,7 +391,9 @@ def test_fake_execution_seal_persistence_and_read_verification_form_one_vertical
     initialize_database(database)
     engine = create_data_engine(database, busy_timeout_ms=500)
     try:
-        context = runtime._context  # type: ignore[attr-defined]
+        context = build_controlled_fake_context(
+            reference_bundle_root=runtime._reference_bundle_root  # type: ignore[attr-defined]
+        )
         policy = ControlledV3RunnerTrustPolicy()
         adapter = SqliteV3SourceAssessmentPersistenceAdapter(
             engine=engine,
@@ -271,7 +404,7 @@ def test_fake_execution_seal_persistence_and_read_verification_form_one_vertical
         )
         saved = ControlledFakeAssessmentService(
             validation_root=root,
-            context=context,
+            reference_bundle_root=runtime._reference_bundle_root,  # type: ignore[attr-defined]
             persistence=adapter,
         ).finalize_and_persist(assessment_directory=result.directory.parent)
         reader = SealedAssessmentReadVerifier(
@@ -286,6 +419,99 @@ def test_fake_execution_seal_persistence_and_read_verification_form_one_vertical
             assert uow.data.get_source_candidate_assessment(str(saved.assessment_id)) == saved
         assert saved.evidence_kind.value == "SYNTHETIC"
         assert saved.status.value == "BLOCKED_EXTERNAL_VALIDATION"
+    finally:
+        engine.dispose()
+
+
+def test_formal_runtime_datacenter_uow_reverifies_c0b_v3_bundle_and_seal(
+    tmp_path: Path,
+) -> None:
+    """The shipped composition root, not a hand-built UoW, reads C0B v3 rows."""
+    from quantking.common.config import AppSettings
+    from quantking.common.errors import InvalidDataTransitionError
+    from quantking.common.paths import RuntimePaths
+    from quantking.data.adapters.persistence.assessment import (
+        SqliteV3SourceAssessmentPersistenceAdapter,
+    )
+    from quantking.data.adapters.persistence.sqlite import create_data_engine
+    from quantking.data.center import DataCenterQueryService
+    from quantking.data.validation.controlled_runtime import ControlledFakeAssessmentService
+    from quantking.runtime import build_eod_runtime
+
+    data_root = tmp_path / "runtime-data"
+    authorization_file, runtime, _authority = _issued(
+        tmp_path,
+        output_root=data_root,
+        authority_root=data_root,
+    )
+    result = runtime.execute(authorization_file=authorization_file)
+    settings = AppSettings(
+        paths=RuntimePaths(
+            code_root=Path.cwd(),
+            data_root=data_root,
+            offsite_backup_root=tmp_path / "offsite",
+        ),
+        xtquant_site_packages_root=tmp_path / "missing-sdk",
+        web_host="127.0.0.1",
+        web_port=8765,
+        sqlite_busy_timeout_ms=250,
+        sqlite_max_attempts=7,
+        sqlite_retry_base_delay_ms=10,
+        sqlite_retry_cap_delay_ms=160,
+        sqlite_retry_jitter_ratio=0.0,
+        job_heartbeat_min_interval_ms=1000,
+        job_progress_min_interval_ms=250,
+    )
+
+    class _UnusedGateway:
+        def fetch(self, _chunk: object) -> object:
+            raise AssertionError("formal read-side test must not fetch provider data")
+
+    formal = build_eod_runtime(settings, gateway=_UnusedGateway())
+    engine = create_data_engine(data_root / "metadata" / "quantking.db", busy_timeout_ms=250)
+    try:
+        context = build_controlled_fake_context(reference_bundle_root=data_root)
+        saved = ControlledFakeAssessmentService(
+            validation_root=data_root,
+            reference_bundle_root=data_root,
+            persistence=SqliteV3SourceAssessmentPersistenceAdapter(
+                engine=engine,
+                validation_root=data_root,
+                context=context,
+                signer=FakeV3RunnerTrustStore(),
+                runner_trust_policy=ControlledV3RunnerTrustPolicy(),
+            ),
+        ).finalize_and_persist(assessment_directory=result.directory.parent)
+        with formal.data_uow_factory() as uow:
+            assert uow.data.get_source_candidate_assessment(str(saved.assessment_id)) == saved
+
+        class _UnusedPort:
+            def __getattr__(self, name: str) -> object:
+                raise AssertionError(f"unexpected port call: {name}")
+
+        class _NoJobs:
+            def list_jobs_page(self, **filters: object) -> list[object]:
+                del filters
+                return []
+
+            def count_jobs(self, **filters: object) -> int:
+                del filters
+                return 0
+
+        center = DataCenterQueryService(
+            data_uow_factory=formal.data_uow_factory,
+            preview=_UnusedPort(),
+            difference_verifier=_UnusedPort(),
+            jobs=_NoJobs(),
+        )
+        assert any(item["assessment_status"] for item in center.sources())
+
+        bundle_manifest = (
+            data_root / "reference-bundles" / "st-603377-authority-v3" / "manifest.json"
+        )
+        bundle_manifest.write_bytes(b"tampered")
+        with formal.data_uow_factory() as uow, pytest.raises(InvalidDataTransitionError):
+            uow.data.get_source_candidate_assessment(str(saved.assessment_id))
     finally:
         engine.dispose()
 
@@ -313,7 +539,9 @@ def test_signed_but_expired_authorization_fails_before_import_or_output(tmp_path
         output_root=Path(execution.output_root),
         identity=expired_identity,
         selected_case_ids=current.selected_case_ids,
-        context=runtime._context,  # type: ignore[attr-defined]
+        context=build_controlled_fake_context(
+            reference_bundle_root=runtime._reference_bundle_root  # type: ignore[attr-defined]
+        ),
     )
     expired = runtime_authority.issue(
         authorization=execution,
@@ -321,7 +549,9 @@ def test_signed_but_expired_authorization_fails_before_import_or_output(tmp_path
         frozen_versions=current.frozen_versions,
         identity=expired_identity,
         selected_case_ids=current.selected_case_ids,
-        context=runtime._context,  # type: ignore[attr-defined]
+        context=build_controlled_fake_context(
+            reference_bundle_root=runtime._reference_bundle_root  # type: ignore[attr-defined]
+        ),
         claim_nonce=current.claim_nonce or "c" * 64,
     )
     authorization_file.write_bytes(expired.to_bytes())
@@ -338,7 +568,9 @@ def test_signed_context_substitution_and_direct_dto_both_fail_closed(tmp_path: P
     from quantking.data.validation.runtime import RuntimeAuthorizationEnvelope
 
     current = RuntimeAuthorizationEnvelope.from_bytes(authorization_file.read_bytes())
-    context = runtime._context  # type: ignore[attr-defined]
+    context = build_controlled_fake_context(
+        reference_bundle_root=runtime._reference_bundle_root  # type: ignore[attr-defined]
+    )
     substituted_context = replace(
         context,
         promotion_profile=PromotionProfileV3(
@@ -381,7 +613,7 @@ def test_signed_context_substitution_and_direct_dto_both_fail_closed(tmp_path: P
     with pytest.raises(ValidationExecutionError) as legacy:
         execute(
             source="XTQUANT",
-            dataset=DatasetKind.EXCHANGE_CALENDAR,
+            dataset=DatasetKind.TRADING_STATUS,
             output_root=tmp_path,
             acknowledgement=REAL_EXECUTION_ACK,
             runtime_authorization=current,

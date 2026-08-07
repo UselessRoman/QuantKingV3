@@ -73,6 +73,20 @@ class AssessmentReadVerifier(Protocol):
     ) -> SourceCandidateAssessment: ...
 
 
+class V3SealedAssessmentTrustConfiguration(Protocol):
+    """Verifier-owned v3 context and signer; never artifact or DB supplied."""
+
+    context: V3EvidenceTrustContext
+    signer: V3ResultAttestationSigner
+    runner_trust_policy: V3RunnerTrustPolicy
+
+
+class V3SealedAssessmentTrustResolver(Protocol):
+    """Resolves verifier-owned v3 trust afresh for every persisted-row read."""
+
+    def resolve(self) -> V3SealedAssessmentTrustConfiguration: ...
+
+
 class _ExclusiveFile(AbstractContextManager["_ExclusiveFile"]):
     """Hold one file without WRITE/DELETE sharing until explicitly released."""
 
@@ -240,6 +254,7 @@ class SealedAssessmentReadVerifier:
         v3_context: V3EvidenceTrustContext | None = None,
         v3_signer: V3ResultAttestationSigner | None = None,
         v3_runner_trust_policy: V3RunnerTrustPolicy | None = None,
+        v3_trust_resolver: V3SealedAssessmentTrustResolver | None = None,
     ) -> None:
         self._root = validation_root.resolve(strict=False)
         self._signer = signer
@@ -248,9 +263,12 @@ class SealedAssessmentReadVerifier:
             (v3_context is None) != (v3_runner_trust_policy is None)
         ):
             raise ValueError("v3 sealed reader configuration is incomplete")
+        if v3_trust_resolver is not None and v3_context is not None:
+            raise ValueError("v3 sealed reader cannot mix static and resolved trust")
         self._v3_context = v3_context
         self._v3_signer = v3_signer
         self._v3_policy = v3_runner_trust_policy
+        self._v3_resolver = v3_trust_resolver
 
     def verify_persisted_row(self, row: SourceCandidateAssessmentRow) -> SourceCandidateAssessment:
         try:
@@ -264,14 +282,26 @@ class SealedAssessmentReadVerifier:
             evidence: VerifiedAssessmentEvidence | VerifiedAssessmentEvidenceV3
             summary: _Summary
             if Path(expected.evidence_relative_path).name == "_assessment-v3":
-                if self._v3_context is None or self._v3_signer is None or self._v3_policy is None:
+                context: V3EvidenceTrustContext | None
+                signer: V3ResultAttestationSigner | None
+                policy: V3RunnerTrustPolicy | None
+                if self._v3_resolver is not None:
+                    resolved = self._v3_resolver.resolve()
+                    context = resolved.context
+                    signer = resolved.signer
+                    policy = resolved.runner_trust_policy
+                else:
+                    context = self._v3_context
+                    signer = self._v3_signer
+                    policy = self._v3_policy
+                if context is None or signer is None or policy is None:
                     raise ValueError("v3 sealed reader is not configured")
                 evidence, summary = _verify_sealed_archive_v3(
                     seal=seal,
                     original_relative=original_relative,
-                    context=self._v3_context,
-                    signer=self._v3_signer,
-                    policy=self._v3_policy,
+                    context=context,
+                    signer=signer,
+                    policy=policy,
                     workspace=self._root,
                 )
             else:

@@ -24,10 +24,17 @@ from quantking.common.time import utc_now
 from quantking.data.adapters.warehouse.manifest import compute_sha256, path_safe_id
 from quantking.data.assessment.models import EvidenceKind
 from quantking.data.models import DatasetKind
+from quantking.data.schemas import descriptor_for
 from quantking.data.validation.artifacts_v3 import (
     V3EvidenceTrustContext,
     ValidationEvidenceVerifierV3,
     ValidationEvidenceWriterV3,
+)
+from quantking.data.validation.authority_bundle import (
+    CONTROLLED_AUTHORITY_BUNDLE_ID,
+    CONTROLLED_AUTHORITY_BUNDLE_MANIFEST_SHA256,
+    AuthorityBundleVerificationError,
+    AuthorityReferenceBundleVerifier,
 )
 from quantking.data.validation.authorization import (
     AuthorizationClaimError,
@@ -38,6 +45,8 @@ from quantking.data.validation.authorization import (
 from quantking.data.validation.contracts_v3 import (
     AttemptOutcomeV3,
     FakeV3RunnerTrustStore,
+    PromotionProfileV3,
+    SourceDatasetContractV3,
     ValidationAttemptIdentityV3,
 )
 from quantking.data.validation.models import ValidationVersions
@@ -47,9 +56,15 @@ from quantking.data.validation.runtime import (
     RuntimeAuthorizationFileLoader,
     RuntimeAuthorizationFileVerifier,
 )
+from quantking.data.validation.samples import CaseEligibility, load_fixed_sample_v4
 
 _FAKE_RUNNER_MODULE = "quantking.data.validation.runners.fake"
 _FAKE_RUNNER_FACTORY = "create_runner"
+_FAKE_RUNNER_ADAPTER_VERSION = "fake-provider.s1-07c0b.v1"
+_FAKE_RUNNER_PACKAGE_VERSION = "1.0.0"
+_CONTROLLED_FAKE_SOURCE = "XTQUANT"
+_CONTROLLED_FAKE_DATASET = DatasetKind.TRADING_STATUS
+_CONTROLLED_FAKE_CASE_IDS = ("st_warning_603377_sh",)
 
 
 def _canonical(value: object) -> bytes:
@@ -82,6 +97,91 @@ class ControlledV3RunnerTrustPolicy:
         if profile is None:
             raise ValueError("runner key is not in the production allowlist")
         return profile
+
+
+@dataclass(frozen=True, slots=True)
+class ControlledFakeV3TrustConfiguration:
+    """Resolved read/write trust from the S1-07B authority bundle only."""
+
+    context: V3EvidenceTrustContext
+    signer: FakeV3RunnerTrustStore
+    runner_trust_policy: ControlledV3RunnerTrustPolicy
+
+
+class ControlledFakeV3TrustResolver:
+    """Re-verifies the controlled bundle every time a v3 row is read.
+
+    The resolver contains no artifact-supplied trust information and no REAL
+    profile.  A missing, altered, or non-approved authority bundle therefore
+    makes the v3 reader fail closed.
+    """
+
+    def __init__(self, *, reference_bundle_root: Path) -> None:
+        if not isinstance(reference_bundle_root, Path) or not reference_bundle_root.is_absolute():
+            raise ValueError("reference bundle root must be an absolute Path")
+        self._root = reference_bundle_root
+
+    def resolve(self) -> ControlledFakeV3TrustConfiguration:
+        return ControlledFakeV3TrustConfiguration(
+            context=build_controlled_fake_context(reference_bundle_root=self._root),
+            signer=FakeV3RunnerTrustStore(),
+            runner_trust_policy=ControlledV3RunnerTrustPolicy(),
+        )
+
+
+def build_controlled_fake_context(*, reference_bundle_root: Path) -> V3EvidenceTrustContext:
+    """Build the only production C0B context from an S1-07B verified bundle.
+
+    This intentionally does not consume ``testing_v3.build_v3_context``.  The
+    sole permitted Fake attempt is the locally approved ST case; inherited
+    framework-only calendar cases cannot satisfy this function or preflight.
+    """
+
+    if not isinstance(reference_bundle_root, Path) or not reference_bundle_root.is_absolute():
+        raise ValueError("reference bundle root must be an absolute Path")
+    if reference_bundle_root.exists() and is_reparse_point(reference_bundle_root):
+        raise ValueError("reference bundle root is unsafe")
+    sample = load_fixed_sample_v4()
+    directory = reference_bundle_root / "reference-bundles" / CONTROLLED_AUTHORITY_BUNDLE_ID
+    try:
+        verified = AuthorityReferenceBundleVerifier(
+            root=reference_bundle_root, record_failures=False
+        ).verify(
+            directory=directory,
+            sample=sample,
+        )
+    except AuthorityBundleVerificationError as error:
+        raise ValueError("controlled authority bundle is invalid") from error
+    if (
+        verified.bundle_id != CONTROLLED_AUTHORITY_BUNDLE_ID
+        or verified.manifest_sha256 != CONTROLLED_AUTHORITY_BUNDLE_MANIFEST_SHA256
+        or any(
+            verified.case_eligibilities.get(case_id) is not CaseEligibility.AUTHORITY_APPROVED
+            for case_id in _CONTROLLED_FAKE_CASE_IDS
+        )
+    ):
+        raise ValueError("controlled authority bundle is not eligible")
+    return V3EvidenceTrustContext(
+        sample=sample,
+        source_dataset_contract=SourceDatasetContractV3(
+            source=_CONTROLLED_FAKE_SOURCE,
+            dataset=_CONTROLLED_FAKE_DATASET,
+            contract_version="xtquant-trading-status-contract.v1",
+            semantic_rule_version="semantic-contract-rules.v1",
+            unit_rule_version="unit-contract-rules.v1",
+            coverage_rule_version="coverage-rules.v1",
+            expected_schema_version=descriptor_for(_CONTROLLED_FAKE_DATASET.value).schema_version,
+        ),
+        promotion_profile=PromotionProfileV3(
+            source=_CONTROLLED_FAKE_SOURCE,
+            dataset=_CONTROLLED_FAKE_DATASET,
+            promotion_profile_version="xtquant-trading-status-promotion.v1",
+            promotion_config_version="controlled-fake-validation-config.v1",
+            required_case_ids=_CONTROLLED_FAKE_CASE_IDS,
+            reference_bundle_id=verified.bundle_id,
+            reference_bundle_manifest_sha256=verified.manifest_sha256,
+        ),
+    )
 
 
 class ControlledFakeRunner(Protocol):
@@ -195,13 +295,15 @@ class ControlledFakeValidationRuntime:
     def __init__(
         self,
         *,
-        context: V3EvidenceTrustContext,
+        reference_bundle_root: Path,
         authorization_file_loader: RuntimeAuthorizationFileLoader,
         authorization_verifier: AuthorizationVerifier,
         claim_store: AuthorizationClaimStore,
         import_runner: Callable[[str], object] = importlib.import_module,
     ) -> None:
-        self._context = context
+        if not isinstance(reference_bundle_root, Path) or not reference_bundle_root.is_absolute():
+            raise ValueError("reference bundle root must be an absolute Path")
+        self._reference_bundle_root = reference_bundle_root
         self._file_loader = authorization_file_loader
         self._authorization_verifier = authorization_verifier
         self._claim_store = claim_store
@@ -291,21 +393,39 @@ class ControlledFakeValidationRuntime:
         assert envelope.output_scope is not None
         output_root = Path(envelope.output_scope)
         _validate_output_root(output_root)
-        expected_versions = _versions_for(self._context)
-        if (
-            envelope.authorization.source != self._context.source_dataset_contract.source
-            or envelope.authorization.dataset is not self._context.source_dataset_contract.dataset
-            or envelope.authorization.sample_sha256 != self._context.sample.sample_spec_sha256
-            or envelope.source_dataset_contract != self._context.source_dataset_contract
-            or envelope.promotion_profile != self._context.promotion_profile
-            or envelope.reference_bundle_id != self._context.promotion_profile.reference_bundle_id
-            or envelope.reference_bundle_sha256
-            != self._context.promotion_profile.reference_bundle_manifest_sha256
-            or envelope.selected_case_ids != tuple(sorted(envelope.selected_case_ids))
-            or any(
-                case_id not in {case.case_id for case in self._context.sample.cases}
-                for case_id in envelope.selected_case_ids
+        try:
+            context = build_controlled_fake_context(
+                reference_bundle_root=self._reference_bundle_root
             )
+        except ValueError:
+            raise ControlledExecutionError(
+                "AUTHORITY_BUNDLE_INVALID",
+                "controlled authority bundle is unavailable or invalid",
+            ) from None
+        _verify_preclaim_runner_readiness(context)
+        selected_cases = {case.case_id: case for case in context.sample.cases}
+        if any(
+            (case := selected_cases.get(case_id)) is None
+            or case.dataset is not _CONTROLLED_FAKE_DATASET
+            or _CONTROLLED_FAKE_SOURCE not in case.applicable_sources
+            or case_id not in _CONTROLLED_FAKE_CASE_IDS
+            for case_id in envelope.selected_case_ids
+        ):
+            raise ControlledExecutionError(
+                "CASE_NOT_AUTHORITY_APPROVED",
+                "selected case is not authority-approved for controlled execution",
+            )
+        expected_versions = _versions_for(context)
+        if (
+            envelope.authorization.source != context.source_dataset_contract.source
+            or envelope.authorization.dataset is not context.source_dataset_contract.dataset
+            or envelope.authorization.sample_sha256 != context.sample.sample_spec_sha256
+            or envelope.source_dataset_contract != context.source_dataset_contract
+            or envelope.promotion_profile != context.promotion_profile
+            or envelope.reference_bundle_id != context.promotion_profile.reference_bundle_id
+            or envelope.reference_bundle_sha256
+            != context.promotion_profile.reference_bundle_manifest_sha256
+            or envelope.selected_case_ids != tuple(sorted(envelope.selected_case_ids))
             or dict(envelope.frozen_versions) != expected_versions
         ):
             raise ControlledExecutionError(
@@ -319,7 +439,7 @@ class ControlledFakeValidationRuntime:
             output_root=output_root,
             identity=envelope.identity,
             selected_case_ids=envelope.selected_case_ids,
-            context=self._context,
+            context=context,
             versions=versions,
         )
         if envelope.plan_sha256 != plan_sha:
@@ -333,7 +453,7 @@ class ControlledFakeValidationRuntime:
             output_root=output_root,
             identity=envelope.identity,
             selected_case_ids=envelope.selected_case_ids,
-            context=self._context,
+            context=context,
             versions=versions,
             plan_sha256=plan_sha,
         )
@@ -373,11 +493,15 @@ class ControlledFakeAssessmentService:
         self,
         *,
         validation_root: Path,
-        context: V3EvidenceTrustContext,
+        reference_bundle_root: Path,
         persistence: ControlledAssessmentPersistence,
     ) -> None:
+        if not isinstance(validation_root, Path) or not validation_root.is_absolute():
+            raise ValueError("validation root must be an absolute Path")
+        if not isinstance(reference_bundle_root, Path) or not reference_bundle_root.is_absolute():
+            raise ValueError("reference bundle root must be an absolute Path")
         self._root = validation_root
-        self._context = context
+        self._reference_bundle_root = reference_bundle_root
         self._persistence = persistence
 
     def finalize_and_persist(self, *, assessment_directory: Path) -> object:
@@ -391,9 +515,18 @@ class ControlledFakeAssessmentService:
             raise ControlledExecutionError(
                 "ASSESSMENT_DIRECTORY_UNSAFE", "assessment directory is unsafe"
             ) from None
+        try:
+            context = build_controlled_fake_context(
+                reference_bundle_root=self._reference_bundle_root
+            )
+        except ValueError:
+            raise ControlledExecutionError(
+                "AUTHORITY_BUNDLE_INVALID",
+                "controlled authority bundle is unavailable or invalid",
+            ) from None
         verifier = ValidationEvidenceVerifierV3(
             validation_root=self._root,
-            context=self._context,
+            context=context,
             runner_attestation_verifier=FakeV3RunnerTrustStore(),
             runner_trust_policy=ControlledV3RunnerTrustPolicy(),
         )
@@ -432,8 +565,8 @@ def build_controlled_fake_plan_sha(
 
 def _versions_for(context: V3EvidenceTrustContext) -> dict[str, str]:
     return {
-        "adapter_version": "fake-provider.s1-07c0b.v1",
-        "package_version": "1.0.0",
+        "adapter_version": _FAKE_RUNNER_ADAPTER_VERSION,
+        "package_version": _FAKE_RUNNER_PACKAGE_VERSION,
         "code_version": "s1-07c0b.runtime.v1",
         "schema_version": context.source_dataset_contract.expected_schema_version,
         "rule_version": "quality-rules.v1",
@@ -441,6 +574,35 @@ def _versions_for(context: V3EvidenceTrustContext) -> dict[str, str]:
         "sample_spec_version": context.sample.sample_spec_version,
         "config_version": context.promotion_profile.promotion_config_version,
     }
+
+
+def _verify_preclaim_runner_readiness(context: V3EvidenceTrustContext) -> None:
+    """Check the immutable runner descriptor without importing its module."""
+
+    if (
+        _FAKE_RUNNER_MODULE != "quantking.data.validation.runners.fake"
+        or _FAKE_RUNNER_FACTORY != "create_runner"
+        or not _FAKE_RUNNER_ADAPTER_VERSION
+        or not _FAKE_RUNNER_PACKAGE_VERSION
+        or context.source_dataset_contract.source != _CONTROLLED_FAKE_SOURCE
+        or context.source_dataset_contract.dataset is not _CONTROLLED_FAKE_DATASET
+    ):
+        raise ControlledExecutionError(
+            "FAKE_RUNNER_NOT_READY", "fixed controlled Fake runner is not ready"
+        )
+    try:
+        evidence_kind = ControlledV3RunnerTrustPolicy().evidence_kind_for(
+            attestation_key_id=FakeV3RunnerTrustStore.KEY_ID,
+            verifier_key_id=FakeV3RunnerTrustStore.KEY_ID,
+        )
+    except ValueError:
+        raise ControlledExecutionError(
+            "FAKE_SIGNER_NOT_READY", "fixed controlled Fake signer is not ready"
+        ) from None
+    if evidence_kind is not EvidenceKind.SYNTHETIC:
+        raise ControlledExecutionError(
+            "FAKE_SIGNER_NOT_READY", "fixed controlled Fake signer is not synthetic"
+        )
 
 
 def _plan_sha(

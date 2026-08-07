@@ -2,6 +2,11 @@
 
 状态：**C0B 实现完成、等待独立主验收**。
 
+> C0B 初版结果 `5b461fc3be56ba6b864552fc927ff68c71ce9497` 未通过独立主验收，
+> 已由 C0B-R1 定向修复。R1 的完整更正记录见
+> [S1-07C0B-R1_IMPLEMENTATION.md](S1-07C0B-R1_IMPLEMENTATION.md)；本文件保留原
+> 实施范围和非授权边界，不应被解读为主验收通过。
+
 ## 任务身份与授权原文
 
 - Stage：Stage 1 / S1-07C0B。
@@ -23,10 +28,10 @@
 | 原断点 | C0B 收口方式 |
 |---|---|
 | CLI 只读取 `ExecutionAuthorization`，而运行时需要 `RuntimeAuthorizationEnvelope` | CLI 授权文件改为严格、规范的 `RuntimeAuthorizationEnvelope` 解析；唯一可执行入口 `fake-execute` 只接受该文件，不接受 source、dataset、case、bundle、输出目录或模块参数。 |
-| `RuntimeAuthorizationEnvelope` 无 canonical file codec，调用方可组装 DTO | 新增严格 `from_bytes()` / `to_bytes()`、未知字段/非 canonical 字节拒绝、嵌套 contract/profile/identity 精确字段集校验，以及带私有 seal 的 `RuntimeAuthorizationFileLoader`；C0B runtime 不接收 DTO。旧 DTO 参数被显式拒绝。 |
+| `RuntimeAuthorizationEnvelope` 无 canonical file codec，调用方可组装 DTO | 新增严格 `from_bytes()` / `to_bytes()`、未知字段/非 canonical 字节拒绝、嵌套 contract/profile/identity 精确字段集校验、所有 scalar JSON 类型检查和 parse→serialize 原字节 round-trip，以及带私有 seal 的 `RuntimeAuthorizationFileLoader`；C0B runtime 不接收 DTO。旧 DTO 参数被显式拒绝。 |
 | `RealValidationRuntime` 只有 readiness blocker | 保留其 fail-closed 行为，不启用任何 REAL runner；新增独立的 C0B Fake-only runtime，固定 import `quantking.data.validation.runners.fake`。 |
 | v2-only sealed persistence/read verifier | 保留 v2 专用分支，新增显式 v3 seal 分支和 `SqliteV3SourceAssessmentPersistenceAdapter`；未知/未配置的 v3 reader 失败关闭。 |
-| 正式 composition root 的 DataCenter UoW 没有 sealed reader | `build_eod_runtime()` 向 `DataSqliteUnitOfWorkFactory` 注入同一 sealed reader。生产默认没有 v3/REAL trust context，遇到此类 row 失败关闭。 |
+| 正式 composition root 的 DataCenter UoW 没有 sealed reader | `build_eod_runtime()` 向 `DataSqliteUnitOfWorkFactory` 注入 v2 sealed reader 和 C0B v3 resolver；resolver 每读重新验证 S1-07B authority bundle 和 sealed archive，只允许 Fake/SYNTHETIC，REAL 和缺失/损坏 bundle 均失败关闭。 |
 
 不存在环境变量授权入口；C0B runtime 只从授权文件得到输出 scope、身份和冻结输入。
 
@@ -41,7 +46,7 @@ bytes 均被验证，执行前会将 envelope 再与受控 context 逐项比对�
 
 ```text
 canonical authorization-file load + signature verification
-  → output path / source / dataset / case / bundle / contract / profile / versions / runner readiness precheck
+  → output path / source / dataset / S1-07B authority bundle / per-case eligibility / contract / profile / versions / runner readiness precheck
   → atomic one-time claim
   → fixed Fake runner module import
   → immutable v3 output (or terminal .incomplete failure record)
@@ -63,7 +68,7 @@ runner 包本身没有供应商 SDK import；所有未来 SDK 仍只能由 `data
 - import/runner 崩溃在 claim 后留下带 identity 与 plan SHA 的不可回收 `.incomplete/failure.json`；不能被同一 run ID 修复为成功。
 - v3 persistence 只接收受管 assessment 目录，复制完整声明文件树至 zip seal，再从 seal 解压、深验 v3 summary、所有 run manifest、trust context、attestation digest 和完整文件清单，之后才通过 0012 的连接局部一次性 SQLite gate 写入。
 - `SealedAssessmentReadVerifier` 按 `_assessment` / `_assessment-v3` 明确分派；每次 repository/DataCenter read 都重新校验 seal SHA、路径、reparse、zip inventory、summary 和 DB-row lineage。seal 缺失、篡改、额外/缺失文件、context 不匹配或 verifier 未配置均失败关闭。
-- `ControlledFakeAssessmentService` 将一个完成的 C0B Fake assessment 目录依次 finalize 为
+- `ControlledFakeAssessmentService` 从受管 authority bundle root 重新构造 trust context，再将一个完成的 C0B Fake assessment 目录依次 finalize 为
   v3 summary、交给唯一 v3 seal persistence adapter，并由注入相同 verifier 的 UoW 再次读取；
   定向测试覆盖这条 Fake run → seal → SQLite → sealed read 纵切，最终仍为
   `SYNTHETIC/BLOCKED_EXTERNAL_VALIDATION`。
@@ -82,15 +87,17 @@ runner 包本身没有供应商 SDK import；所有未来 SDK 仍只能由 `data
 - 受管 v3 seal 的 REAL/BLOCKED 和测试隔离 REAL/PRODUCTION_READY 推导；
 - 手工/数据库状态不可信、seal SHA 损坏、reader/verifier context 不一致与 DataCenter fail-closed。
 
-已实际执行的完整离线质量门为 `scripts/quality.ps1`，退出码为 0：
+R1 已逐阶段完成完整离线质量门；`scripts/quality.ps1` 的前台包装器受执行器 5 分钟限制（完整
+pytest 实测超过该限制）而超时，非测试失败。随后用同一离线工具链后台运行原始脚本，完整到达
+Git whitespace check 且无异常输出。以下为 R1 分阶段的实际结果：
 
-- 后端：`1265 passed, 2 skipped, 3 deselected, 4 warnings`；warnings 来自既有 Qlib
+- 后端：`1272 passed, 2 skipped, 3 deselected, 4 warnings`；warnings 来自既有 Qlib
   NumPy timedelta 弃用提示和 Starlette TestClient 弃用提示。
 - `uv lock --check --offline`、离线 frozen sync、Ruff、format、mypy（133 个 source files）、
   架构边界、Markdown links 与 `git diff --check` 均通过。
 - 前端：类型检查通过，4 个测试文件/17 项测试通过，生产 build 通过，Playwright 1 项通过。
-- C0B 定向 runtime/persistence 回归为 18 项通过；C0A 的 21 项攻击回归通过；全 validation
-  （含 C0B v3 persistence）定向复跑为 224 项通过。v2 persistence、DataCenter 和 migration
+- R1 C0B 定向 runtime/persistence 回归为 22 项通过；C0A 的 21 项攻击回归通过；全 validation
+  （含 C0B v3 persistence）定向复跑为 229 项通过。v2 persistence、DataCenter 和 migration
   的交叉回归也已在完整门与定向命令中通过。
 
 结果提交 ID 只在完成最终 `git diff --check`、提交并确认工作树干净后回填到本实施交接，不在本文件

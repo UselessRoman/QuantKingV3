@@ -19,6 +19,8 @@ from quantking.common.time import UtcTimestamp
 from quantking.data.adapters.validation_content import (
     build_fake_exchange_calendar_parquet,
     build_fake_exchange_calendar_table,
+    build_fake_trading_status_parquet,
+    build_fake_trading_status_table,
 )
 from quantking.data.adapters.warehouse.manifest import RawManifestFile
 from quantking.data.adapters.warehouse.raw_store import RawBatchPublisher, RawBatchPublishRequest
@@ -152,8 +154,8 @@ def build_v3_run(
     )
     request = ValidationRequestManifestV3.for_controlled_sample(
         identity=identity,
-        source="XTQUANT",
-        dataset=DatasetKind.EXCHANGE_CALENDAR,
+        source=trust_context.source_dataset_contract.source,
+        dataset=trust_context.source_dataset_contract.dataset,
         sample=sample,
         selected_case_ids=selected_case_ids,
         source_dataset_contract=trust_context.source_dataset_contract,
@@ -162,8 +164,8 @@ def build_v3_run(
     fingerprint = compute_run_fingerprint_v3(request=request, versions=versions)
     envelope = ValidationRunEnvelopeV3(
         identity=identity,
-        source="XTQUANT",
-        dataset=DatasetKind.EXCHANGE_CALENDAR,
+        source=trust_context.source_dataset_contract.source,
+        dataset=trust_context.source_dataset_contract.dataset,
         versions=versions,
         request_sha256=request.request_sha256,
         run_fingerprint=fingerprint,
@@ -284,21 +286,51 @@ def _write_successful_run(
     runner_trust_policy: V3RunnerTrustPolicy | None,
 ) -> BuiltV3Run:
     cases = request.selected_cases
-    rows = tuple(
-        (str(case["exchange"]), day, True)
+    dates_by_case = tuple(
+        (case, date.fromisoformat(str(case["start_date"])) + timedelta(days=offset))
         for case in cases
-        for day in (
-            date.fromisoformat(str(case["start_date"])) + timedelta(days=offset)
-            for offset in range(
-                (
-                    date.fromisoformat(str(case["end_date"]))
-                    - date.fromisoformat(str(case["start_date"]))
-                ).days
-                + 1
-            )
+        for offset in range(
+            (
+                date.fromisoformat(str(case["end_date"]))
+                - date.fromisoformat(str(case["start_date"]))
+            ).days
+            + 1
         )
     )
-    parquet_bytes, content_sha, row_count = build_fake_exchange_calendar_parquet(rows)
+    if envelope.dataset is DatasetKind.EXCHANGE_CALENDAR:
+        rows = tuple((str(case["exchange"]), day, True) for case, day in dates_by_case)
+        parquet_bytes, content_sha, row_count = build_fake_exchange_calendar_parquet(rows)
+        table = build_fake_exchange_calendar_table(rows)
+        calendar_fallback_rows = rows if not comparison_has_difference else rows[1:]
+        fallback_table = build_fake_exchange_calendar_table(calendar_fallback_rows)
+        _fallback_bytes, fallback_content_sha, _fallback_row_count = (
+            build_fake_exchange_calendar_parquet(calendar_fallback_rows)
+        )
+    elif envelope.dataset is DatasetKind.TRADING_STATUS:
+        status_rows = tuple(
+            (
+                str(case["code"]),
+                day,
+                True,
+                False,
+                True,
+                False,
+                False,
+                None,
+                None,
+                "synthetic controlled ST status",
+            )
+            for case, day in dates_by_case
+        )
+        parquet_bytes, content_sha, row_count = build_fake_trading_status_parquet(status_rows)
+        table = build_fake_trading_status_table(status_rows)
+        status_fallback_rows = status_rows if not comparison_has_difference else status_rows[1:]
+        fallback_table = build_fake_trading_status_table(status_fallback_rows)
+        _fallback_bytes, fallback_content_sha, _fallback_row_count = (
+            build_fake_trading_status_parquet(status_fallback_rows)
+        )
+    else:
+        raise ValueError("Fake v3 evidence supports only controlled datasets")
     files: dict[str, tuple[bytes, int]] = {
         "request/manifest.json": (request.to_bytes(), len(cases)),
         "canonical/content.parquet": (parquet_bytes, row_count),
@@ -350,12 +382,6 @@ def _write_successful_run(
             quality_dir,
             prefix=f"quality-root/{quality_dir.relative_to(quality_root).as_posix()}",
         )
-    )
-    table = build_fake_exchange_calendar_table(rows)
-    fallback_rows = rows if not comparison_has_difference else rows[1:]
-    fallback_table = build_fake_exchange_calendar_table(fallback_rows)
-    _fallback_bytes, fallback_content_sha, _fallback_row_count = (
-        build_fake_exchange_calendar_parquet(fallback_rows)
     )
     difference_root = root / f"_v3-difference-{envelope.identity.run_id.value.hex}"
     outcome = CrossSourceComparator().compare(

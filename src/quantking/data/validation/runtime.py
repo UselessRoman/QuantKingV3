@@ -426,7 +426,13 @@ class RuntimeAuthorizationEnvelope:
         contract = parsed["source_dataset_contract"]
         profile = parsed["promotion_profile"]
         try:
-            return cls(
+            # Do not normalize JSON scalars before signature verification.  In
+            # particular, ``int(\"3\")`` would otherwise make a string look
+            # indistinguishable from the signed JSON number ``3``.  Keep the
+            # strict scalar schema here, then require a complete byte-for-byte
+            # round trip below as a second line of defence for nested values.
+            _require_runtime_authorization_scalar_types(parsed)
+            candidate = cls(
                 authorization=ExecutionAuthorization.from_bytes(
                     _canonical(parsed["authorization"])
                 ),
@@ -466,8 +472,76 @@ class RuntimeAuthorizationEnvelope:
                 output_scope=str(parsed["output_scope"]),
                 claim_nonce=str(parsed["claim_nonce"]),
             )
+            if candidate.to_bytes() != payload:
+                raise ValueError("runtime authorization is not canonical typed JSON")
+            return candidate
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("runtime authorization is invalid") from error
+
+
+def _require_runtime_authorization_scalar_types(parsed: Mapping[str, object]) -> None:
+    """Reject every scalar coercion before creating the signed envelope.
+
+    ``json.loads`` deliberately preserves JSON scalar types.  This helper
+    consumes that information before any contract parser calls ``str`` or
+    ``int``.  The subsequent serialized-byte equality check protects future
+    nested-contract extensions as well.
+    """
+
+    text_fields = {
+        "claim_nonce",
+        "output_scope",
+        "plan_sha256",
+        "purpose",
+        "reference_bundle_id",
+        "reference_bundle_sha256",
+        "schema_version",
+        "signature",
+    }
+    if any(type(parsed[field]) is not str for field in text_fields):
+        raise ValueError("runtime authorization text field has the wrong type")
+    frozen_versions = parsed["frozen_versions"]
+    case_ids = parsed["case_ids"]
+    assert isinstance(frozen_versions, dict)
+    assert isinstance(case_ids, list)
+    if any(
+        type(key) is not str or type(value) is not str for key, value in frozen_versions.items()
+    ):
+        raise ValueError("runtime authorization frozen version has the wrong type")
+    if any(type(value) is not str for value in case_ids):
+        raise ValueError("runtime authorization case ID has the wrong type")
+
+    authorization = parsed["authorization"]
+    identity = parsed["identity"]
+    contract = parsed["source_dataset_contract"]
+    profile = parsed["promotion_profile"]
+    assert isinstance(authorization, dict)
+    assert isinstance(identity, dict)
+    assert isinstance(contract, dict)
+    assert isinstance(profile, dict)
+    if any(type(key) is not str or type(value) is not str for key, value in authorization.items()):
+        raise ValueError("runtime authorization nested authorization has the wrong type")
+    if any(type(key) is not str or type(value) is not str for key, value in identity.items()):
+        raise ValueError("runtime authorization identity has the wrong type")
+    if any(type(key) is not str or type(value) is not str for key, value in contract.items()):
+        raise ValueError("runtime authorization contract has the wrong type")
+    profile_text = {
+        "dataset",
+        "promotion_config_version",
+        "promotion_profile_version",
+        "reference_bundle_id",
+        "reference_bundle_manifest_sha256",
+        "source",
+    }
+    if any(type(profile[field]) is not str for field in profile_text):
+        raise ValueError("runtime authorization profile text has the wrong type")
+    if (
+        type(profile["minimum_stability_runs"]) is not int
+        or type(profile["maximum_total_differences"]) is not int
+        or not isinstance(profile["required_case_ids"], list)
+        or any(type(value) is not str for value in profile["required_case_ids"])
+    ):
+        raise ValueError("runtime authorization profile has the wrong type")
 
 
 class RuntimeAuthorizationFileVerifier(Protocol):

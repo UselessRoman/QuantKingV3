@@ -687,10 +687,13 @@ class AuthorityReferenceBundleVerifier:
     that bound cases carry complete, locally approved authority evidence.
     """
 
-    def __init__(self, *, root: Path) -> None:
+    def __init__(self, *, root: Path, record_failures: bool = True) -> None:
         if not root.is_absolute():
             raise ValueError("reference root must be absolute")
+        if not isinstance(record_failures, bool):
+            raise TypeError("record_failures must be a bool")
         self._root = root
+        self._record_failures = record_failures
 
     def verify(
         self,
@@ -731,10 +734,12 @@ class AuthorityReferenceBundleVerifier:
                 case_eligibilities=case_eligibilities,
             )
         except AuthorityBundleVerificationError as error:
-            self._record_failure(str(error))
+            if self._record_failures:
+                self._record_failure(str(error))
             raise
         except Exception:
-            self._record_failure("AUTHORITY_BUNDLE_INVALID")
+            if self._record_failures:
+                self._record_failure("AUTHORITY_BUNDLE_INVALID")
             raise AuthorityBundleVerificationError("AUTHORITY_BUNDLE_INVALID") from None
 
     def verify_structure(

@@ -33,7 +33,6 @@ from quantking.data.validation.runtime import (
     RuntimeAuthorizationFileLoader,
     ValidationSource,
 )
-from quantking.data.validation.testing_v3 import build_v3_context
 
 REAL_EXECUTION_ACK = "I_ACKNOWLEDGE_AUTHORIZED_REAL_SOURCE_VALIDATION"
 _SDK_PACKAGES = {
@@ -285,6 +284,7 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--validation-root", type=Path)
     command = sub.add_parser("fake-execute")
     command.add_argument("--authorization-file", required=True, type=Path)
+    command.add_argument("--reference-bundle-root", required=True, type=Path)
     return parser
 
 
@@ -298,8 +298,8 @@ def _load_authorization(path: Path) -> RuntimeAuthorizationEnvelope:
         ) from None
 
 
-def _execute_fake(authorization_file: Path) -> Path:
-    """C0B's only executable CLI path; it has no source, SDK, or output flags."""
+def _execute_fake(*, authorization_file: Path, reference_bundle_root: Path) -> Path:
+    """C0B's only executable CLI path; its bundle selection is fixed in code."""
     file_authority = FakeRuntimeAuthorizationAuthority()
     loader = RuntimeAuthorizationFileLoader(verifier=file_authority)
     try:
@@ -308,10 +308,9 @@ def _execute_fake(authorization_file: Path) -> Path:
         raise ValidationExecutionError(
             "AUTHORIZATION_REQUIRED", "a trusted canonical runtime authorization is required"
         ) from None
-    context = build_v3_context()
     try:
         result = ControlledFakeValidationRuntime(
-            context=context,
+            reference_bundle_root=reference_bundle_root,
             authorization_file_loader=loader,
             authorization_verifier=FakeAuthorizationAuthority(),
             claim_store=AuthorizationClaimStore(
@@ -356,7 +355,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.action == "fake-execute":
-            result = str(_execute_fake(args.authorization_file))
+            result = str(
+                _execute_fake(
+                    authorization_file=args.authorization_file,
+                    reference_bundle_root=args.reference_bundle_root,
+                )
+            )
         elif args.action == "verify":
             result = verify(validation_root=args.validation_root, directory=args.directory)
         else:
