@@ -25,7 +25,10 @@ Stage 1 的目标是完成首个可发布、可查询和可追溯的 A 股日频
   case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版；
   17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
 - S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 完成纯离线
-  独立主验收；C0B、真实运行尚未开始、未获授权；除 C0A 外，S1-07C/D、S1-08 尚未开始、未获授权。
+  独立主验收；S1-07C0B-R1 已于 2026-08-07 在提交 `20c7aaba4de4a03b58ea148c4f56e8aec3eb2092`
+  完成独立主验收（纯离线 Fake provider），证据见
+  [S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。C1、真实运行、S1-07D、S1-08
+  和 Stage 2 仍未开始、未获授权。除已验收的纯离线 C0A/C0B 外，S1-07C/D、S1-08 尚未开始、未获授权。
 
 ## 授权边界
 
@@ -55,6 +58,7 @@ S1-01 数据合同、元数据持久化与安全迁移基础（已主验收）
     → S1-07A 离线验证框架（已主验收）
     → S1-07B 权威固定样本、引用证据合同和 REAL runtime/signer readiness
     → S1-07C0A 版本化按 case 证据合同（已主验收；纯离线）
+    → S1-07C0B 受控执行、seal 持久化与 DataCenter 深验读侧（已主验收；纯离线 Fake provider）
     → S1-07C 逐项授权的真实来源运行和差异评估
     → S1-07D 旧项目候选 DATA_ONLY/REJECTED 审计
     → S1-08 真实或明确范围 Canonical 构建及 Stage 1 最终验收
@@ -83,7 +87,10 @@ S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` �
 case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版；
 17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
 S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 完成纯离线
-独立主验收；C0B、真实运行尚未开始、未获授权；除 C0A 外，S1-07C/D、S1-08 尚未开始、未获授权。
+独立主验收；S1-07C0B-R1 已于 2026-08-07 在提交 `20c7aaba4de4a03b58ea148c4f56e8aec3eb2092`
+完成独立主验收（纯离线 Fake provider），证据见
+[S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。C1、真实运行、S1-07D、S1-08
+和 Stage 2 仍未开始、未获授权。除已验收的纯离线 C0A/C0B 外，S1-07C/D、S1-08 尚未开始、未获授权。
 
 ## S1-06 主验收
 

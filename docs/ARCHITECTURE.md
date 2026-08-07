@@ -226,6 +226,7 @@ S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` �
 case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版；
 17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
 S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 完成纯离线
-独立主验收；C0B、真实运行尚未开始、未获授权；除 C0A 外，S1-07C/D、S1-08 尚未开始、未获授权。各模块状态以
+独立主验收；S1-07C0B-R1 已于 2026-08-07 在提交 `20c7aaba4de4a03b58ea148c4f56e8aec3eb2092`
+完成独立主验收（纯离线 Fake provider）。C1、真实运行、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。除已验收的纯离线 C0A/C0B 外，S1-07C/D、S1-08 尚未开始、未获授权。各模块状态以
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)、[路线图](ROADMAP.md) 和 Stage 1
 任务卡为准。

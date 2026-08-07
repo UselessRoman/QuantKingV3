@@ -20,7 +20,10 @@ S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` �
 case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版；
 17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
 S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 完成纯离线
-独立主验收；C0B、真实运行尚未开始、未获授权；除 C0A 外，S1-07C/D、S1-08 尚未开始、未获授权。
+独立主验收；S1-07C0B-R1 已于 2026-08-07 在提交 `20c7aaba4de4a03b58ea148c4f56e8aec3eb2092`
+完成独立主验收（纯离线 Fake provider），证据见
+[S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。C1、真实运行、S1-07D、S1-08
+和 Stage 2 仍未开始、未获授权。除已验收的纯离线 C0A/C0B 外，S1-07C/D、S1-08 尚未开始、未获授权。
 
 真实 XTQuant 和备用源验证仍延期并阻断 Stage 1 最终验收。
 
@@ -152,13 +155,18 @@ S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 
   case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版；
   17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
   S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 完成纯离线
-  独立主验收；C0B、真实运行尚未开始、未获授权；除 C0A 外，S1-07C/D、S1-08 尚未开始、未获授权。
+  独立主验收；S1-07C0B-R1 已于 2026-08-07 在提交 `20c7aaba4de4a03b58ea148c4f56e8aec3eb2092`
+  完成独立主验收（纯离线 Fake provider），证据见
+  [S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。C1、真实运行、S1-07D、S1-08
+  和 Stage 2 仍未开始、未获授权。除已验收的纯离线 C0A/C0B 外，S1-07C/D、S1-08 尚未开始、未获授权。
 - **S1-07A**：离线验证框架及其证据信任边界，已完成主验收。
 - **S1-07B**：权威固定样本 v4、首个 AUTHORITY_APPROVED case（603377.SH ST）、reference
   bundle v3 证据链和按 case 放行运行时已定版。17 个 purpose 仍是覆盖 backlog；后续新增
   材料必须创建 v5+，不得修改 v4。S1-07B 通过不表示任何供应商已生产可用。
-- **S1-07C0A**：版本化按 case 证据合同已完成纯离线独立主验收，证据见
-  [S1-07C0A-R1 主验收证据](S1-07C0A-R1_ACCEPTANCE.md)；不证明 REAL 来源能力，未授权 C0B。
+- **S1-07C0A**：版本化按 case 证据合同已完成纯离线独立主验收。
+- **S1-07C0B**：受控 Fake-provider 执行、assessment seal 持久化和 DataCenter 深验读侧已完成
+  独立主验收（纯离线 Fake provider），证据见
+  [S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)；不证明或启用 REAL 来源能力，未授权 C1。
 - **S1-07C**：对 XTQuant 和备用源逐项取得授权后执行真实运行、稳定性和差异评估。
 - **S1-07D**：对旧项目候选数据作只读 `DATA_ONLY`/`REJECTED` 审计。
 - **依赖**：S1-06 完成；真实网络、QMT、正式数据根和 `E:\QuantKing` 读取分别授权。

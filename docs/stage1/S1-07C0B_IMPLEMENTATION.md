@@ -1,11 +1,13 @@
 # S1-07C0B 实施记录：受控执行、持久化与 DataCenter 读侧纵切
 
-状态：**C0B 实现完成、等待独立主验收**。
+状态：**已完成独立主验收（纯离线 Fake provider）**。
 
 > C0B 初版结果 `5b461fc3be56ba6b864552fc927ff68c71ce9497` 未通过独立主验收，
-> 已由 C0B-R1 定向修复。R1 的完整更正记录见
-> [S1-07C0B-R1_IMPLEMENTATION.md](S1-07C0B-R1_IMPLEMENTATION.md)；本文件保留原
-> 实施范围和非授权边界，不应被解读为主验收通过。
+> 已由 C0B-R1 定向修复，并在结果提交
+> `20c7aaba4de4a03b58ea148c4f56e8aec3eb2092` 完成独立主验收（纯离线 Fake provider）。
+> 验收证据见 [S1-07C0B-R1_ACCEPTANCE.md](S1-07C0B-R1_ACCEPTANCE.md)；R1 完整更正记录见
+> [S1-07C0B-R1_IMPLEMENTATION.md](S1-07C0B-R1_IMPLEMENTATION.md)。本文件保留初版实施范围和
+> 非授权边界，不将 C0B 表述为 REAL 能力。
 
 ## 任务身份与授权原文
 
