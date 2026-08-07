@@ -526,7 +526,7 @@ class RealValidationEvidenceVerifier:
                 or envelope.authorization_key_id != self._authorization_anchor.key_id
                 or envelope.authorization.signer_key_id != self._authorization_anchor.key_id
                 or envelope.runner_key_id != self._runner_anchor.key_id
-                or envelope.authorization.sample_sha256 != self.context.sample.sample_spec_sha256
+                or not _envelope_binds(envelope=envelope, identity=identity, context=self.context)
             ):
                 raise ValueError
             plan_raw = files["request/plan.json"]
@@ -738,6 +738,25 @@ def _verify_result_file_shape(
             raise ValueError("REAL failure evidence is invalid")
     else:
         raise ValueError("C1A REAL success evidence is forbidden")
+
+
+def _envelope_binds(
+    *,
+    envelope: RealRuntimeAuthorizationEnvelope,
+    identity: ValidationAttemptIdentityV3,
+    context: V3EvidenceTrustContext,
+) -> bool:
+    """Bind the signed envelope to this exact run and verifier-owned context."""
+    return (
+        envelope.identity == identity
+        and envelope.selected_case_ids == _CASE_IDS
+        and envelope.authorization.sample_sha256 == context.sample.sample_spec_sha256
+        and envelope.source_dataset_contract == context.source_dataset_contract
+        and envelope.promotion_profile == context.promotion_profile
+        and envelope.reference_bundle_id == context.promotion_profile.reference_bundle_id
+        and envelope.reference_bundle_sha256
+        == context.promotion_profile.reference_bundle_manifest_sha256
+    )
 
 
 def _plan_binds(

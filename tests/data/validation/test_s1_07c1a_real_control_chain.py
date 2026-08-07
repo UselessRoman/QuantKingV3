@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from datetime import timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -33,7 +34,12 @@ from quantking.data.center import DataCenterQueryService
 from quantking.data.models import DatasetKind
 from quantking.data.validation.artifacts import ValidationEvidenceVerificationError
 from quantking.data.validation.authorization import FakeRunnerTrustStore, SignerTrustPolicy
-from quantking.data.validation.contracts_v3 import AttemptOutcomeV3, ValidationAttemptIdentityV3
+from quantking.data.validation.contracts_v3 import (
+    AttemptOutcomeV3,
+    PromotionProfileV3,
+    SourceDatasetContractV3,
+    ValidationAttemptIdentityV3,
+)
 from quantking.data.validation.models import ValidationFailure
 from quantking.data.validation.real_artifacts import (
     RealResultAttestation,
@@ -47,9 +53,11 @@ from quantking.data.validation.real_authorization import (
     RealAuthorizationError,
     RealClaimReceipt,
     RealClaimReceiptIssuer,
+    RealClaimReceiptVerifier,
     RealExecutionAuthorizationAuthority,
     RealExecutionAuthorizationVerifier,
     RealRuntimeAuthorizationAuthority,
+    RealRuntimeAuthorizationEnvelope,
     RealRuntimeAuthorizationFileLoader,
     RealRuntimeAuthorizationVerifier,
     RealVerifierTrustAnchor,
@@ -239,11 +247,18 @@ def _rewrite_test_only_run(
         or (directory / entry["relative_path"]).read_bytes()
         for entry in manifest["files"]
     }
+    plan = json.loads(payloads["request/plan.json"])
+    declared_plan_sha = plan.pop("plan_sha256", None)
+    if (
+        not isinstance(declared_plan_sha, str)
+        or sha256(canonical_json(plan)).hexdigest() != declared_plan_sha
+    ):
+        raise AssertionError("test artifact plan SHA is invalid")
     lineage = {
         "authorization_envelope_sha256": sha256(
             payloads["authorization/envelope.json"]
         ).hexdigest(),
-        "plan_sha256": sha256(payloads["request/plan.json"]).hexdigest(),
+        "plan_sha256": declared_plan_sha,
         "claim_receipt_sha256": sha256(payloads["authorization/claim-receipt.json"]).hexdigest(),
     }
     attestation = json.loads(payloads["runner/result-attestation.real.v2.json"])
@@ -272,6 +287,103 @@ def _rewrite_test_only_run(
         (directory / name).write_bytes(payload)
     (directory / "manifest.json").write_bytes(canonical_json(manifest))
     (directory / "COMPLETE").write_bytes(canonical_json({"manifest_sha256": manifest_sha}))
+
+
+def _replace_with_fully_signed_envelope(
+    *, root: Path, directory: Path, envelope: RealRuntimeAuthorizationEnvelope
+) -> None:
+    """Keep plan, receipt and runner signatures valid while changing only the envelope."""
+    envelope_bytes = envelope.to_bytes()
+    previous_receipt = RealClaimReceipt.from_bytes(
+        (directory / "authorization" / "claim-receipt.json").read_bytes()
+    )
+    receipt = RealClaimReceiptIssuer(
+        private_key_file=root / "keys" / "authorization-private.pem"
+    ).issue(
+        authorization_id=previous_receipt.authorization_id,
+        invocation_id=previous_receipt.invocation_id,
+        run_id=previous_receipt.run_id,
+        claimed_at=previous_receipt.claimed_at,
+        claim_nonce=previous_receipt.claim_nonce,
+        authorization_envelope_sha256=sha256(envelope_bytes).hexdigest(),
+        plan_sha256=previous_receipt.plan_sha256,
+    )
+    _rewrite_test_only_run(
+        key_root=root,
+        directory=directory,
+        replacements={
+            "authorization/envelope.json": envelope_bytes,
+            "authorization/claim-receipt.json": receipt.to_bytes(),
+        },
+    )
+
+
+def _reissue_envelope(
+    *,
+    root: Path,
+    envelope: RealRuntimeAuthorizationEnvelope,
+    identity: ValidationAttemptIdentityV3 | None = None,
+    source_dataset_contract: SourceDatasetContractV3 | None = None,
+    promotion_profile: PromotionProfileV3 | None = None,
+) -> RealRuntimeAuthorizationEnvelope:
+    """Use the trusted authorization key so drift tests do not rely on bad signatures."""
+    contract = source_dataset_contract or envelope.source_dataset_contract
+    profile = promotion_profile or envelope.promotion_profile
+    return RealRuntimeAuthorizationAuthority(
+        private_key_file=root / "keys" / "authorization-private.pem"
+    ).issue(
+        authorization=envelope.authorization,
+        identity=identity or envelope.identity,
+        selected_case_ids=envelope.selected_case_ids,
+        reference_bundle_id=profile.reference_bundle_id,
+        reference_bundle_sha256=profile.reference_bundle_manifest_sha256,
+        source_dataset_contract=contract,
+        promotion_profile=profile,
+        output_scope=envelope.output_scope,
+        frozen_versions=envelope.frozen_versions,
+        plan_sha256=envelope.plan_sha256,
+        claim_nonce=envelope.claim_nonce,
+        runner_key_id=envelope.runner_key_id,
+    )
+
+
+def _assert_fully_signed_envelope_drift_is_rejected(
+    *,
+    root: Path,
+    directory: Path,
+    output: Path,
+    trust: ExplicitRealXtQuantTrustResolver,
+    envelope: RealRuntimeAuthorizationEnvelope,
+) -> None:
+    _replace_with_fully_signed_envelope(root=root, directory=directory, envelope=envelope)
+    config = trust.resolve()
+    persisted_envelope = RealRuntimeAuthorizationEnvelope.from_bytes(
+        (directory / "authorization" / "envelope.json").read_bytes()
+    )
+    assert RealRuntimeAuthorizationVerifier(
+        trust_anchor=config.authorization_verifier_anchor
+    ).verify_real_file_authorization(persisted_envelope)
+    receipt = RealClaimReceipt.from_bytes(
+        (directory / "authorization" / "claim-receipt.json").read_bytes()
+    )
+    assert RealClaimReceiptVerifier(trust_anchor=config.authorization_verifier_anchor).verify(
+        receipt
+    )
+    attestation = RealResultAttestation.from_bytes(
+        (directory / "runner" / "result-attestation.real.v2.json").read_bytes()
+    )
+    assert config.runner_verifier_anchor.verify(
+        domain=RealValidationEvidenceWriter._DOMAIN,
+        payload=attestation.unsigned_payload(),
+        signature=attestation.signature,
+    )
+    with pytest.raises(ValidationEvidenceVerificationError):
+        RealValidationEvidenceVerifier(
+            validation_root=output,
+            context=config.context,
+            runner_verifier_anchor=config.runner_verifier_anchor,
+            authorization_verifier_anchor=config.authorization_verifier_anchor,
+        ).verify_run(directory=directory)
 
 
 def test_default_fixed_unit_is_real_blocked_and_does_not_import_xtquant(tmp_path: Path) -> None:
@@ -425,6 +537,100 @@ def test_real_attestation_is_within_authorization_and_execution_window(tmp_path:
         authorization_verifier_anchor=trust.resolve().authorization_verifier_anchor,
     ).verify_run(directory=result.directory)
     assert verified.outcome is AttemptOutcomeV3.FAILED
+
+
+def test_fully_signed_envelope_session_identity_drift_is_rejected(tmp_path: Path) -> None:
+    authorization_file, runtime, trust, output = _issued(tmp_path)
+    result = runtime.execute(authorization_file=authorization_file)
+    original = RealRuntimeAuthorizationEnvelope.from_bytes(
+        (result.directory / "authorization" / "envelope.json").read_bytes()
+    )
+    drifted = _reissue_envelope(
+        root=tmp_path,
+        envelope=original,
+        identity=replace(original.identity, session_id=new_entity_id("data_session")),
+    )
+
+    _assert_fully_signed_envelope_drift_is_rejected(
+        root=tmp_path,
+        directory=result.directory,
+        output=output,
+        trust=trust,
+        envelope=drifted,
+    )
+
+
+def test_fully_signed_envelope_bundle_drift_is_rejected(tmp_path: Path) -> None:
+    authorization_file, runtime, trust, output = _issued(tmp_path)
+    result = runtime.execute(authorization_file=authorization_file)
+    original = RealRuntimeAuthorizationEnvelope.from_bytes(
+        (result.directory / "authorization" / "envelope.json").read_bytes()
+    )
+    drifted = _reissue_envelope(
+        root=tmp_path,
+        envelope=original,
+        promotion_profile=replace(
+            original.promotion_profile,
+            reference_bundle_id="st-603377-alternate-v3",
+            reference_bundle_manifest_sha256="a" * 64,
+        ),
+    )
+
+    _assert_fully_signed_envelope_drift_is_rejected(
+        root=tmp_path,
+        directory=result.directory,
+        output=output,
+        trust=trust,
+        envelope=drifted,
+    )
+
+
+def test_fully_signed_envelope_contract_drift_is_rejected(tmp_path: Path) -> None:
+    authorization_file, runtime, trust, output = _issued(tmp_path)
+    result = runtime.execute(authorization_file=authorization_file)
+    original = RealRuntimeAuthorizationEnvelope.from_bytes(
+        (result.directory / "authorization" / "envelope.json").read_bytes()
+    )
+    drifted = _reissue_envelope(
+        root=tmp_path,
+        envelope=original,
+        source_dataset_contract=replace(
+            original.source_dataset_contract,
+            contract_version="xtquant-trading-status-real-contract.c1a-r3.v1",
+        ),
+    )
+
+    _assert_fully_signed_envelope_drift_is_rejected(
+        root=tmp_path,
+        directory=result.directory,
+        output=output,
+        trust=trust,
+        envelope=drifted,
+    )
+
+
+def test_fully_signed_envelope_profile_drift_is_rejected(tmp_path: Path) -> None:
+    authorization_file, runtime, trust, output = _issued(tmp_path)
+    result = runtime.execute(authorization_file=authorization_file)
+    original = RealRuntimeAuthorizationEnvelope.from_bytes(
+        (result.directory / "authorization" / "envelope.json").read_bytes()
+    )
+    drifted = _reissue_envelope(
+        root=tmp_path,
+        envelope=original,
+        promotion_profile=replace(
+            original.promotion_profile,
+            promotion_profile_version="xtquant-trading-status-real-promotion.c1a-r3.v1",
+        ),
+    )
+
+    _assert_fully_signed_envelope_drift_is_rejected(
+        root=tmp_path,
+        directory=result.directory,
+        output=output,
+        trust=trust,
+        envelope=drifted,
+    )
 
 
 def test_formal_reader_rechecks_both_authorization_signatures(tmp_path: Path) -> None:
