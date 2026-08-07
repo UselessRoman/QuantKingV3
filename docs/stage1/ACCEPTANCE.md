@@ -22,8 +22,11 @@ case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行�
 S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 完成纯离线
 独立主验收；S1-07C0B-R1 已于 2026-08-07 在提交 `20c7aaba4de4a03b58ea148c4f56e8aec3eb2092`
 完成独立主验收（纯离线 Fake provider），证据见
-[S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。C1、真实运行、S1-07D、S1-08
-和 Stage 2 仍未开始、未获授权。除已验收的纯离线 C0A/C0B 外，S1-07C/D、S1-08 尚未开始、未获授权。
+[S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。S1-07C1A-R3 已于 2026-08-08 在提交
+`564523eb883c15b6b52f0815f22a70b10fced5cf` 完成纯离线 REAL 控制链合同主验收，证据见
+[S1-07C1A-R3 主验收证据](S1-07C1A-R3_ACCEPTANCE.md)；它不证明 XTQuant 真实数据能力或真实运行。
+C1、C1B、C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。
+除已主验收的 C0A/C0B/C1A-R3 离线合同外，后续 S1-07C/D、S1-08 尚未开始、未获授权。
 
 阶段状态只能由实际验收证据驱动。文档存在、代码提交或单次演示均不能单独证明阶段完成。
 
@@ -117,8 +120,9 @@ S1-04 主验收证据见 [独立验收报告](S1-04_ACCEPTANCE.md)。S1-05 已�
 S1-07A 已完成主验收；S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` 完成主验收。首个 ST case 已获得有限范围的
 权威材料批准；其余 purpose 继续作为覆盖 backlog。S1-07C0A 已完成纯离线独立主验收；
 S1-07C0B-R1 已完成独立主验收（纯离线 Fake provider），证据见
-[S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。C1、真实运行、S1-07D、S1-08
-和 Stage 2 仍未开始、未获授权。除已验收的纯离线 C0A/C0B 外，S1-07C/D、S1-08 尚未开始、未获授权。
+[S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。S1-07C1A-R3 已完成纯离线 REAL
+控制链合同主验收，证据见 [S1-07C1A-R3 主验收证据](S1-07C1A-R3_ACCEPTANCE.md)；不证明
+XTQuant 真实数据能力或真实运行。C1、C1B、C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。
 真实 XTQuant 和备用源验证仍阻断 Stage 1 最终验收。
 
 ## S1-05 验收标准
@@ -175,8 +179,10 @@ S1-07A 离线验证框架已完成主验收，证据见
 S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 完成纯离线
 独立主验收。S1-07C0B-R1 已于 2026-08-07 在提交 `20c7aaba4de4a03b58ea148c4f56e8aec3eb2092`
 完成独立主验收（纯离线 Fake provider），证据见
-[S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。两项验收均不授权 C1、真实运行、
-S1-07D、S1-08 或 Stage 2，详见 [任务卡](TASKS.md)。
+[S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。S1-07C1A-R3 随后完成纯离线 REAL
+控制链合同主验收，证据见 [S1-07C1A-R3 主验收证据](S1-07C1A-R3_ACCEPTANCE.md)；三项验收
+均不证明 XTQuant 真实数据能力，且不授权 C1/C1B/C2、真实运行、S1-07D、S1-08 或 Stage 2，
+详见 [任务卡](TASKS.md)。
 
 后续实现交接、授权矩阵、任务拆分和独立主验收协议见
 [Stage 1 收口实施与主验收交接基线](STAGE1_COMPLETION_HANDOFF.md)。该文档用于导航和保存

@@ -2,7 +2,7 @@
 
 QuantKing V3 是一个运行在个人 Windows 电脑上的 A 股日频量化研究、组合回测、调仓决策与人工交易登记系统。它面向单用户，覆盖“数据更新 → 因子与模型 → 组合与回测 → 调仓计划 → 人工下单 → 成交同步与对账 → Web 复盘”的闭环。
 
-> 当前状态：架构设计已经确认，Stage 0 已于 2026-07-16 完成验收；Stage 1 已获实施授权并进行中，但尚未完成。Stage 1 及以后仍是目标能力，不得描述为已经实现或已验收。
+> 当前状态：架构设计已经确认，Stage 0 已于 2026-07-16 完成验收；Stage 1 已获实施授权并进行中，但尚未完成。个别 Stage 1 子任务可以拥有明确、有限的独立主验收；它们不代表整个 Stage 1 或后续目标能力已经实现或验收。
 
 ## 产品边界
 
@@ -66,4 +66,4 @@ XTQuant/备用源
 
 ## 下一步
 
-[Stage 0](docs/IMPLEMENTATION_PLAN.md#stage-0工程与可恢复基线) 已完成，证据见 [Stage 0 最终验收报告](docs/stage0/FINAL_ACCEPTANCE.md)。Stage 1 日线数据仓与数据质量已获实施授权并进行中，但尚未完成；真实网络、真实 XTQuant、运行数据根、旧数据迁移和 F 盘写入仍须逐项授权。
+[Stage 0](docs/IMPLEMENTATION_PLAN.md#stage-0工程与可恢复基线) 已完成，证据见 [Stage 0 最终验收报告](docs/stage0/FINAL_ACCEPTANCE.md)。Stage 1 日线数据仓与数据质量已获实施授权并进行中，但尚未完成；S1-07C1A-R3 已主验收的只是 [纯离线 REAL 控制链合同](docs/stage1/S1-07C1A-R3_ACCEPTANCE.md)，不构成真实 XTQuant 数据能力或真实运行证明。真实网络、真实 XTQuant、运行数据根、旧数据迁移和 F 盘写入仍须逐项授权；C1B、C2、S1-07D、S1-08 与 Stage 2 未开始、未获授权。

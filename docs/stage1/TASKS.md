@@ -22,8 +22,11 @@ case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行�
 S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 完成纯离线
 独立主验收；S1-07C0B-R1 已于 2026-08-07 在提交 `20c7aaba4de4a03b58ea148c4f56e8aec3eb2092`
 完成独立主验收（纯离线 Fake provider），证据见
-[S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。C1、真实运行、S1-07D、S1-08
-和 Stage 2 仍未开始、未获授权。除已验收的纯离线 C0A/C0B 外，S1-07C/D、S1-08 尚未开始、未获授权。
+[S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。S1-07C1A-R3 已于 2026-08-08 在提交
+`564523eb883c15b6b52f0815f22a70b10fced5cf` 完成纯离线 REAL 控制链合同主验收，证据见
+[S1-07C1A-R3 主验收证据](S1-07C1A-R3_ACCEPTANCE.md)；不证明 XTQuant 真实数据能力或真实运行。
+C1、C1B、C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。
+除已主验收的 C0A/C0B/C1A-R3 离线合同外，后续 S1-07C/D、S1-08 尚未开始、未获授权。
 
 真实 XTQuant 和备用源验证仍延期并阻断 Stage 1 最终验收。
 
@@ -157,8 +160,9 @@ S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 
   S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 完成纯离线
   独立主验收；S1-07C0B-R1 已于 2026-08-07 在提交 `20c7aaba4de4a03b58ea148c4f56e8aec3eb2092`
   完成独立主验收（纯离线 Fake provider），证据见
-  [S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。C1、真实运行、S1-07D、S1-08
-  和 Stage 2 仍未开始、未获授权。除已验收的纯离线 C0A/C0B 外，S1-07C/D、S1-08 尚未开始、未获授权。
+  [S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。S1-07C1A-R3 已完成纯离线 REAL
+  控制链合同主验收，证据见 [S1-07C1A-R3 主验收证据](S1-07C1A-R3_ACCEPTANCE.md)；不证明
+  XTQuant 真实数据能力或真实运行。C1、C1B、C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。
 - **S1-07A**：离线验证框架及其证据信任边界，已完成主验收。
 - **S1-07B**：权威固定样本 v4、首个 AUTHORITY_APPROVED case（603377.SH ST）、reference
   bundle v3 证据链和按 case 放行运行时已定版。17 个 purpose 仍是覆盖 backlog；后续新增
@@ -167,6 +171,10 @@ S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 
 - **S1-07C0B**：受控 Fake-provider 执行、assessment seal 持久化和 DataCenter 深验读侧已完成
   独立主验收（纯离线 Fake provider），证据见
   [S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)；不证明或启用 REAL 来源能力，未授权 C1。
+- **S1-07C1A-R3**：REAL authorization、签名、claim、固定 capability-blocked runner、seal
+  persistence 与读侧的纯离线控制链合同已完成主验收，证据见
+  [S1-07C1A-R3 主验收证据](S1-07C1A-R3_ACCEPTANCE.md)；不证明 XTQuant 真实数据能力，
+  不构成 C1 真实运行，也不授权 C1B/C2。
 - **S1-07C**：对 XTQuant 和备用源逐项取得授权后执行真实运行、稳定性和差异评估。
 - **S1-07D**：对旧项目候选数据作只读 `DATA_ONLY`/`REJECTED` 审计。
 - **依赖**：S1-06 完成；真实网络、QMT、正式数据根和 `E:\QuantKing` 读取分别授权。
