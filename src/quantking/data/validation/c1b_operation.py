@@ -1005,6 +1005,19 @@ def _verify_c1b_authorization(
     return c1a_plan
 
 
+def precheck_extension_authorization(
+    *, authorization: C1BExecutionAuthorization
+) -> RealXtQuantValidationPlan:
+    """Re-run C1B/C1A's complete pre-claim checks without dispatching C1B.
+
+    Extension runners may consume C1B's signed control context, but they may
+    not bypass its live authority-bundle, metadata, package, key, validity,
+    and unconsumed-claim checks.  This function performs no claim, SDK import,
+    runner dispatch, artifact write, database write, or C1B execution.
+    """
+    return _verify_c1b_authorization(authorization)
+
+
 def load_authorization(*, authorization_file: Path) -> C1BExecutionAuthorization:
     authorization = C1BExecutionAuthorization.from_bytes(
         _load_canonical(authorization_file, field="authorization file")
@@ -1088,6 +1101,7 @@ __all__ = [
     "issue_authorization",
     "load_authorization",
     "load_plan",
+    "precheck_extension_authorization",
     "prepare_plan",
     "write_authorization",
     "write_plan",

@@ -1,4 +1,4 @@
-"""S1-07C1C0-R2 controlled offline XTData ST observation operation.
+"""S1-07C1C0-R3 controlled offline XTData ST observation operation.
 
 The C1C0 authorization is an extension of a verified C1B authorization, which
 in turn carries the accepted C1A runtime envelope.  C1C0 never treats that
@@ -50,18 +50,18 @@ from quantking.data.validation.real_authorization import (
     RealVerifierTrustAnchor,
 )
 
-C1C0_PLAN_SCHEMA = "s1-07c1c0-r2-miniqmt-xtdata-plan.v1"
-C1C0_AUTHORIZATION_SCHEMA = "s1-07c1c0-r2-miniqmt-xtdata-authorization.v1"
-C1C0_OBSERVATION_SCHEMA = "s1-07c1c0-r2-provider-observation.v1"
-C1C0_PURPOSE = "S1-07C1C0_R2_MINIQMT_XTDATA_ST_OBSERVATION"
-C1C0_EXECUTION_ACK = "I_ACKNOWLEDGE_C1C0_R2_AUTHORIZED_XTDATA_ST_OBSERVATION"
-C1C0_ADAPTER_VERSION = "xtquant-xtdata-readonly.c1c0-r2.v1"
+C1C0_PLAN_SCHEMA = "s1-07c1c0-r3-miniqmt-xtdata-plan.v1"
+C1C0_AUTHORIZATION_SCHEMA = "s1-07c1c0-r3-miniqmt-xtdata-authorization.v1"
+C1C0_OBSERVATION_SCHEMA = "s1-07c1c0-r3-provider-observation.v1"
+C1C0_PURPOSE = "S1-07C1C0_R3_MINIQMT_XTDATA_ST_OBSERVATION"
+C1C0_EXECUTION_ACK = "I_ACKNOWLEDGE_C1C0_R3_AUTHORIZED_XTDATA_ST_OBSERVATION"
+C1C0_ADAPTER_VERSION = "xtquant-xtdata-readonly.c1c0-r3.v1"
 C1C0_RUNNER_CONTRACT_ID = RUNNER_CONTRACT_ID
 C1C0_RUNNER_PROFILE = RUNNER_PROFILE
 C1C0_RUNNER_VERSION = RUNNER_VERSION
 
-_SIGN_DOMAIN = "quantking.s1-07c1c0-r2.authorization.v1"
-_ARTIFACT_DOMAIN = "quantking.s1-07c1c0-r2.observation.v1"
+_SIGN_DOMAIN = "quantking.s1-07c1c0-r3.authorization.v1"
+_ARTIFACT_DOMAIN = "quantking.s1-07c1c0-r3.observation.v1"
 _CONCLUSION = "BLOCKED/CONTRACT_INCOMPLETE"
 _EVENT_ORDER = ["PRECHECK", "CLAIM", "IMPORT", "CALL", "OUTPUT"]
 _PLAN_FIELDS = frozenset(
@@ -70,6 +70,7 @@ _PLAN_FIELDS = frozenset(
         "c1b_authorization",
         "c1b_authorization_sha256",
         "fixed_request",
+        "metadata_database_sha256",
         "package_version",
         "plan_sha256",
         "purpose",
@@ -112,6 +113,7 @@ _MANIFEST_FIELDS = frozenset(
         "event_order",
         "files",
         "fixed_request",
+        "metadata_database_sha256",
         "observation_sha256",
         "package_version",
         "plan_sha256",
@@ -197,12 +199,24 @@ def _same_path(left: Path, right: Path) -> bool:
         return False
 
 
+def _metadata_database_sha256(path: Path) -> str:
+    """Hash the live C1B metadata input through the accepted path policy."""
+    safe = _external_path(path, field="metadata database", require_file=True)
+    try:
+        return _sha(safe.read_bytes())
+    except OSError as error:
+        raise C1C0OperationError(
+            "C1C0_METADATA_DATABASE_UNAVAILABLE", "metadata database cannot be read"
+        ) from error
+
+
 @dataclass(frozen=True, slots=True)
 class C1C0Plan:
     """A signed C1C0 contract which embeds the complete C1B/C1A context."""
 
     c1b_authorization: C1BExecutionAuthorization
     c1b_authorization_sha256: str
+    metadata_database_sha256: str
     package_version: str
     plan_sha256: str
 
@@ -253,6 +267,7 @@ class C1C0Plan:
             "c1b_authorization": json.loads(self.c1b_authorization.to_bytes()),
             "c1b_authorization_sha256": self.c1b_authorization_sha256,
             "fixed_request": FIXED_ST_REQUEST,
+            "metadata_database_sha256": self.metadata_database_sha256,
             "package_version": self.package_version,
             "purpose": C1C0_PURPOSE,
             "runner_contract_id": C1C0_RUNNER_CONTRACT_ID,
@@ -356,6 +371,7 @@ def _validate_plan(plan: C1C0Plan) -> tuple[RealVerifierTrustAnchor, RealVerifie
     if (
         not isinstance(plan.c1b_authorization, C1BExecutionAuthorization)
         or not _is_sha(plan.c1b_authorization_sha256)
+        or not _is_sha(plan.metadata_database_sha256)
         or not isinstance(plan.package_version, str)
         or not plan.package_version
         or not _is_sha(plan.plan_sha256)
@@ -379,12 +395,16 @@ def prepare_plan(*, c1b_authorization: C1BExecutionAuthorization) -> C1C0Plan:
         provisional = C1C0Plan(
             c1b_authorization=c1b_authorization,
             c1b_authorization_sha256=_sha(c1b_authorization.to_bytes()),
+            metadata_database_sha256=_metadata_database_sha256(
+                c1b_authorization.plan.metadata_database
+            ),
             package_version=c1b_authorization.plan.versions.package_version,
             plan_sha256="0" * 64,
         )
         plan = C1C0Plan(
             c1b_authorization=provisional.c1b_authorization,
             c1b_authorization_sha256=provisional.c1b_authorization_sha256,
+            metadata_database_sha256=provisional.metadata_database_sha256,
             package_version=provisional.package_version,
             plan_sha256=_sha(_canonical(provisional.unsigned())),
         )
@@ -426,6 +446,7 @@ def _plan_from_dict(raw: object) -> C1C0Plan:
     plan = C1C0Plan(
         c1b_authorization=authorization,
         c1b_authorization_sha256=raw["c1b_authorization_sha256"],
+        metadata_database_sha256=raw["metadata_database_sha256"],
         package_version=raw["package_version"],
         plan_sha256=raw["plan_sha256"],
     )
@@ -569,6 +590,23 @@ def _precheck(
     authorization_anchor, runner_anchor = _validate_plan(authorization.plan)
     _verify_outer_authorization(authorization, authorization_anchor)
     plan = authorization.plan
+    try:
+        # Reuse the accepted live C1B/C1A precheck before the C1C0 claim.  In
+        # particular this re-verifies the authority bundle, fixed sample,
+        # metadata database, XTQuant package metadata, key identities,
+        # validity window, plan bindings, and unconsumed authorization.
+        c1b_operation.precheck_extension_authorization(authorization=plan.c1b_authorization)
+        if (
+            _metadata_database_sha256(plan.c1b_plan.metadata_database)
+            != plan.metadata_database_sha256
+        ):
+            raise C1C0OperationError(
+                "C1C0_PRECLAIM_CONTEXT_INVALID", "metadata database content changed"
+            )
+    except C1BOperationError as error:
+        raise C1C0OperationError(
+            "C1C0_PRECLAIM_CONTEXT_INVALID", "C1B/C1A live precheck rejected the context"
+        ) from error
     if not plan.valid_from.value <= utc_now().value < plan.expires_at.value:
         raise C1C0OperationError(
             "AUTHORIZATION_INVALID_OR_EXPIRED", "authorization is outside its validity window"
@@ -761,6 +799,7 @@ def _manifest_unsigned(
         "event_order": _EVENT_ORDER,
         "files": files,
         "fixed_request": FIXED_ST_REQUEST,
+        "metadata_database_sha256": plan.metadata_database_sha256,
         "observation_sha256": _sha(observation_bytes),
         "package_version": plan.package_version,
         "plan_sha256": plan.plan_sha256,

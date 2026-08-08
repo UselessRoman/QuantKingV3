@@ -15,8 +15,8 @@ from typing import Protocol
 from quantking.data.adapters.sources.xtquant import ExplicitXtQuantModuleLoader
 
 RUNNER_CONTRACT_ID = "xtquant.xtdata.get_his_st_data.603377-sh.v1"
-RUNNER_PROFILE = "miniqmt-xtdata-readonly-st-observation.c1c0-r2.v1"
-RUNNER_VERSION = "c1c0-r2.xtdata-runner.v1"
+RUNNER_PROFILE = "miniqmt-xtdata-readonly-st-observation.c1c0-r3.v1"
+RUNNER_VERSION = "c1c0-r3.xtdata-runner.v1"
 FIXED_ST_CODE = "603377.SH"
 FIXED_ST_REQUEST = {"code": FIXED_ST_CODE, "interface": "xtdata.get_his_st_data"}
 _FORBIDDEN_MODULES = (".".join(("xtquant", "xt" + "trader")),)

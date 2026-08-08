@@ -1,4 +1,4 @@
-"""S1-07C1C0-R2 offline-only control-chain and artifact regressions."""
+"""S1-07C1C0-R3 offline-only control-chain and artifact regressions."""
 
 from __future__ import annotations
 
@@ -134,7 +134,7 @@ def _c1b_authorization(
     root: Path, body: str, *, init: str = ""
 ) -> tuple[C1BExecutionAuthorization, dict[str, object]]:
     site = _fake_xtquant(root, body, init)
-    _write_verified_authority_bundle(root / "authority")
+    bundle_directory = _write_verified_authority_bundle(root / "authority")
     authorization_private, authorization_public, authorization_id = _keypair(root, "authorization")
     runner_private, runner_public, runner_id = _keypair(root, "runner")
     database = root / "metadata.db"
@@ -180,6 +180,9 @@ def _c1b_authorization(
         "runner_private": runner_private,
         "runner_public": runner_public,
         "runner_key_id": runner_id,
+        "bundle_directory": bundle_directory,
+        "reference_bundle_root": root / "authority",
+        "metadata_database": database,
         "kwargs": kwargs,
     }
 
@@ -289,7 +292,7 @@ def test_mismatched_claim_private_key_is_rejected_before_claim_or_import(tmp_pat
     authorization_file.write_bytes(altered_c1c.to_bytes())
     with pytest.raises(C1C0OperationError) as captured:
         execute(authorization_file=authorization_file, acknowledgement=C1C0_EXECUTION_ACK)
-    assert captured.value.code == "C1C0_PRECLAIM_BINDING_MISMATCH"
+    assert captured.value.code == "C1C0_PRECLAIM_CONTEXT_INVALID"
     assert not (tmp_path / "claims").exists()
     assert not (tmp_path / "output").exists()
     _clean_xtquant_modules()
@@ -408,6 +411,7 @@ def test_verifier_rejects_moved_artifact_and_works_after_private_keys_removed(
     shutil.copytree(output, replay)
     with pytest.raises(C1C0OperationError):
         verify_observation(directory=replay)
+    shutil.rmtree(facts["reference_bundle_root"])  # type: ignore[arg-type]
     facts["authorization_private"].unlink()  # type: ignore[union-attr]
     facts["runner_private"].unlink()  # type: ignore[union-attr]
     assert verify_observation(directory=output)["conclusion"] == "BLOCKED/CONTRACT_INCOMPLETE"
@@ -441,6 +445,60 @@ def test_unknown_outer_plan_field_is_rejected_before_claim(tmp_path: Path) -> No
         execute(authorization_file=authorization, acknowledgement=C1C0_EXECUTION_ACK)
     assert captured.value.code == "C1C0_AUTHORIZATION_INVALID"
     assert not (tmp_path / "claims").exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "delete_manifest",
+        "change_manifest",
+        "delete_declared_file",
+        "fixed_sample_loader_drift",
+        "delete_metadata_database",
+        "replace_metadata_database",
+    ],
+)
+def test_live_c1b_c1a_precheck_rejects_drift_before_claim_or_fake_sdk_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    body = (
+        "from pathlib import Path\n"
+        "def get_his_st_data(code):\n"
+        " Path(__file__).with_name('calls.txt').write_text(code)\n"
+        " return {}\n"
+    )
+    authorization, facts = _issued(tmp_path, body)
+    bundle = facts["bundle_directory"]  # type: ignore[assignment]
+    manifest = bundle / "manifest.json"
+    metadata = facts["metadata_database"]  # type: ignore[assignment]
+    if mutation == "delete_manifest":
+        manifest.unlink()
+    elif mutation == "change_manifest":
+        manifest.write_bytes(manifest.read_bytes() + b" ")
+    elif mutation == "delete_declared_file":
+        raw = json.loads(manifest.read_bytes())
+        (bundle / raw["files"][0]["relative_path"]).unlink()
+    elif mutation == "fixed_sample_loader_drift":
+        sample = load_fixed_sample_v4()
+        object.__setattr__(sample, "sample_spec_version", "s1-07.fixed-sample.tampered")
+        object.__setattr__(sample, "sample_spec_sha256", sample.compute_sha256())
+        monkeypatch.setattr(
+            "quantking.data.validation.real_runtime.load_fixed_sample_v4", lambda: sample
+        )
+    elif mutation == "delete_metadata_database":
+        metadata.unlink()
+    else:
+        metadata.write_bytes(b"replaced-temporary-metadata-database")
+    with pytest.raises(C1C0OperationError) as captured:
+        execute(authorization_file=authorization, acknowledgement=C1C0_EXECUTION_ACK)
+    assert captured.value.code in {
+        "C1C0_PRECLAIM_CONTEXT_INVALID",
+        "C1C0_METADATA_DATABASE_UNAVAILABLE",
+    }
+    assert not (tmp_path / "site-packages" / "xtquant" / "calls.txt").exists()
+    assert not (tmp_path / "claims").exists()
+    assert not (tmp_path / "output").exists()
+    _clean_xtquant_modules()
 
 
 def test_package_path_redirection_and_preloaded_external_modules_are_rejected(
