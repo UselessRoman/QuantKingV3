@@ -1,361 +1,99 @@
 # Stage 1 数据合同
 
-状态：S1-01 已于 2026-07-16 在提交 `7e4e5b38b7fc91edaf8727ed55b1e26435373aea`
-完成主验收；S1-02（Warehouse、原子发布与显式版本查询）已于 2026-07-18 在提交
-`79f9fa3e682e212cf74e7886a04c6fb52158f302` 完成主验收。Stage 1 已获实施授权并
-进行中，但尚未完成；S1-03-R1 已于 2026-08-05 完成离线/防御性独立主验收，五类真实能力
-继续归入 S1-07C。S1-04 已于 2026-07-22 在提交
-`2f99491e9dc410acf85ca81c131a77cae08d0cc3` 完成主验收，证据见
-[S1-04 主验收证据](S1-04_ACCEPTANCE.md)。真实 XTQuant 样本验证仍须逐项授权，合成数据不能
-标生产可用。S1-05 已于 2026-07-27 在提交
-`e580d6963e01b1301dc26f29ed57a0b5b4770a0f` 完成主验收，证据见
-[S1-05 主验收证据](S1-05_ACCEPTANCE.md)。S1-06 已于 2026-07-28 在提交
-`413805074b3a82c2d2a090d2b73c854a238e2e19` 完成主验收，证据见
-[S1-06 主验收证据](S1-06_ACCEPTANCE.md)；
-S1-07A 已于 2026-07-29 在提交 `37512be531e15bbd5a698e6a227b0753781ef5e6`
-完成主验收。该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为
-BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。
-S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` 完成主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED
-case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版；
-17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。
-S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 完成纯离线
-独立主验收；S1-07C0B-R1 已完成独立主验收（纯离线 Fake provider），证据见
-[S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。S1-07C1A-R3 已于 2026-08-08 在提交
-`564523eb883c15b6b52f0815f22a70b10fced5cf` 完成纯离线 REAL 控制链合同主验收，证据见
-[S1-07C1A-R3 主验收证据](S1-07C1A-R3_ACCEPTANCE.md)。该验收不证明 XTQuant 真实数据能力或
-真实运行；C1B 初版独立主验收未通过；**“S1-07C1B-R1 已完成独立主验收（纯离线运行就绪化）；
-真实运行数为 0。”** 证据见 [S1-07C1B-R1 主验收证据](S1-07C1B-R1_ACCEPTANCE.md)。
-**“S1-07C1C0-R3 已完成独立主验收（纯离线 XTData ST observation 运行就绪化）；真实运行数为 0。”**
-接受提交为 `85d5f44a0564a487540ba072f6ba75c4dce8ee34`，证据见
-[S1-07C1C0-R3 主验收证据](S1-07C1C0-R3_ACCEPTANCE.md)。Native XtData 官方页面尚未证明
-`xtdata.get_his_st_data` 存在；真实 MiniQMT/XTQuant 调用数为 0，observation 始终为
-`BLOCKED/CONTRACT_INCOMPLETE`，不证明真实能力或 `READY`。**“S1-07C1C1-P0 已完成独立主验收（纯离线正式 file-only 操作入口与逐次授权交接）；C1C1 真实运行数为 0，仍未授权、未开始。”** 证据见 [P0 独立主验收记录](S1-07C1C1-P0_ACCEPTANCE.md)。C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。除已主验收的
-C0A/C0B/C1A-R3 离线合同、C1B-R1 和该 C1C0-R3 运行就绪化外，后续 C1C1 真实运行、C2、S1-07D、
-S1-08 尚未开始、未获授权。
+状态：S1-01～S1-06 的历史验收继续有效；当前目标路线是 AKShare 三 upstream 的未复权日线。旧 XTQuant/S1-07 证据合同已退役。
 
-S1-07B 的固定样本版本链为：v1 → v2 → v3 → v4。v4 原样继承 v3 的 11 个 framework case
-（保持 `FRAMEWORK_ONLY`），并新增 603377.SH ST 权威 case（`AUTHORITY_APPROVED`）。v4
-全局 release 资格为 `VALIDATION_READY_WITH_BLOCKED_CASES`，不使用全局
-`PRODUCTION_ELIGIBLE`。v4 sample SHA 为
-`859726293e8ed2e77663b6a4168b29a2cfd48070236ec5b8815ad2ee3b5904d7`，直接绑定 v3 SHA
-`5b5bf202e17181dfcbd9159f261dc9b4c636fb7641a3786523b42f952c6f3200`。后续新增材料必须
-创建 v5+，不得修改 v4。
+## 通用不变量
 
-权威 reference bundle v3 绑定 CNINFO 公告 1225449700（临 2026-110），分别建模
-`document_date`（2026-07-30）、`publication_date`/`known_from_date`（2026-07-31）和
-`usable_for_decisions_after`（2026-07-31 market close）。回溯确认事实的
-`effective_date`（2026-03-23、2026-04-18）不得被表达为当时已知。`LOCAL_OWNER` 审批只
-证明用户复核了固定样本事实，不等同于 REAL provider signer。
+- 时间使用 UTC 时间戳；交易日使用无时区 `date`。
+- A 股代码使用 `000001.SZ`、`600000.SH` 形式。
+- Canonical 主键稳定且唯一，输出按固定 sort key 排序。
+- Raw 只追加；`PUBLISHED` DatasetVersion 不可原地修改。
+- 失败批次不能改成成功，重试使用新 ID。
+- 路径必须相对于受管数据根，manifest 使用规范 JSON 和 SHA-256。
 
-reference bundle 只保存必要结构化事实、短 statement、document identifier、locator 和
-原始材料 SHA，不提交公告或网页大段正文。每个 `CaseFactBinding` 必须精确匹配 case 的
-dataset、purpose、code、exchange 和起止日期；reference/fact/case 或 reviewer decision
-变化要求新 sample/release，不允许复用同一 v3 内容身份。
+## 日线核心合同
 
-## 数据中心只读查询合同（S1-06）
+数据集：`daily_bar_unadjusted`
 
-- 列表只接受 allowlist 过滤，使用时间加稳定 ID 的不透明 keyset cursor；Cursor 信封严格
-  绑定资源类型、全部规范过滤、排序版本与查询指纹，跨过滤复用稳定返回 400；默认 50、上限 100。
-- 预览只接受完整 `data_version:` ID 和 `PUBLISHED`，拒绝 `latest`、路径、SQL、未知字段
-  及其他状态；每页最多 200 行，DuckDB 在 Canonical sort key 上执行游标和限制。
-- 每次预览复验 SQLite version、manifest SHA、`COMPLETE`、文件集合、逐文件 SHA、schema
-  与全部版本凭证；任何漂移均不可查询。
-- DifferenceReport 摘要、行详情及 Override 展示统一经过 verified loader，逐项比较报告
-  ID、双方 source/batch/version/content/quality、样本 SHA、阈值版本、汇总、创建时间和
-  报告 SHA；双方版本必须为 PUBLISHED、QualityRun 必须为 PASSED 且凭证一致。
-- Override 明确区分无 application、FAILED attempt 与 active application；active binding
-  必须与 attempt 的 child/fingerprint/status 一致，已发布子版本还要通过 Warehouse 复验并
-  精确匹配 manifest `source_override` provenance、report SHA 和 contribution scope SHA。
-  状态关系为双向合同：`PENDING/REJECTED` 无 application/attempt；`APPROVED` 仅允许无申请、
-  历史 `FAILED`、active `CLAIMED` 或 active `PUBLISHED` 恢复窗口；`APPLIED` 仅允许同一
-  active `APPLIED` binding/attempt/child。
-- 来源页同时展示权威 matrix role/status 与最新持久 assessment；没有 assessment 时
-  `evidence_kind=null`，SYNTHETIC 证据不能成为 assessment 的生产可用结论，也不能自动切源。
-- 失败响应不返回绝对路径、provider payload、请求清单、机密、异常栈、SQL 或数据库细节。
-- 总览 `failures` 是批次、版本、质量与 `data.eod.v1` Job 中 `FAILED` 状态的 SQL 聚合总数，
-  与统一失败列表范围完全一致，不具有截断语义。
+主键：`(symbol, trade_date)`
 
-本文件固化 Stage 1 六类 Canonical 数据集的可执行合同。权威来源是 `src/quantking/data/schemas.py`（框架无关描述符）和 `src/quantking/data/adapters/canonical_schema.py`（PyArrow 映射与验证）。文档不得替代 schema 与契约测试。
-
-## 通用规则
-
-- Canonical 证券代码使用 `000001.SZ`、`600000.SH`、`430047.BJ` 形式（6 位数字 + `.` + `SZ`/`SH`/`BJ`）。
-- `volume` 标准单位为股（share），`amount` 标准单位为人民币元（cny_yuan）。
-- 不允许 `NaN` 或无穷；缺失值使用显式 `null`。
-- 正常交易行的价格必须为正，数量和金额不得为负。
-- 停牌和合法无数据必须由 `trading_status` 或明确缺口记录解释。
-- 对上市有效期内的开市日，必须有行情、明确交易状态或缺口记录之一；不允许用空表冒充成功。
-- 输出必须按合同排序且主键唯一。
-- schema 不得包含供应商专用字段名（如 `symbol`、`tradeStatus`、`qtq` 等）。
-- 所有时间戳使用 UTC；交易日使用 `TradingDate`（交易所本地日期，非时间戳）。
-- schema 版本随每个数据集描述符固定（如 `daily_bar_unadjusted.v1`）。
-
-## 1. security_master（证券主数据）
-
-| 字段 | 类型 | 单位 | 可空 | 主键 | 说明 |
-|---|---|---|---|---|---|
-| code | string | - | 否 | 是 | Canonical 代码 |
-| exchange | string | - | 否 | 否 | 交易所 SZ/SH/BJ |
-| name | string | - | 否 | 否 | 证券名称 |
-| board | string | - | 否 | 否 | 板块：MAIN/STAR/GEM/BSE 等 |
-| listing_date | date32 | - | 否 | 否 | 上市日期 |
-| delisting_date | date32 | - | 是 | 否 | 退市日期；在市为 null |
-| effective_from | date32 | - | 否 | 是 | 本记录生效起始日（point-in-time） |
-| effective_to | date32 | - | 是 | 否 | 生效截止日；当前记录为 null |
-| listing_status | string | - | 否 | 否 | LISTED/SUSPENDED/DELISTED 等 |
-
-- 主键：`(code, effective_from)`
-- 排序键：`(code, effective_from)`
-- schema 版本：`security_master.v1`
-- 必须保留历史状态，不只保存当前证券列表。
-
-## 2. exchange_calendar（交易日历）
-
-| 字段 | 类型 | 单位 | 可空 | 主键 | 说明 |
-|---|---|---|---|---|---|
-| exchange | string | - | 否 | 是 | 交易所 SZ/SH/BJ |
-| trade_date | date32 | - | 否 | 是 | 日历日期 |
-| is_open | bool | - | 否 | 否 | 当日是否开市 |
-
-- 主键：`(exchange, trade_date)`
-- 排序键：`(exchange, trade_date)`
-- schema 版本：`exchange_calendar.v1`
-
-## 3. daily_bar_unadjusted（未复权日线）
-
-| 字段 | 类型 | 单位 | 可空 | 主键 | 说明 |
-|---|---|---|---|---|---|
-| code | string | - | 否 | 是 | Canonical 代码 |
-| trade_date | date32 | - | 否 | 是 | 交易日 |
-| open | float64 | cny_yuan | 否 | 否 | 开盘价（未复权，必须为正） |
-| high | float64 | cny_yuan | 否 | 否 | 最高价（必须为正） |
-| low | float64 | cny_yuan | 否 | 否 | 最低价（必须为正） |
-| close | float64 | cny_yuan | 否 | 否 | 收盘价（必须为正） |
-| pre_close | float64 | cny_yuan | 否 | 否 | 前收盘价（必须为正） |
-| volume | int64 | share | 否 | 否 | 成交量（股，不得为负） |
-| amount | float64 | cny_yuan | 否 | 否 | 成交额（元，不得为负） |
-
-- 主键：`(code, trade_date)`
-- 排序键：`(code, trade_date)`
-- schema 版本：`daily_bar_unadjusted.v1`
-- 未复权 OHLCV 永久保存；复权序列是派生数据，不得覆盖原值。
-
-## 4. adjustment_factor（复权信息）
-
-| 字段 | 类型 | 单位 | 可空 | 主键 | 说明 |
-|---|---|---|---|---|---|
-| code | string | - | 否 | 是 | Canonical 代码 |
-| trade_date | date32 | - | 否 | 是 | 交易日 |
-| price_multiplier | float64 | - | 否 | 否 | 价格复权因子（必须为正） |
-| volume_multiplier | float64 | - | 否 | 否 | 成交量复权因子（必须为正） |
-| normalization_date | date32 | - | 否 | 否 | 复权基准日 |
-| algorithm_version | string | - | 否 | 否 | 复权算法版本标识（非供应商名） |
-
-- 主键：`(code, trade_date)`
-- 排序键：`(code, trade_date)`
-- schema 版本：`adjustment_factor.v1`
-- 公式：`p_adj = p_raw * price_multiplier`；`v_adj = v_raw * volume_multiplier`。
-- 基准日语义：`normalization_date` 是其未复权价格作为复权参考的基准日；因子相对该日前后应用。
-- **Stage 1 不生成或保存覆盖原值的复权 OHLCV。** 复权序列是 Stage 2 的派生视图。
-
-## 5. trading_status（交易状态）
-
-| 字段 | 类型 | 单位 | 可空 | 主键 | 说明 |
-|---|---|---|---|---|---|
-| code | string | - | 否 | 是 | Canonical 代码 |
-| trade_date | date32 | - | 否 | 是 | 交易日 |
-| is_trading | bool | - | 否 | 否 | 当日是否交易 |
-| is_suspended | bool | - | 否 | 否 | 是否停牌 |
-| is_st | bool | - | 否 | 否 | 是否 ST |
-| is_star_st | bool | - | 否 | 否 | 是否 *ST |
-| is_delisting_period | bool | - | 否 | 否 | 是否退市整理期 |
-| limit_up_price | float64 | cny_yuan | 是 | 否 | 涨停价；不适用时为 null |
-| limit_down_price | float64 | cny_yuan | 是 | 否 | 跌停价；不适用时为 null |
-| status_reason | string | - | 是 | 否 | 状态原因；可空 |
-
-- 主键：`(code, trade_date)`
-- 排序键：`(code, trade_date)`
-- schema 版本：`trading_status.v1`
-- 涨跌停价和状态原因按合同允许为空。
-
-## 6. benchmark_index_daily（基准指数日线）
-
-| 字段 | 类型 | 单位 | 可空 | 主键 | 说明 |
-|---|---|---|---|---|---|
-| code | string | - | 否 | 是 | 指数 Canonical 代码 |
-| trade_date | date32 | - | 否 | 是 | 交易日 |
-| open | float64 | - | 否 | 否 | 指数开盘（必须为正） |
-| high | float64 | - | 否 | 否 | 指数最高（必须为正） |
-| low | float64 | - | 否 | 否 | 指数最低（必须为正） |
-| close | float64 | - | 否 | 否 | 指数收盘（必须为正） |
-| pre_close | float64 | - | 否 | 否 | 指数前收盘（必须为正） |
-| volume | int64 | share | 是 | 否 | 成交量；部分指数无成交量 |
-| amount | float64 | cny_yuan | 是 | 否 | 成交额；部分指数无成交额 |
-
-- 主键：`(code, trade_date)`
-- 排序键：`(code, trade_date)`
-- schema 版本：`benchmark_index_daily.v1`
-- 指数行情不等于历史指数成分（成分在 Stage 7）。
-- `volume`/`amount` 可空：部分指数不提供成交量/成交额。
-
-## 固定边界样本
-
-PyArrow 验证器对以下样本的接受/拒绝行为由 `tests/data/adapters/test_canonical_schema.py` 固化：
-
-| 样本 | 预期 |
+| 字段 | 语义 |
 |---|---|
-| 正常交易行 | 接受 |
-| 停牌行（is_trading=False, is_suspended=True, 涨跌停为 null） | 接受 |
-| ST 行 | 接受 |
-| *ST 行 | 接受 |
-| 上市首日附近 | 接受 |
-| 退市阶段 | 接受 |
-| 复权事件 | 接受 |
-| 合法空结果（零行表、schema 匹配、携带显式合法分类和非空原因） | 接受 |
-| 意外空表或未携带合法分类/原因 | 拒绝，并建模为 `UNEXPECTED_EMPTY` |
-| 网络失败、权限失败、解析失败 | 分别建模，禁止伪装成空表成功 |
-| 非法空结果（缺列/类型错） | 拒绝 |
-| Arrow 字段类型、字段顺序或 nullability 不精确匹配 | 拒绝 |
-| 未按合同 `sort_key` 排序 | 拒绝 |
-| `high`/`low` 与 OHLC 关系冲突 | 拒绝 |
-| `exchange` 与代码后缀不一致 | 拒绝 |
-| 交易、停牌、ST/*ST 或涨跌停状态互相矛盾 | 拒绝 |
-| 重复主键 | 拒绝 |
-| NaN / 无穷 | 拒绝 |
-| 错误代码（非 `000001.SZ` 形式） | 拒绝 |
-| 负成交量 / 负金额 | 拒绝 |
-| 零或负价格（交易行） | 拒绝 |
+| `symbol` | 规范证券代码 |
+| `trade_date` | 交易日 |
+| `open/high/low/close` | 未复权价格 |
+| `volume` | 成交量；单位由 K1 实测确认后冻结 |
+| `amount` | 成交额；单位由 K1 实测确认后冻结 |
+| `provider` | 固定为 `AKSHARE` |
+| `upstream` | `EASTMONEY`、`TENCENT` 或 `SINA` |
+| `endpoint` | 实际 AKShare 函数名 |
+| `library_version` | AKShare 锁定版本 |
+| `fetched_at` | 采集时间 |
+| `batch_id` | 原始批次 |
 
-## 框架无关性
+最终 resolved 行还必须包含：
 
-- `src/quantking/data/schemas.py` 不导入 pyarrow、pandas、sqlalchemy 或任何供应商 SDK。
-- PyArrow 映射只出现在 `src/quantking/data/adapters/canonical_schema.py`。
-- 数据领域对象（`src/quantking/data/models.py`）不导入 sqlalchemy 或 alembic。
-- ORM 行只位于 `src/quantking/data/adapters/persistence/`，不作为 API 或领域接口。
+- `selected_upstream`；
+- `compared_upstreams`；
+- `resolution_rule_version`；
+- `resolution_reason`；
+- 对应 DifferenceReport 或比较摘要标识。
 
-## S1-03 XTQuant 只读能力矩阵
+## AKShare endpoint 合同
 
-S1-03 的生产适配器只允许延迟加载明确配置目录中的 `xtquant.xtdata`，不加载交易、账户或
-下单模块。以下依据仅来自本机自然可访问的 XTQuant 公共 Python 源码/签名的只读核对，
-没有导入 SDK、连接 QMT、访问网络或读取真实行情。真实 XTQuant 样本验证仍须逐项授权；
-合成测试不构成真实 XTQuant 能力证明。
+| upstream | endpoint | 首期参数 |
+|---|---|---|
+| EASTMONEY | `stock_zh_a_hist` | 日线、未复权、显式起止日期 |
+| TENCENT | `stock_zh_a_hist_tx` | 日线、未复权、显式起止日期 |
+| SINA | `stock_zh_a_daily` | 日线、未复权、显式起止日期 |
 
-| Canonical 数据集 | 只读公共接口 | 供应商边界所需字段 | 字段/单位依据与确定性推导 | 当前能力与缺口 |
-|---|---|---|---|---|
-| `security_master` | `get_instrument_detail_list` | 代码、交易所、名称、板块、上市/退市日、有效区间、上市状态 | 公共源码只描述当前证券详情；Canonical 需要 point-in-time 有效区间 | 不可用：当前列表不能伪装为历史 point-in-time 主数据 |
-| `exchange_calendar` | `get_trading_dates` | 市场、显式起止日、开市日毫秒时间戳 | 公共源码描述起止边界和开市日；闭市日可在显式区间内由开市日补集确定性推导 | 可用：仅此能力在当前证据下启用 |
-| `daily_bar_unadjusted` | `get_market_data_ex` | 日期、OHLC、昨收、成交量、成交额 | 公共源码列出部分行情字段，但 `pre_close` 和股/手、人民币元等单位语义未验证 | 不可用：不得猜测单位或把其他复权口径冒充未复权 |
-| `adjustment_factor` | `get_divid_factors` | 事件日、价量乘数、基准日、算法版本 | 公共源码未证明返回列、公式、基准日与算法语义 | 不可用：不得伪造因子公式或基准 |
-| `trading_status` | `get_instrument_detail` | 历史官方停牌、ST、*ST、退市整理期及涨跌停价 | 公共源码只描述当前 `IsTrading`/`InstrumentStatus`；没有历史交易状态合同 | 不可用：不得由零成交量或当前状态推断历史官方状态 |
-| `benchmark_index_daily` | `get_market_data_ex` | 日期、OHLC、昨收及可空成交量/成交额 | 公共源码没有证明指数昨收及成交量/成交额的单位和可空语义 | 不可用：单位语义未验证时不得补零或沿用股票口径 |
+证券代码格式转换属于适配器内部。上游返回列名、类型和量额单位不得直接泄漏到领域层，也不得在真实探针前凭猜测固定。
 
-能力不可用、字段缺失或语义未验证时，对外返回稳定、脱敏的
-`CAPABILITY_UNAVAILABLE`/`RESPONSE_CONTRACT`，并分别映射为现有
-`BatchFailureKind.INTERNAL`/`BatchFailureKind.PARSE`；
-不得以常量、当前状态或无关字段构造历史值。
+## Raw manifest
 
-## S1-03 合成供应商响应合同
+每个 upstream 请求独立保存：
 
-Fake Gateway 和离线映射测试使用显式 `SupplierResponseContract`。调用方必须声明代码格式、
-交易所映射、日期格式、成交量单位、成交额单位、未复权、point-in-time、官方交易状态及
-因子公式是否已验证。只有声明与数据集合同完全一致时才进入转换：
+- source_id、provider、upstream、endpoint；
+- AKShare 版本、采集时间；
+- 证券与请求日期范围；
+- 请求参数的规范摘要；
+- row_count、文件 SHA、schema 摘要；
+- `COMPLETE` 或稳定失败分类。
 
-- `SZ000001`、`SH600000`、`BJ430047` 确定性转换为
-  `000001.SZ`、`600000.SH`、`430047.BJ`，并复验交易所与后缀。
-- 供应商日期按显式格式解析为交易所本地 `date32`；批次时间统一使用 UTC。
-- 成交量只接受已证明的“股”或明确的“100 股/手”并转换为股；成交额只接受人民币元。
-- 未复权日线必须显式标记未复权；指数成交量、成交额只按 Canonical nullability 允许为空。
-- 复权公式固定为
-  `p_adj=p_raw*price_multiplier;v_adj=v_raw*volume_multiplier`，并要求基准日和
-  `algorithm_version`。
-- 交易状态必须来自官方状态合同，分别保留交易、停牌、ST、*ST 和退市整理期；不从零成交量推断。
-- 原始记录以规范 JSON 保存到 Raw，Canonical 表不携带供应商专用字段。
-- 结果使用精确 Arrow 字段顺序、类型和 nullability，按 `sort_key` 排序并复验全局主键；
-  重复、矛盾、NaN、无穷、缺字段或错类型一律失败。
+不得把三个 upstream 合并成一个不可区分的 AKShare Raw 文件。
 
-## S1-03 增量、Raw 与批次语义
+## 范围与缺口
 
-`IncrementalFetchPlan` 显式记录 dataset、证券/交易所范围、包含边界的请求起止日、已知覆盖
-区间、调用方给定回看天数、稳定分块、adapter version、请求摘要和新 `batch_id`。中间缺口
-逐段补抓，回看窗口不会从最大日期推断并跳过缺口；核心逻辑不使用“今天”或 `latest`。
-除 `batch_id` 外相同输入得到相同计划摘要，相同参数失败重试必须换新 `batch_id`。
+首个版本允许限定为沪深当前上市证券和明确日期范围。以下范围在补足前不能宣称研究就绪：
 
-编排先短事务写 `RUNNING IngestionBatch`，事务外调用 Gateway，将完整供应商 JSON 响应交给
-现有 `RawBatchPublisher`，复验 `manifest.json`、逐文件 SHA-256 和 `COMPLETE` 后才标准化。
-Raw 发布后标准化失败仍保留完整 Raw；payload 产生前失败则使用同一受管理路径防护写入
-不可覆盖的 `.incomplete/failure.json`。不删除失败目录。
+- 北交所和退市证券覆盖；
+- 复权因子和公司行动；
+- 历史 ST、停牌、上市/退市状态；
+- 基准指数和历史成分；
+- point-in-time 动态股票池。
 
-S1-03-R1 已完成离线/防御性独立主验收。R1 要求每个非空请求分块保存规范
-`xtquant-raw-response.v1` 信封，信封同时绑定：
+## EOD 与发布
 
-- 计划 `request_sha256` 和完整 chunk 序号、dataset、scope、起止日及包含边界；
-- 经验证的供应商字段/单位合同；
-- 标准化前 records、完整性标记和稳定 partial code；
-- JSON 安全的原始 provider payload。
+Web 和 CLI 只负责创建同一个持久 EOD Job；Worker 执行采集、标准化、比较、质量和发布。
 
-`RawManifestFile.row_count` 必须等于信封内 records 的真实数量。发布并通过统一 Raw verifier
-后，编排器重新读取每个 Raw 文件，按计划顺序重建 `SupplierResponse`，复验 manifest 请求
-参数、chunk 库存、row_count、Raw 与 Gateway records 全部一致，之后才生成 Canonical
-候选。缺失、重复、错序、请求 SHA 漂移、计划外代码/交易所/日期或 Raw/records 漂移均失败。
+- 入队不触发网络。
+- Worker 使用冻结命令和显式数据范围。
+- 质量失败或无两源一致时不发布。
+- 候选完整写入临时目录并验证 manifest/`COMPLETE` 后原子切换。
+- 重复同一输入幂等；发布后故障可通过 checkpoint 恢复。
 
-`FetchChunk` 和 `IncrementalFetchPlan` 的直接构造与每个 Gateway/编排入口都执行同一生成式
-复验；请求参数只允许固定白名单键和值格式。payload 前失败证据只保存 dataset、
-adapter version 和 request SHA，不保存 scope、攻击输入或任意调用参数。
+S1-05 的详细历史合同和证据见 [验收记录](S1-05_ACCEPTANCE.md)。
 
-供应商空响应默认是 `UNEXPECTED_EMPTY`。只有调用方同时提供合法 `EmptyResultInfo` 及证据
-原因时才能得到空候选；空交易日历响应不得自动扩展成区间全部闭市。Gateway 返回错误类型、
-Raw/请求构造失败和标准化异常在 `RUNNING` 已持久化后都必须写入稳定终态，不得遗留
-`RUNNING`。显式 SDK loader 加载失败或检测到交易模块时必须恢复进入 loader 前的模块状态。
+## 数据中心读合同
 
-批次终态如下：
+- 只接受显式 `PUBLISHED version_id`，拒绝 `latest`、任意路径和 SQL。
+- 预览字段和过滤条件使用 allowlist，分页使用绑定查询指纹的 keyset cursor。
+- DifferenceReport、批次、质量和版本血缘在展示前复验。
+- API 不返回正式绝对路径、供应商原始 payload、异常栈或机密。
 
-- `SUCCEEDED`：Raw 凭证完整且完整 Canonical 候选表通过 S1-01 验证；合法空结果还必须携带
-  `NO_TRADING_SESSION`、`OUTSIDE_LISTING_RANGE` 或 `EMPTY_REQUEST_UNIVERSE` 之一及原因。
-- `PARTIAL`：供应商明确部分响应；保存已收到 Raw 和 `PARTIAL_SOURCE`，不返回完整候选。
-  多分块抓取中后续分块失败时，同样保存此前响应和脱敏错误代码后进入 `PARTIAL`。
-- `FAILED`：网络、权限、请求、解析、未验证能力、意外空、Raw 或内部失败；保存脱敏失败信息。
+S1-06 的详细历史合同和证据见 [验收记录](S1-06_ACCEPTANCE.md)。
 
-稳定源错误映射为 `NETWORK`、`PERMISSION`、`PARSE`、`UNEXPECTED_EMPTY`、
-`PARTIAL_SOURCE` 或 `INTERNAL`，S1-03 不产生 `QUALITY`。终态 `batch_id` 不再调用供应商；
-失败或部分响应不得变成成功，相同参数只允许使用新 `batch_id` 重试。S1-03 不调用
-`CanonicalPublishCoordinator`，不创建或推进任何 `PUBLISHED DatasetVersion`。
+## 历史 S1-03
 
-## S1-05 EOD 请求、执行与证据合同
-
-- 固定任务类型是 `data.eod.v1`；请求只接受明确起止交易日期、六类 allowlist 中非空且
-  无重复的数据集，以及不可省略的 `PUBLISH_AFTER_QUALITY`。来源固定为 `XTQUANT`。
-- `base_versions` 必须显式为空对象（根版本），或按请求数据集完整提供
-  `dataset=data_version:...` 精确映射；禁止 `latest` 和任何隐式当前版本选择。入队 resolver
-  复验 PUBLISHED/Warehouse/PASSED quality 后才冻结完整 base 凭证与真实 coverage。
-- 应用服务将规范 request JSON、request SHA、冻结的 adapter/code/rule/schema 版本、
-  scope、lookback、chunk 参数、显式 reference version 及可选 base version 凭证分别写入
-  `JobRun` manifests。Worker 只能从持久 manifests 重建并复验，不使用进程内请求对象。
-- base version 冻结 `version_id/dataset/schema_version/content_sha256/manifest_sha256/coverage`；
-  Worker 使用显式 ID 复验 `PUBLISHED` 元数据、Warehouse 和 PASSED quality 后，从完整基表
-  推导 known coverage。调用者不能单独声明 known coverage。
-- `job_type + idempotency_key` 相同且三类 manifests 完全相同才复用原 `job_id`；任一请求、
-  配置或版本凭证变化均返回稳定幂等冲突。失败或中断重试必须使用新 job/key，并产生新
-  batch/version ID。
-- 每个数据集依次执行能力预检、现有 XTQuant ingestion、按 Canonical 主键将本次完整响应
-  按实际 `FetchChunk` 的 scope/date 权威切片从基表移除旧行、加入本次完整响应，再执行真实
-  BUILDING version、全快照 QualityRunner 和 CanonicalPublishCoordinator。未抓取 scope
-  与范围外历史保持不变，新版本直接父版本为 base。
-  只有 ingestion `SUCCEEDED`、quality
-  `PASSED` 且发布目录的 manifest/COMPLETE/content SHA/元数据全部复验一致才记为完成。
-- 全部请求范围已由 base 覆盖时返回 `REUSED_UNCHANGED`，不创建空 batch/version；实际发布
-  新快照返回 `PUBLISHED_NEW`。发布后 checkpoint 绑定 batch/version/quality/content/manifest
-  凭证，故障证据保留已完成结果，严格复验通过的重试不会创建重复版本。
-- 生产能力矩阵仍只有 `exchange_calendar` 可用；其余五类在 Gateway 调用前返回
-  `CAPABILITY_UNAVAILABLE`。Fake Gateway 的六类合成覆盖不改变生产矩阵。
-- 成功证据位于 `artifacts/eod/<job_id>/` 的严格
-  `request.json/result.json/manifest.json/COMPLETE` 文件集；失败证据位于对应
-  `.incomplete` 目录。证据只记录稳定 ID、状态、SHA 和脱敏错误，不记录供应商 payload、
-  token、账号、密码或绝对路径，且终态不可覆盖。success verifier 还复验 request/result
-  精确字段、数据集集合/顺序、ID namespace、状态字段组合及版本、质量、Warehouse 凭证；
-  failure verifier 复验真实规范 UTC、终态、错误码、请求 SHA 和 completed results。
-- Worker 和 verifier 共用同一个严格 frozen-command parser；深层验证还交叉绑定 batch 的
-  dataset/source/adapter/request params 与 request/config/version manifests。成功证据在 Job
-  提交 `SUCCEEDED` 前属于不可变 forensic 证据；若随后故障，原目录保留并另写权威 failure，
-  终态 success verifier 同时要求 Job 状态与 artifact binding。
-- Web、enqueue 和 status runtime 不做恢复。只有显式 Worker 启动可按持久 heartbeat 的明确
-  租约阈值、row_version 和数据库条件更新，将过期 RUNNING 转为 INTERRUPTED；新鲜租约不变。
+S1-03 的 XTQuant 离线合同曾完成主验收，但没有真实行情能力证明。它不再属于目标架构；K1 必须先用 AKShare gateway 替换正式 runtime，再删除 XTQuant 生产代码和专用测试。历史证据保留在
+[S1-03 验收记录](S1-03_ACCEPTANCE.md) 和 Git 历史中。

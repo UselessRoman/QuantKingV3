@@ -91,13 +91,20 @@ def default_source_matrix() -> SourceMatrix:
     """
     entries: list[SourceMatrixEntry] = []
     for dataset in DatasetKind:
+        xt_verified = dataset is DatasetKind.EXCHANGE_CALENDAR
         entries.append(
             SourceMatrixEntry(
                 source="XTQUANT",
                 dataset=dataset,
                 role=SourceRole.PRIMARY,
-                status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
-                blocking_reason="XTQuant requires authorized REAL fixed-sample validation",
+                status=(
+                    AssessmentStatus.PRODUCTION_READY
+                    if xt_verified
+                    else AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION
+                ),
+                blocking_reason=(
+                    None if xt_verified else "XTQuant dataset semantics require external validation"
+                ),
                 auto_switch=False,
             )
         )

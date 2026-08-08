@@ -714,7 +714,6 @@ name = "google-auth"
 version = "2.56.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cryptography" },
     { name = "pyasn1-modules" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/58/66/b4ba60005743e01933e22b4f62313e063f7460458b7d8a358427b4930013/google_auth-2.56.0.tar.gz", hash = "sha256:f90fa030b569a92654b9d690665a073841df33d57487be53db583a9a0867a553", size = 364629, upload-time = "2026-07-13T19:09:57.143Z" }
@@ -2373,7 +2372,6 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.15,<2" },
     { name = "backtrader", specifier = "==1.9.78.123" },
-    { name = "cryptography", specifier = ">=48,<49" },
     { name = "duckdb", specifier = ">=1.2,<2" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "lightgbm", specifier = ">=4.6,<5" },

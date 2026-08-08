@@ -35,7 +35,7 @@ docs/                架构、规范和阶段文档
 
 | 依赖 | 允许位置 |
 |---|---|
-| `xtquant`、BaoStock、AKShare、Tushare | `data/adapters` 或 `trading/adapters` |
+| `akshare` | `data/adapters` |
 | Qlib | `research/adapters` 或 `backtest/adapters` |
 | LightGBM | `research/adapters` |
 | Backtrader | `backtest/adapters` |
@@ -109,7 +109,7 @@ docs/                架构、规范和阶段文档
 - 回测显式接收成本、规则、数据和组合版本。
 - A 股规则按生效日期版本化，不能硬编码一个常量覆盖全部历史。
 - `RebalancePlan` 是意图，`BrokerSnapshot` 是总账，`Fill` 是已确认策略事实。
-- QMT 接口只读；代码库不得出现调用下单/撤单接口的应用用例。
+- 代码库不得集成 QMT/券商 SDK，也不得出现调用下单或撤单接口的应用用例。
 
 ## 11. API 和 Web
 
@@ -132,11 +132,11 @@ docs/                架构、规范和阶段文档
 - 并发写测试：独立进程并发执行任务心跳、进度和关键状态/审计短事务，不得丢失已提交更新或产生未处理锁错误。
 - API/Web 测试：输入、状态、审批、错误和 SSE 降级。
 
-默认测试不得访问网络、QMT、`E:\QuantKingV3Data` 或 `F:\QuantKingV3Backups`。使用 pytest 临时目录和合成数据。
+默认测试不得访问网络、券商客户端、`E:\QuantKingV3Data` 或 `F:\QuantKingV3Backups`。使用 pytest 临时目录和合成数据。
 
 ### 真实环境测试
 
-真实测试使用明确 marker，例如 `real_xtquant`、`real_backup`、`simulation_account`。必须由用户明确运行，并将外部副作用、账号和输出路径显示在命令前。
+真实测试使用明确 marker，例如 `real_akshare`、`real_backup`。必须由用户明确运行，并在命令前显示网络范围、输出路径和副作用；项目不需要券商账号。
 
 ### 固定边界样本
 
@@ -151,7 +151,7 @@ uv lock --check
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy src/quantking
-uv run pytest -m "not real_xtquant and not real_backup and not simulation_account" -q -p no:cacheprovider
+uv run pytest -m "not real_external and not real_akshare and not real_backup" -q -p no:cacheprovider
 git diff --check
 ```
 

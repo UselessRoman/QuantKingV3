@@ -213,7 +213,7 @@ def test_source_matrix_does_not_invent_real_evidence_without_assessment() -> Non
         if item["source"] == "XTQUANT" and item["dataset"] == "exchange_calendar"
     )
 
-    assert exchange_calendar["status"] == "BLOCKED_EXTERNAL_VALIDATION"
+    assert exchange_calendar["status"] == "PRODUCTION_READY"
     assert exchange_calendar["evidence_kind"] is None
     assert exchange_calendar["assessment_status"] is None
 

@@ -8,16 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _VENDOR_DATA = frozenset({"akshare", "baostock", "tushare", "xtquant"})
-_ASSESSMENT_PERSISTENCE_INTERNALS = frozenset(
-    {
-        "_AssessmentPersistenceRecord",
-        "_insert_assessment",
-        "_persist_verified_source_assessment",
-        "_record_receipt",
-        "_record_receipt_is_valid",
-        "assessment_persistence_key",
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,67 +122,6 @@ def check_boundaries(root: Path) -> list[Violation]:
             line = error.lineno if isinstance(error, SyntaxError) and error.lineno else 1
             violations.append(Violation(display, line, "<unparseable>", "valid Python syntax"))
             continue
-
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom):
-                continue
-            if any(
-                alias.name in _ASSESSMENT_PERSISTENCE_INTERNALS for alias in node.names
-            ) and parts != ("data", "adapters", "persistence", "assessment.py"):
-                violations.append(
-                    Violation(
-                        display,
-                        node.lineno,
-                        "assessment persistence internal",
-                        "data/adapters/persistence/assessment.py only",
-                    )
-                )
-
-        assessment_adapter = parts == (
-            "data",
-            "adapters",
-            "persistence",
-            "assessment.py",
-        )
-        for node in ast.walk(tree):
-            direct_dynamic_import = (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "importlib"
-                and node.func.attr == "import_module"
-            )
-            if (
-                direct_dynamic_import
-                and _starts_with(parts, ("data", "validation"))
-                and parts != ("data", "validation", "runtime.py")
-            ):
-                violations.append(
-                    Violation(
-                        display,
-                        node.lineno,
-                        "validation runner dynamic import",
-                        "data/validation/runtime.py only",
-                    )
-                )
-            forbidden_assessment_write = (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "SourceCandidateAssessmentRow"
-            ) or (
-                isinstance(node, ast.Constant)
-                and isinstance(node.value, str)
-                and "INSERT INTO SOURCE_CANDIDATE_ASSESSMENTS" in node.value.upper()
-            )
-            if forbidden_assessment_write and not assessment_adapter:
-                violations.append(
-                    Violation(
-                        display,
-                        node.lineno,
-                        "assessment persistence write",
-                        "data/adapters/persistence/assessment.py only",
-                    )
-                )
 
         for line, module, imports_request in _imports(tree):
             if (

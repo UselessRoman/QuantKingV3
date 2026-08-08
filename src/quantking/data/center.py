@@ -14,7 +14,6 @@ from typing import Any, Protocol, Self, cast
 
 from quantking.common.errors import (
     DatasetVersionNotFoundError,
-    InvalidDataTransitionError,
     InvalidIdError,
     InvalidTimeError,
     OverrideNotApplicableError,
@@ -657,7 +656,7 @@ class DataCenterQueryService:
                         source=item.source,
                         dataset=item.dataset,
                     )
-                except (InvalidDataTransitionError, InvalidIdError, ValueError) as error:
+                except (InvalidIdError, ValueError) as error:
                     raise DataCenterReadIntegrityError(
                         "source assessment evidence is invalid"
                     ) from error

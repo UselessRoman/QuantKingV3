@@ -1,9 +1,4 @@
-# ruff: noqa: RUF001
-"""Status-wording and link checks for Stage 1 documentation.
-
-Fullwidth CJK punctuation in the checked status phrases is intentional and
-matches the canonical Chinese wording used across project documents.
-"""
+"""The simplified Stage 1 route must stay explicit and internally consistent."""
 
 from __future__ import annotations
 
@@ -11,360 +6,101 @@ from pathlib import Path
 
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_STAGE1_DIR = _REPO_ROOT / "docs" / "stage1"
+_ROOT = Path(__file__).resolve().parents[2]
+_STAGE1 = _ROOT / "docs" / "stage1"
 
-_REQUIRED_STAGE1_DOCS = (
-    "README.md",
-    "TASKS.md",
-    "ACCEPTANCE.md",
-    "DATA_CONTRACTS.md",
-    "S1-02_ACCEPTANCE.md",
-    "S1-05_ACCEPTANCE.md",
-    "S1-06_ACCEPTANCE.md",
-    "S1-07A_ACCEPTANCE.md",
-    "S1-07B_ACCEPTANCE.md",
-    "S1-07C1B_IMPLEMENTATION.md",
-    "S1-07C1B-R1_IMPLEMENTATION.md",
-    "S1-07C1B-R1_ACCEPTANCE.md",
-    "S1-07C1C0-R3_ACCEPTANCE.md",
-    "S1-07C1C1-P0_ACCEPTANCE.md",
-    "S1-07C1C1-P0_IMPLEMENTATION.md",
-    "S1-07C1C1_RUNBOOK.md",
-    "HANDOFF.md",
-    "STAGE1_COMPLETION_HANDOFF.md",
+
+def _read(relative: str) -> str:
+    return (_ROOT / relative).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "README.md",
+        "TASKS.md",
+        "ACCEPTANCE.md",
+        "HANDOFF.md",
+        "STAGE1_COMPLETION_HANDOFF.md",
+        "SOURCE_MATRIX.md",
+        "S1-07K1_TASK.md",
+    ),
 )
+def test_simplified_stage1_documents_exist(name: str) -> None:
+    assert (_STAGE1 / name).is_file()
 
-# The canonical status phrase required across updated documents.
-_STATUS_PHRASES = (
-    "Stage 0 已完成；Stage 1 已获实施授权并进行中，但尚未完成",
-    "Stage 0 已完成；Stage 1 已获实施授权并进行中，但尚未完成。",
+
+def test_s1_01_through_s1_06_evidence_is_preserved() -> None:
+    tasks = _read("docs/stage1/TASKS.md")
+    for task in ("S1-01", "S1-02", "S1-03", "S1-04", "S1-05", "S1-06"):
+        assert task in tasks
+        assert (_STAGE1 / f"{task}_ACCEPTANCE.md").is_file()
+    assert "Stage 1 尚未完成" in _read("docs/stage1/ACCEPTANCE.md")
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "docs/stage1/README.md",
+        "docs/stage1/TASKS.md",
+        "docs/stage1/STAGE1_COMPLETION_HANDOFF.md",
+        "docs/stage1/SOURCE_MATRIX.md",
+    ),
 )
-_S1_07A_STATUS = (
-    "S1-07A 已于 2026-07-29 在提交 "
-    "`37512be531e15bbd5a698e6a227b0753781ef5e6` 完成主验收。"
-    "该验收仅覆盖离线验证框架及其信任边界；24 个 source×dataset 单元仍为 "
-    "BLOCKED_EXTERNAL_VALIDATION，真实运行数为 0。"
-)
-_S1_07B_STATUS = (
-    "S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` "
-    "完成主验收：权威核心样本 v4、首个 AUTHORITY_APPROVED "
-    "case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版； "
-    "17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。"
-)
-_S1_07C1B_R1_STATUS = "S1-07C1B-R1 已完成独立主验收（纯离线运行就绪化）；真实运行数为 0。"
-_S1_07C1C0_R3_STATUS = (
-    "S1-07C1C0-R3 已完成独立主验收（纯离线 XTData ST observation 运行就绪化）；真实运行数为 0。"
-)
-_S1_07C1C1_P0_STATUS = (
-    "S1-07C1C1-P0 已完成独立主验收（纯离线正式 file-only 操作入口与逐次授权交接）；"
-    "C1C1 真实运行数为 0，仍未授权、未开始。"
-)
+def test_akshare_three_upstream_route_is_consistent(relative: str) -> None:
+    text = _read(relative)
+    for value in ("AKShare", "东财", "腾讯", "新浪"):
+        assert value in text
 
 
-def _read(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+def test_later_stage_has_not_started() -> None:
+    for relative in ("docs/stage1/README.md", "docs/stage1/TASKS.md"):
+        assert "Stage 2" in _read(relative)
 
 
-class TestStage1DocsExist:
-    @pytest.mark.parametrize("name", _REQUIRED_STAGE1_DOCS)
-    def test_required_stage1_doc_exists(self, name: str) -> None:
-        assert (_STAGE1_DIR / name).is_file(), f"missing required Stage 1 doc: {name}"
+def test_source_matrix_keeps_provider_and_upstream_separate() -> None:
+    text = _read("docs/stage1/SOURCE_MATRIX.md")
+    for source_id in ("AKSHARE_EASTMONEY", "AKSHARE_TENCENT", "AKSHARE_SINA"):
+        assert source_id in text
+    for endpoint in ("stock_zh_a_hist", "stock_zh_a_hist_tx", "stock_zh_a_daily"):
+        assert endpoint in text
+    assert "最少两源一致" in text
 
-    def test_stage1_readme_states_authorized_in_progress(self) -> None:
-        text = _read(_STAGE1_DIR / "README.md")
-        assert any(phrase in text for phrase in _STATUS_PHRASES), (
-            "Stage 1 README must state the canonical authorized-in-progress status"
+
+def test_next_task_is_bounded_and_rejects_old_evidence_chain() -> None:
+    text = _read("docs/stage1/S1-07K1_TASK.md")
+    for phrase in (
+        "600000.SH",
+        "000001.SZ",
+        "最近 60 个自然日",
+        "每个 upstream、每只证券最多一次调用",
+        "不写 E:\\QuantKingV3Data",
+        "不开始 K2、S1-08 或 Stage 2",
+        "不恢复任何旧 S1-07",
+    ):
+        assert phrase in text
+    for retired in ("Ed25519", "nonce", "claim", "seal"):
+        assert retired in text
+
+
+def test_retired_s1_07_current_documents_and_modules_are_absent() -> None:
+    assert not list((_ROOT / "src" / "quantking" / "data" / "validation").glob("*.py"))
+    assert not list((_ROOT / "tests" / "data" / "validation").glob("*.py"))
+    assert not (_STAGE1 / "S1-07C1C1_RUNBOOK.md").exists()
+    handoff = _read("docs/stage1/HANDOFF.md")
+    assert "44d268b3db8bd9c690225f62e60fa12bf56a289d" in handoff
+
+
+def test_stage1_does_not_claim_real_akshare_or_completion() -> None:
+    combined = "\n".join(
+        _read(relative)
+        for relative in (
+            "docs/stage1/README.md",
+            "docs/stage1/TASKS.md",
+            "docs/stage1/ACCEPTANCE.md",
+            "docs/stage1/HANDOFF.md",
         )
-
-    @pytest.mark.parametrize(
-        "path",
-        (
-            _STAGE1_DIR / "README.md",
-            _STAGE1_DIR / "TASKS.md",
-            _STAGE1_DIR / "ACCEPTANCE.md",
-            _STAGE1_DIR / "DATA_CONTRACTS.md",
-            _REPO_ROOT / "docs" / "ARCHITECTURE.md",
-        ),
     )
-    def test_s1_07a_status_is_canonical(self, path: Path) -> None:
-        normalized = " ".join(_read(path).split())
-        assert _S1_07A_STATUS in normalized
-        assert _S1_07B_STATUS in normalized
-        compact = "".join(normalized.split())
-        assert "".join(_S1_07C1C1_P0_STATUS.split()) in compact
-        assert "C2、S1-07D、S1-08和Stage2仍未开始、未获授权。" in compact
-
-    def test_stage1_readme_does_not_claim_accepted(self) -> None:
-        text = _read(_STAGE1_DIR / "README.md")
-        # Must not claim Stage 1 itself is accepted; negative phrasing is allowed.
-        assert "Stage 1 已验收" not in text, "Stage 1 must not be described as accepted"
-        assert "Stage 1 已完成验收" not in text
-        assert "已获实施授权" in text
-
-    def test_s1_07c1b_r1_status_records_failed_initial_acceptance_and_main_acceptance(
-        self,
-    ) -> None:
-        initial = _read(_STAGE1_DIR / "S1-07C1B_IMPLEMENTATION.md")
-        repair = _read(_STAGE1_DIR / "S1-07C1B-R1_IMPLEMENTATION.md")
-        acceptance = _read(_STAGE1_DIR / "S1-07C1B-R1_ACCEPTANCE.md")
-        assert "C1B 初版独立主验收未通过" in initial
-        assert "C1B 初版独立主验收未通过" in repair
-        assert "C1B 初版独立主验收未通过" in acceptance
-        assert _S1_07C1B_R1_STATUS in repair
-        assert _S1_07C1B_R1_STATUS in acceptance
-        assert "C1B 主验收通过" not in initial
-        assert "XTQuant 真实数据能力" in acceptance
-        assert "真实 invocation、C2、S1-07D、S1-08 或 Stage 2" in acceptance
-
-    def test_s1_07c1c1_p0_status_and_runbook_are_offline_only(self) -> None:
-        implementation = _read(_STAGE1_DIR / "S1-07C1C1-P0_IMPLEMENTATION.md")
-        runbook = _read(_STAGE1_DIR / "S1-07C1C1_RUNBOOK.md")
-        acceptance = _read(_STAGE1_DIR / "S1-07C1C1-P0_ACCEPTANCE.md")
-        assert _S1_07C1C1_P0_STATUS in implementation
-        assert _S1_07C1C1_P0_STATUS in acceptance
-        assert "5054d2354b77dd6cf36cf3d62b8fbfef0113e83d" in acceptance
-        assert "17354fa160a8f97e4721a2c620709ec12b43e401" in acceptance
-        assert "不证明本机" in acceptance
-        assert "不是用户授权本身" in acceptance
-        assert "C1C0_ACKNOWLEDGEMENT_REQUIRED" in acceptance
-        assert "C1C0_CLI_ARGUMENT_INVALID" in acceptance
-        for command in ("prepare", "issue", "review", "execute"):
-            assert command in runbook
-        assert "I_ACKNOWLEDGE_C1C0_R3_AUTHORIZED_XTDATA_ST_OBSERVATION" in runbook
-        assert 'xtdata.get_his_st_data("603377.SH")' in runbook
-        assert "禁止 xttrader" in runbook
-
-    @pytest.mark.parametrize(
-        "path",
-        (
-            _STAGE1_DIR / "README.md",
-            _STAGE1_DIR / "TASKS.md",
-            _STAGE1_DIR / "ACCEPTANCE.md",
-            _STAGE1_DIR / "DATA_CONTRACTS.md",
-            _STAGE1_DIR / "STAGE1_COMPLETION_HANDOFF.md",
-            _REPO_ROOT / "docs" / "ROADMAP.md",
-            _REPO_ROOT / "docs" / "ARCHITECTURE.md",
-        ),
-    )
-    def test_s1_07c1b_r1_main_acceptance_status_is_synced(self, path: Path) -> None:
-        assert "".join(_S1_07C1B_R1_STATUS.split()) in "".join(_read(path).split())
-
-    @pytest.mark.parametrize(
-        "path",
-        (
-            _STAGE1_DIR / "README.md",
-            _STAGE1_DIR / "TASKS.md",
-            _STAGE1_DIR / "ACCEPTANCE.md",
-            _STAGE1_DIR / "DATA_CONTRACTS.md",
-            _STAGE1_DIR / "HANDOFF.md",
-            _STAGE1_DIR / "STAGE1_COMPLETION_HANDOFF.md",
-            _REPO_ROOT / "docs" / "ROADMAP.md",
-            _REPO_ROOT / "docs" / "ARCHITECTURE.md",
-        ),
-    )
-    def test_s1_07c1c0_r3_main_acceptance_status_is_synced(self, path: Path) -> None:
-        text = _read(path)
-        normalized = "".join(text.split())
-        assert "".join(_S1_07C1C0_R3_STATUS.split()) in normalized
-        assert "xtdata.get_his_st_data" in text
-        assert "BLOCKED/CONTRACT_INCOMPLETE" in text
-        assert "".join(_S1_07C1C1_P0_STATUS.split()) in "".join(text.split())
-        assert "S1-07D" in text and "S1-08" in text
-
-    def test_s1_07c1c0_r3_acceptance_evidence_preserves_offline_boundary(self) -> None:
-        text = _read(_STAGE1_DIR / "S1-07C1C0-R3_ACCEPTANCE.md")
-        for commit in (
-            "63c901721923a1b758dcb426f41ec436c593bc0c",
-            "b0104634af0a55f12fbc03088671a8a9b822300b",
-            "0dd7c6c08aebac9152d3e06049434b759cbb1614",
-            "85d5f44a0564a487540ba072f6ba75c4dce8ee34",
-        ):
-            assert commit in text
-        assert "80 passed" in text
-        assert "1363 passed, 2 skipped, 3 deselected, 4 warnings" in text
-        assert "20260729_0012" in text
-        assert "Native XtData 官方页面尚未证明" in text
-        assert "真实运行数为 0" in text
-
-    def test_stage1_completion_handoff_preserves_pending_and_authorization_boundaries(self) -> None:
-        text = _read(_STAGE1_DIR / "STAGE1_COMPLETION_HANDOFF.md")
-        assert "Stage 1 尚未完成" in text
-        assert "REAL 稳定运行数为 0" in text
-        assert "S1-07C" in text and "未开始、未授权" in text
-        assert "S1-07D" in text and "未开始、未授权" in text
-        assert "S1-08" in text and "未开始、未授权" in text
-        assert "不得自行宣称" in text
-        assert "H0：S1-03-R1 独立主验收复核" in text
-
-    @pytest.mark.parametrize(
-        "path",
-        (
-            _STAGE1_DIR / "README.md",
-            _STAGE1_DIR / "TASKS.md",
-            _STAGE1_DIR / "ACCEPTANCE.md",
-            _STAGE1_DIR / "DATA_CONTRACTS.md",
-            _REPO_ROOT / "docs" / "ARCHITECTURE.md",
-            _REPO_ROOT / "docs" / "ROADMAP.md",
-        ),
-    )
-    def test_s1_05_and_s1_06_are_main_accepted(self, path: Path) -> None:
-        text = _read(path)
-        assert "e580d6963e01b1301dc26f29ed57a0b5b4770a0f" in text
-        assert "S1-05" in text and "完成主验收" in text
-        assert "413805074b3a82c2d2a090d2b73c854a238e2e19" in text
-        assert "S1-06" in text and "完成主验收" in text
-
-    def test_s1_05_acceptance_evidence_is_complete(self) -> None:
-        evidence = _read(_STAGE1_DIR / "S1-05_ACCEPTANCE.md")
-        assert "e580d6963e01b1301dc26f29ed57a0b5b4770a0f" in evidence
-        assert "918 passed, 2 skipped, 3 deselected" in evidence
-        assert "20260722_0009" in evidence
-        assert "Stage 1 尚未完成" in evidence
-
-    def test_s1_06_acceptance_evidence_is_complete(self) -> None:
-        evidence = _read(_STAGE1_DIR / "S1-06_ACCEPTANCE.md")
-        assert "413805074b3a82c2d2a090d2b73c854a238e2e19" in evidence
-        assert "958 passed, 2 skipped, 3 deselected" in evidence
-        assert "OVERRIDE_ATTACK=REJECTED" in evidence
-        assert "SUMMARY_FAILURES=150" in evidence
-        assert "20260722_0009" in evidence
-        assert "S1-07～S1-08 未开始、未获授权" in evidence
-        assert "Stage 1 尚未完成" in evidence
-
-    def test_stage1_tasks_lists_s1_01_through_s1_08(self) -> None:
-        text = _read(_STAGE1_DIR / "TASKS.md")
-        for code in ("S1-01", "S1-02", "S1-03", "S1-04", "S1-05", "S1-06", "S1-07", "S1-08"):
-            assert code in text, f"{code} must be listed in TASKS.md"
-
-    def test_s1_01_is_main_accepted(self) -> None:
-        for name in ("README.md", "TASKS.md", "ACCEPTANCE.md"):
-            text = _read(_STAGE1_DIR / name)
-            assert "7e4e5b38b7fc91edaf8727ed55b1e26435373aea" in text, (
-                f"{name} must record the S1-01 main-acceptance commit"
-            )
-            assert "S1-01 主验收" in text, f"{name} must reference the S1-01 main acceptance status"
-        # S1-01 acceptance evidence file must exist and point at the main-acceptance commit.
-        evidence = _read(_STAGE1_DIR / "S1-01_ACCEPTANCE.md")
-        assert "7e4e5b38b7fc91edaf8727ed55b1e26435373aea" in evidence
-        assert "S1-01 通过" not in evidence and "Stage 1 完成" not in evidence
-        tasks = _read(_STAGE1_DIR / "TASKS.md")
-        # S1-02 main acceptance is independently recorded.
-        assert "S1-02 主验收证据" in tasks
-
-    def test_s1_02_is_main_accepted(self) -> None:
-        for name in ("README.md", "TASKS.md", "ACCEPTANCE.md"):
-            text = _read(_STAGE1_DIR / name)
-            assert "79f9fa3e682e212cf74e7886a04c6fb52158f302" in text
-            assert "S1-02 主验收证据" in text
-            assert "d60559601efd61de15b41ffa86b4f2f730a69d5e" in text
-            assert "S1-07B" in text and "完成主验收" in text
-            assert "".join(_S1_07C1C1_P0_STATUS.split()) in "".join(text.split())
-        evidence = _read(_STAGE1_DIR / "S1-02_ACCEPTANCE.md")
-        assert "S1-02（Warehouse、原子发布与显式版本查询）完成主验收" in evidence
-
-    def test_main_acceptance_task_order_is_restored(self) -> None:
-        text = _read(_STAGE1_DIR / "README.md")
-        ordered = (
-            "S1-02 Warehouse、原子发布与查询",
-            "S1-03 XTQuant",
-            "S1-04 质量、跨源差异与 SourceOverride",
-            "S1-05 EOD、Worker、CLI 与 API",
-            "S1-06 数据中心 Web",
-            "S1-07A 离线验证框架",
-            "S1-07B 权威固定样本",
-            "S1-07C1C1-P0 正式操作入口与逐次授权交接",
-            "S1-07C1C1 基于具体 review 的单次用户授权后真实来源运行",
-            "S1-07D 旧项目候选 DATA_ONLY/REJECTED 审计",
-            "S1-08 真实或明确范围 Canonical 构建及 Stage 1 最终验收",
-        )
-        positions = [text.index(item) for item in ordered]
-        assert positions == sorted(positions)
-
-    def test_offline_gates_are_not_described_as_main_acceptance(self) -> None:
-        text = _read(_STAGE1_DIR / "ACCEPTANCE.md")
-        # S1-02..S1-08 may still have their offline gates; the rule applies only to those tasks,
-        # not to S1-01 which has been main-accepted.
-        assert "已不再是验收判据" in text or "不得写成主验收通过" in text
-
-    def test_stage1_acceptance_matrix_is_pending(self) -> None:
-        text = _read(_STAGE1_DIR / "ACCEPTANCE.md")
-        # The acceptance matrix must still show that the Stage 1 overall acceptance is pending.
-        assert "进行中" in text or "未完成" in text or "待" in text, (
-            "ACCEPTANCE.md must reflect that Stage 1 is not yet accepted"
-        )
-
-    def test_stage1_data_contracts_lists_six_datasets(self) -> None:
-        text = _read(_STAGE1_DIR / "DATA_CONTRACTS.md")
-        for dataset in (
-            "security_master",
-            "exchange_calendar",
-            "daily_bar_unadjusted",
-            "adjustment_factor",
-            "trading_status",
-            "benchmark_index_daily",
-        ):
-            assert dataset in text, f"{dataset} must be documented in DATA_CONTRACTS.md"
-
-    @pytest.mark.parametrize(
-        "name",
-        ("ACCEPTANCE.md", "QUALITY_CONTRACTS.md", "SOURCE_MATRIX.md"),
-    )
-    def test_s1_07b_main_acceptance_has_no_pending_residue(self, name: str) -> None:
-        text = _read(_STAGE1_DIR / name)
-        assert "S1-07B-R1 离线准备修复已提交，权威样本资格仍阻断" not in text
-        assert "S1-07B-FINAL-R1 修复已提交、等待主验收" not in text
-        assert "S1-07B 已于 2026-08-04" in text
-
-    def test_s1_07b_acceptance_evidence_records_independent_results(self) -> None:
-        text = _read(_STAGE1_DIR / "S1-07B_ACCEPTANCE.md")
-        assert "d60559601efd61de15b41ffa86b4f2f730a69d5e" in text
-        assert "136 passed" in text
-        assert "1223 passed, 2 skipped, 3 deselected" in text
-        assert "20260729_0012" in text
-        assert "其余 16 个 purpose" in text
-        assert "REAL 稳定运行数仍为 0" in text
-
-
-class TestRootStatusWordingSynced:
-    """The stale 'Stage 1 未获授权/未开始' wording must be corrected."""
-
-    @pytest.mark.parametrize(
-        "rel",
-        (
-            "AGENTS.md",
-            "README.md",
-            "docs/IMPLEMENTATION_PLAN.md",
-            "docs/ROADMAP.md",
-            "docs/ARCHITECTURE.md",
-        ),
-    )
-    def test_no_stale_stage1_unauthorized_wording(self, rel: str) -> None:
-        text = _read(_REPO_ROOT / rel)
-        # These exact stale phrases must no longer appear.
-        stale = (
-            "Stage 1 尚未开始，也未获得实施授权",
-            "Stage 1 尚未获得授权",
-            "Stage 1 未开始，也未获得实施授权",
-        )
-        for phrase in stale:
-            assert phrase not in text, f"{rel} still contains stale phrase: {phrase!r}"
-
-    def test_roadmap_stage1_row_is_in_progress(self) -> None:
-        text = _read(_REPO_ROOT / "docs" / "ROADMAP.md")
-        # The Stage 1 status cell must reflect authorized in-progress, not 未开始.
-        assert "进行中" in text or "已获实施授权" in text
-
-    def test_final_acceptance_history_preserved(self) -> None:
-        text = _read(_REPO_ROOT / "docs" / "stage0" / "FINAL_ACCEPTANCE.md")
-        assert "Stage 0 完成" in text
-        # The historical conclusion must remain intact.
-        assert "Stage 1" in text
-
-
-class TestStage1NotDescribedAsAccepted:
-    @pytest.mark.parametrize("rel", ("README.md", "docs/ARCHITECTURE.md"))
-    def test_no_stage1_accepted_claim(self, rel: str) -> None:
-        text = _read(_REPO_ROOT / rel)
-        assert "Stage 1 已验收" not in text
-        assert "Stage 1 已完成验收" not in text
+    assert "S1-07K1 | 未开始" in combined
+    assert "Stage 1 尚未完成" in combined
+    assert "Stage 1 已完成验收" not in combined

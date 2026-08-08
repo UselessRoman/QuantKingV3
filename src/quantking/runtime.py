@@ -14,12 +14,6 @@ from quantking.common.errors import ConfigurationError
 from quantking.common.time import utc_now
 from quantking.data.adapters.eod import EodWorkerHandler, register_eod_handler
 from quantking.data.adapters.eod_base import PublishedEodBaseResolver
-from quantking.data.adapters.persistence.assessment import (
-    MultiplexedV3SealedAssessmentTrustResolver,
-    RealSealedAssessmentTrustResolver,
-    SealedAssessmentReadVerifier,
-    V3SealedAssessmentTrustResolver,
-)
 from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
@@ -52,8 +46,6 @@ from quantking.data.quality.engine import QualityEngine
 from quantking.data.quality.references import PublishedReferenceLoader
 from quantking.data.quality.rules import default_rule_set
 from quantking.data.quality.runner import QualityRunner
-from quantking.data.validation.authorization import FakeRunnerTrustStore, SignerTrustPolicy
-from quantking.data.validation.controlled_runtime import ControlledFakeV3TrustResolver
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     create_sqlite_engine,
@@ -67,7 +59,7 @@ from quantking.web.app import create_app
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = _REPOSITORY_ROOT / "configs" / "default.toml"
 EOD_CODE_VERSION = "s1-05-r5"
-EXPECTED_DATABASE_REVISION = "20260729_0012"
+EXPECTED_DATABASE_REVISION = "20260808_0013"
 WORKER_LEASE_TIMEOUT = timedelta(minutes=2)
 
 
@@ -99,8 +91,6 @@ def build_eod_runtime(
     settings: AppSettings,
     *,
     gateway: MarketDataGateway | None = None,
-    real_v3_trust_resolver: V3SealedAssessmentTrustResolver | None = None,
-    real_trust_resolver: RealSealedAssessmentTrustResolver | None = None,
 ) -> EodRuntime:
     """Build the production object graph without importing the XTQuant SDK.
 
@@ -141,26 +131,7 @@ def build_eod_runtime(
         progress_min_interval_ms=settings.job_progress_min_interval_ms,
     )
     jobs = JobService(SqliteUnitOfWorkFactory(jobs_engine), retry_policy=retry)
-    # Assessment reads deep-verify every v2 and v3 seal.  C0B's accepted
-    # SYNTHETIC v3 resolver is always explicit.  R1 REAL rows use their own
-    # public-key lineage contract and remain fail-closed unless injected.
-    assessment_reader = SealedAssessmentReadVerifier(
-        validation_root=data_root,
-        signer=FakeRunnerTrustStore(),
-        signer_trust_policy=SignerTrustPolicy.synthetic_only(),
-        v3_trust_resolver=cast(
-            V3SealedAssessmentTrustResolver,
-            MultiplexedV3SealedAssessmentTrustResolver(
-                synthetic_resolver=ControlledFakeV3TrustResolver(reference_bundle_root=data_root),
-                real_resolver=real_v3_trust_resolver,
-            ),
-        ),
-        real_trust_resolver=real_trust_resolver,
-    )
-    data_uow = DataSqliteUnitOfWorkFactory(
-        data_engine,
-        assessment_read_verifier=assessment_reader,
-    )
+    data_uow = DataSqliteUnitOfWorkFactory(data_engine)
     ingestion = XtQuantIngestionService(
         gateway=gateway or _gateway(settings),
         raw_publisher=RawBatchPublisher(data_root=data_root),

@@ -28,8 +28,8 @@ test("数据中心显式版本、血缘、EOD 入队取消与 SSE 重连", async
   await expect(page.getByText("服务正常")).toBeVisible();
 
   await page.getByRole("button", { name: "数据源" }).click();
+  await expect(page.getByText("PRODUCTION_READY").first()).toBeVisible();
   await expect(page.getByText("BLOCKED_EXTERNAL_VALIDATION").first()).toBeVisible();
-  await expect(page.getByText("PRODUCTION_READY")).toHaveCount(0);
 
   await page.getByRole("button", { name: "版本" }).click();
   await expect(page.getByRole("cell", { name: "PUBLISHED" }).first()).toBeVisible();

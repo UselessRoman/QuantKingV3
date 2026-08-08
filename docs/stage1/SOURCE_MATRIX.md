@@ -1,47 +1,17 @@
 # Stage 1 数据源矩阵
 
-状态：S1-04 已于 2026-07-22 在提交 `2f99491e9dc410acf85ca81c131a77cae08d0cc3`
-完成主验收，证据见 [S1-04 主验收证据](S1-04_ACCEPTANCE.md)。本文件固化 Stage 1 数据源的生产角色与当前评估
-状态。权威来源是 `src/quantking/data/assessment/matrix.py` 的 `default_source_matrix()`；
-文档不得替代源码与契约测试。
+状态：目标已确认，统一接入库为 AKShare，代码尚未完成 K1 替换。
 
-S1-07B 已于 2026-08-04 在提交 `d60559601efd61de15b41ffa86b4f2f730a69d5e` 完成主验收。首个 603377.SH ST case 已建立有限范围的权威材料
-binding，但尚未产生任何真实来源证据，也没有改变矩阵角色或状态；24 个单元仍全部为
-`BLOCKED_EXTERNAL_VALIDATION`，REAL 稳定运行数为 0。
-
-## 生产矩阵
-
-| 源 | 数据集 | 角色 | 当前状态 | 阻塞原因 | auto_switch |
+| source_id | provider | upstream | endpoint | 角色 | 当前状态 |
 |---|---|---|---|---|---|
-| XTQUANT | 六类 | PRIMARY | BLOCKED_EXTERNAL_VALIDATION | requires authorized REAL fixed-sample validation | False |
-| BAOSTOCK/AKSHARE/TUSHARE | 六类 | FALLBACK | BLOCKED_EXTERNAL_VALIDATION | requires authorized external validation | False |
+| `AKSHARE_EASTMONEY` | AKSHARE | EASTMONEY | `stock_zh_a_hist` | A：东财主来源 | 待 K1 实测 |
+| `AKSHARE_TENCENT` | AKSHARE | TENCENT | `stock_zh_a_hist_tx` | B：腾讯常态互验 | 待 K1 实测 |
+| `AKSHARE_SINA` | AKSHARE | SINA | `stock_zh_a_daily` | C：新浪异常第三源 | 待 K1 实测 |
 
-## 规则
+## 固定规则
 
-- XTQuant 是指定的 PRIMARY 生产源；其余三个为 FALLBACK 候选源。
-- 三个 FALLBACK 源当前状态为 `BLOCKED_EXTERNAL_VALIDATION`，必须经授权真实外部验证后
-  才能转为 `PRODUCTION_READY`。
-- **不设 auto_switch**：系统不会在主源失败时静默切换到备用源；任何 fallback 选择必须通过
-  显式、已审批的 `SourceOverride` 绑定到已验证的 `DifferenceReport`。
-- 合成证据（`EvidenceKind.SYNTHETIC`）永远不能将任何源标记为 `PRODUCTION_READY`。
-- `UNVERIFIED` 和 `BLOCKED_EXTERNAL_VALIDATION` 状态必须携带 `blocking_reason`；
-  `PRODUCTION_READY` 不得携带 `blocking_reason`。
-
-## 真实验证路径
-
-真实外部验证须在 S1-07C 或专项验收中按 source × dataset 单元单独授权：
-
-1. 在授权下用真实供应商响应运行 `SourceCandidateAssessment`，记录 `EvidenceKind.REAL`。
-2. 通过 semantic contract、schema/unit、coverage、quality、fixed-sample differences、
-   stability 全部门禁后，状态可转为 `PRODUCTION_READY`。
-3. 未通过门禁或未授权时，状态保持 `BLOCKED_EXTERNAL_VALIDATION`，并保留阻塞原因。
-
-合成测试不构成真实能力证明；离线测试通过不等于主验收通过。
-公开合同中看似不支持某数据集的结论，在 S1-07B 只能记录为 capability candidate；没有
-S1-07C 的真实证据不得写成已验证能力结论。
-
-## 不变量
-
-- 矩阵不得声明 `auto_switch=True`；fallback 选择必须显式审批。
-- 矩阵必须按 `source × dataset` 列出所有已知组合；条目按组合唯一。
-- 主源变更必须通过架构决策，不得在任务级别静默修改。
+- 三者是同一个 Python 依赖中的三个上游，不得只记录 `AKSHARE` 而隐藏 upstream。
+- A/B 正常时不调用 C；A/B 异常时 C 才进入仲裁。
+- 最少两源一致才可产生发布候选。
+- 选择优先级 `EASTMONEY > TENCENT > SINA` 只在一致集合内部生效。
+- 不再评估 XTQuant、BaoStock、Tushare 或 JQData 作为 Stage 1 生产源。

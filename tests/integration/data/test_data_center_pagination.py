@@ -9,15 +9,16 @@ import pytest
 
 from quantking.common.ids import new_entity_id
 from quantking.common.time import UtcTimestamp
-from quantking.data.adapters.persistence.assessment import (
-    SealedAssessmentReadVerifier,
-    SqliteSourceAssessmentPersistenceAdapter,
-)
 from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
 )
-from quantking.data.center import DataCenterQueryService, DataCenterReadIntegrityError
+from quantking.data.assessment.models import (
+    AssessmentStatus,
+    EvidenceKind,
+    SourceCandidateAssessment,
+)
+from quantking.data.center import DataCenterQueryService
 from quantking.data.models import (
     BatchFailureInfo,
     BatchFailureKind,
@@ -32,11 +33,6 @@ from quantking.data.models import (
     transition_batch,
     transition_dataset_version,
 )
-from quantking.data.validation.authorization import (
-    FakeRunnerTrustStore,
-    SignerTrustPolicy,
-)
-from quantking.data.validation.testing import build_deep_fake_assessment
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     initialize_database,
@@ -134,54 +130,43 @@ def test_latest_source_assessment_is_selected_in_sql_by_time_and_stable_id(
     database = tmp_path / "source-assessment.db"
     initialize_database(database)
     engine = create_data_engine(database, busy_timeout_ms=250)
-    root = tmp_path / "validation"
-    signer = FakeRunnerTrustStore()
-    policy = SignerTrustPolicy.synthetic_only()
-    factory = DataSqliteUnitOfWorkFactory(
-        engine,
-        assessment_read_verifier=SealedAssessmentReadVerifier(
-            validation_root=root,
-            signer=signer,
-            signer_trust_policy=policy,
-        ),
-    )
-    verified = tuple(
-        build_deep_fake_assessment(root=root, assessment_index=index) for index in (20, 21)
-    )
-    service = SqliteSourceAssessmentPersistenceAdapter(
-        engine=engine,
-        validation_root=root,
-        signer=signer,
-        signer_trust_policy=policy,
-    )
-    saved = tuple(
-        service.persist_from_directory((root / evidence.evidence_relative_path).parent)
-        for evidence in verified
-    )
+    factory = DataSqliteUnitOfWorkFactory(engine)
+    base = datetime(2026, 7, 28, tzinfo=UTC)
+    assessments = [
+        SourceCandidateAssessment(
+            assessment_id=new_entity_id("data_assessment"),
+            source="BAOSTOCK",
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            evidence_kind=EvidenceKind.SYNTHETIC,
+            semantic_contract_verified=True,
+            schema_unit_verified=True,
+            coverage_adequate=True,
+            quality_passed=True,
+            fixed_sample_differences_adequate=True,
+            stability_runs=index,
+            status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
+            blocking_reason="external validation required",
+            assessment_config_version="assessment.v1",
+            sample_spec_version="sample.v1",
+            rule_version="rules.v1",
+            evidence_relative_path=f"assessments/{index}.json",
+            evidence_sha256=f"{index + 1:x}".rjust(64, "0"),
+            created_at=UtcTimestamp(base + timedelta(seconds=index)),
+        )
+        for index in range(2)
+    ]
+    with factory() as uow:
+        for assessment in assessments:
+            uow.data.save_source_candidate_assessment(assessment)
+        uow.commit()
 
     with factory() as uow:
         latest = uow.data.find_latest_source_candidate_assessment(
-            source="XTQUANT",
-            dataset=DatasetKind.EXCHANGE_CALENDAR,
+            source="BAOSTOCK",
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         )
 
-    assert latest == saved[-1]
-    with engine.connect() as connection:
-        seal_relative = connection.exec_driver_sql(
-            "SELECT sealed_evidence_relative_path FROM source_candidate_assessments "
-            "WHERE assessment_id = ?",
-            (str(saved[-1].assessment_id),),
-        ).scalar_one()
-    seal = root / str(seal_relative)
-    seal.write_bytes(seal.read_bytes() + b"tampered")
-    query = DataCenterQueryService(
-        data_uow_factory=factory,
-        preview=_UnusedPort(),
-        difference_verifier=_UnusedPort(),
-        jobs=_NoJobs(),
-    )
-    with pytest.raises(DataCenterReadIntegrityError, match="assessment evidence"):
-        query.sources()
+    assert latest == assessments[-1]
     engine.dispose()
 
 

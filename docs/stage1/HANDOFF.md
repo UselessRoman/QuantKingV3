@@ -1,16 +1,23 @@
-# Stage 1 状态交接
+# Stage 1 简明交接
 
-本文件是 [Stage 1 收口实施与主验收交接基线](STAGE1_COMPLETION_HANDOFF.md) 的简明状态入口，
-不改变该基线、任务卡或架构决策的权威顺序。
+## 当前结论
 
-## 当前 S1-07C 状态
+- 当前目标数据源已改为 AKShare；上游分别为东财、腾讯和新浪。
+- S1-01～S1-06 保留，旧 S1-07A～C1C1-P0 的实现、专用测试和当前文档已删除。
+- 旧路线真实数据运行数为 0，因此删除不会丢失已发布真实数据能力。
+- Alembic 0010～0012 作为历史迁移保留；0013 关闭旧证据写门并允许简单 assessment 写入。
+- XTQuant 的 S1-03 适配器仍暂时存在，因为 S1-05 正式 EOD runtime 依赖它。它必须在 K1 中由 AKShare 替换后再删除。
+- Stage 1 未完成；Stage 2 未授权、未开始。
 
-- S1-07C0A、S1-07C0B-R1、S1-07C1A-R3 和 S1-07C1B-R1 已完成各自的纯离线独立主验收。
-- **“S1-07C1C0-R3 已完成独立主验收（纯离线 XTData ST observation 运行就绪化）；真实运行数为 0。”**
-  接受提交为 `85d5f44a0564a487540ba072f6ba75c4dce8ee34`，证据见
-  [S1-07C1C0-R3 主验收证据](S1-07C1C0-R3_ACCEPTANCE.md)。
-- 该 runner 的唯一固定调用是 `xtdata.get_his_st_data("603377.SH")`，但 Native XtData 官方页面尚未
-  证明该方法在真实 SDK 中存在；本次真实 MiniQMT/XTQuant 调用数为 0，observation 始终为
-  `BLOCKED/CONTRACT_INCOMPLETE`，不证明 `READY` 或生产 capability。
+## 唯一下一任务
 
-**“S1-07C1C1-P0 已完成独立主验收（纯离线正式 file-only 操作入口与逐次授权交接）；C1C1 真实运行数为 0，仍未授权、未开始。”** 证据见 [P0 独立主验收记录](S1-07C1C1-P0_ACCEPTANCE.md)。后续唯一候选是用户基于一次具体 review 的完整事实作出单次明确授权；C2、S1-07D、S1-08 和 Stage 2 均未开始、未获授权。真实 XTQuant/QMT、网络、正式数据根和 REAL marker 仍必须按任务单独授权。
+[S1-07K1：AKShare 三渠道适配与小样本实测](S1-07K1_TASK.md)。
+
+新对话开始时先确认工作树干净并阅读 `AGENTS.md`、`docs/DECISIONS.md`、本文件和 K1 任务卡。不得恢复旧 S1-07 密码学证据链。
+
+## 为什么不回退 Git
+
+如果只想查看旧 S1-07 开始前的代码，基线是提交
+`44d268b3db8bd9c690225f62e60fa12bf56a289d`（S1-06 主验收）。
+
+不建议对主分支执行 `git reset --hard 44d268b`：那会丢掉之后的审计历史，并让可能已迁移到 0012 的开发数据库出现版本断链。当前清理提交等价于“保留历史的逻辑回退”，同时增加 0013 兼容迁移。
