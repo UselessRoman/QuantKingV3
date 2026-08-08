@@ -26,6 +26,7 @@ _REQUIRED_STAGE1_DOCS = (
     "S1-07B_ACCEPTANCE.md",
     "S1-07C1B_IMPLEMENTATION.md",
     "S1-07C1B-R1_IMPLEMENTATION.md",
+    "S1-07C1B-R1_ACCEPTANCE.md",
     "STAGE1_COMPLETION_HANDOFF.md",
 )
 
@@ -46,6 +47,7 @@ _S1_07B_STATUS = (
     "case（603377.SH ST）、reference bundle v3 证据链和按 case 放行运行时已定版； "
     "17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。"
 )
+_S1_07C1B_R1_STATUS = "S1-07C1B-R1 已完成独立主验收（纯离线运行就绪化）；真实运行数为 0。"
 
 
 def _read(path: Path) -> str:
@@ -86,17 +88,35 @@ class TestStage1DocsExist:
         assert "Stage 1 已完成验收" not in text
         assert "已获实施授权" in text
 
-    def test_s1_07c1b_r1_status_records_failed_initial_acceptance_not_main_acceptance(self) -> None:
+    def test_s1_07c1b_r1_status_records_failed_initial_acceptance_and_main_acceptance(
+        self,
+    ) -> None:
         initial = _read(_STAGE1_DIR / "S1-07C1B_IMPLEMENTATION.md")
         repair = _read(_STAGE1_DIR / "S1-07C1B-R1_IMPLEMENTATION.md")
+        acceptance = _read(_STAGE1_DIR / "S1-07C1B-R1_ACCEPTANCE.md")
         assert "C1B 初版独立主验收未通过" in initial
         assert "C1B 初版独立主验收未通过" in repair
-        assert (
-            "**“C1B-R1 纯离线仓库外路径边界修复实现完成，等待独立主验收；真实运行数为 0。”**"
-            in repair
-        )
+        assert "C1B 初版独立主验收未通过" in acceptance
+        assert _S1_07C1B_R1_STATUS in repair
+        assert _S1_07C1B_R1_STATUS in acceptance
         assert "C1B 主验收通过" not in initial
-        assert "C1B-R1 主验收通过" not in repair
+        assert "XTQuant 真实数据能力" in acceptance
+        assert "真实 invocation、C2、S1-07D、S1-08 或 Stage 2" in acceptance
+
+    @pytest.mark.parametrize(
+        "path",
+        (
+            _STAGE1_DIR / "README.md",
+            _STAGE1_DIR / "TASKS.md",
+            _STAGE1_DIR / "ACCEPTANCE.md",
+            _STAGE1_DIR / "DATA_CONTRACTS.md",
+            _STAGE1_DIR / "STAGE1_COMPLETION_HANDOFF.md",
+            _REPO_ROOT / "docs" / "ROADMAP.md",
+            _REPO_ROOT / "docs" / "ARCHITECTURE.md",
+        ),
+    )
+    def test_s1_07c1b_r1_main_acceptance_status_is_synced(self, path: Path) -> None:
+        assert "".join(_S1_07C1B_R1_STATUS.split()) in "".join(_read(path).split())
 
     def test_stage1_completion_handoff_preserves_pending_and_authorization_boundaries(self) -> None:
         text = _read(_STAGE1_DIR / "STAGE1_COMPLETION_HANDOFF.md")

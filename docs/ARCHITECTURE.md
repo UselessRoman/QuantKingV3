@@ -229,8 +229,9 @@ S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 
 独立主验收；S1-07C0B-R1 已于 2026-08-07 在提交 `20c7aaba4de4a03b58ea148c4f56e8aec3eb2092`
 完成独立主验收（纯离线 Fake provider）。S1-07C1A-R3 已于 2026-08-08 在提交
 `564523eb883c15b6b52f0815f22a70b10fced5cf` 完成 REAL 控制链合同的纯离线主验收；它不证明
-XTQuant 真实数据能力或真实运行。C1B 初版独立主验收未通过；**“C1B-R1 纯离线仓库外路径
-边界修复实现完成，等待独立主验收；真实运行数为 0。”**
+XTQuant 真实数据能力或真实运行。C1B 初版独立主验收未通过；**“S1-07C1B-R1 已完成独立
+主验收（纯离线运行就绪化）；真实运行数为 0。”** 证据见
+[S1-07C1B-R1 主验收证据](stage1/S1-07C1B-R1_ACCEPTANCE.md)。
 C1（除 C1B）、C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。各模块状态以
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)、[路线图](ROADMAP.md) 和 Stage 1
 任务卡为准。

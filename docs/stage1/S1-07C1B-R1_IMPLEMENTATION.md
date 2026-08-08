@@ -1,6 +1,6 @@
 # S1-07C1B-R1 仓库外授权材料路径边界修复
 
-状态：**“C1B-R1 纯离线仓库外路径边界修复实现完成，等待独立主验收；真实运行数为 0。”**
+状态：**“S1-07C1B-R1 已完成独立主验收（纯离线运行就绪化）；真实运行数为 0。”**
 
 基提交：`72b10fd36a821da1b4c4e1c8d561d37e5357d2f7`。
 
@@ -10,7 +10,8 @@
 - 固定单元仍是 `XTQUANT × trading_status × st_warning_603377_sh`。
 - 仅修复 C1B 初版独立主验收发现的仓库内授权材料路径边界；不修改 C0A、C0B 或
   C1A-R3 已验收合同、工件、签名或 failure-only runner。
-- C1B 初版独立主验收未通过；本实现记录不是主验收证据。
+- C1B 初版独立主验收未通过；R1 后续通过的独立主验收证据见
+  [S1-07C1B-R1 主验收证据](S1-07C1B-R1_ACCEPTANCE.md)。本实现记录不是验收证据本身。
 
 ## 仓库外路径策略
 
@@ -41,5 +42,5 @@ output 副作用。测试仅使用仓库外 `tmp_path` 的临时 Ed25519 key、S
 本任务没有 migration，Alembic head 仍为 `20260729_0012`。没有真实 invocation、REAL marker、
 XTQuant SDK/QMT/网络、正式数据根、旧项目或 F 盘访问；新增和实际执行的 REAL marker 均为 0。
 
-真实 XTQuant 运行仍须获得新的、逐 source×dataset×case×invocation 的明确授权。C2、S1-07D、
-S1-08 与 Stage 2 未开始、未获授权。
+该验收不证明 XTQuant 真实数据能力或真实运行。真实 XTQuant 运行仍须获得新的、逐
+source×dataset×case×invocation 的明确授权。C2、S1-07D、S1-08 与 Stage 2 未开始、未获授权。
