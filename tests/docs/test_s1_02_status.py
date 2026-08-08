@@ -58,7 +58,7 @@ class TestStage1StatusWording:
         assert "S1-03" in text
         assert "S1-07B 已于 2026-08-04" in text
         assert "d60559601efd61de15b41ffa86b4f2f730a69d5e" in text
-        assert "C1C1/C2、S1-07D、S1-08 尚未开始、未获授权" in text
+        assert "P0纯离线操作入口完成，C1C1真实运行仍未开始、未授权。" in "".join(text.split())
 
     def test_s1_02_does_not_describe_stage1_complete(self) -> None:
         # S1-02 acceptance must not claim Stage 1 itself is complete.

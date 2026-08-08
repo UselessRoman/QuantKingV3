@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 """S1-06 main acceptance is recorded without advancing later stages."""
 
 from __future__ import annotations
@@ -27,7 +28,8 @@ def test_s1_06_is_main_accepted_and_later_tasks_are_unauthorized(relative: str) 
     assert "S1-07A 已于 2026-07-29" in text
     assert "S1-07B 已于 2026-08-04" in text
     assert "d60559601efd61de15b41ffa86b4f2f730a69d5e" in text
-    assert "C1C1/C2" in text and "S1-07D" in text and "S1-08" in text
+    assert "P0纯离线操作入口完成，C1C1真实运行仍未开始、未授权。" in "".join(text.split())
+    assert "S1-07D" in text and "S1-08" in text
     assert "S1-08" in text and "尚未开始" in text
 
 

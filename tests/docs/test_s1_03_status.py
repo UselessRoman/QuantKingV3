@@ -1,3 +1,4 @@
+# ruff: noqa: RUF001
 """S1-03-R1 status must reflect the independent offline main acceptance."""
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ def test_s1_06_acceptance_does_not_authorize_external_work() -> None:
     assert "S1-07A 已于 2026-07-29" in tasks
     assert "S1-07B 已于 2026-08-04" in tasks
     assert "d60559601efd61de15b41ffa86b4f2f730a69d5e" in tasks
-    assert "C1C1/C2、S1-07D、S1-08 尚未开始、未获授权" in tasks
+    assert "P0纯离线操作入口完成，C1C1真实运行仍未开始、未授权。" in "".join(tasks.split())
     contracts = _read("docs/stage1/DATA_CONTRACTS.md")
     assert "真实 XTQuant 样本验证仍须逐项授权" in contracts
     assert "合成测试不构成真实 XTQuant 能力证明" in contracts

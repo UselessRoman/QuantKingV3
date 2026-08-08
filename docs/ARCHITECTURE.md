@@ -232,9 +232,10 @@ S1-07C0A、S1-07C0B-R1、S1-07C1A-R3 与 S1-07C1B-R1 均已完成各自的纯离
 [S1-07C1C0-R3 主验收证据](stage1/S1-07C1C0-R3_ACCEPTANCE.md)。Native XtData 官方页面尚未证明
 `xtdata.get_his_st_data` 存在；真实 MiniQMT/XTQuant 调用数为 0，observation 始终为
 `BLOCKED/CONTRACT_INCOMPLETE`，不证明 XTQuant 真实能力、`READY` 或生产 capability。
-C1C1/C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。各模块状态以
+**“P0 纯离线操作入口完成，C1C1 真实运行仍未开始、未授权。”** C2、S1-07D、S1-08 和 Stage 2
+仍未开始、未获授权。各模块状态以
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)、[路线图](ROADMAP.md) 和 Stage 1
 任务卡为准。
 
-除已主验收的 C0A/C0B/C1A-R3 离线合同、C1B-R1 和 C1C0-R3 外，C1C1/C2、S1-07D、S1-08
-和 Stage 2 尚未开始、未获授权。
+除已主验收的 C0A/C0B/C1A-R3 离线合同、C1B-R1 和 C1C0-R3 外，**“P0 纯离线操作入口完成，
+C1C1 真实运行仍未开始、未授权。”** C2、S1-07D、S1-08 和 Stage 2 尚未开始、未获授权。

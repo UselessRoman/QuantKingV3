@@ -35,10 +35,10 @@ Stage 1 的目标是完成首个可发布、可查询和可追溯的 A 股日频
   接受提交为 `85d5f44a0564a487540ba072f6ba75c4dce8ee34`，证据见
   [S1-07C1C0-R3 主验收证据](S1-07C1C0-R3_ACCEPTANCE.md)。Native XtData 官方页面尚未证明
   `xtdata.get_his_st_data` 存在；真实 MiniQMT/XTQuant 调用数为 0，observation 始终为
-  `BLOCKED/CONTRACT_INCOMPLETE`，不证明真实能力或 `READY`。C1C1/C2、S1-07D、S1-08 和 Stage 2
-  仍未开始、未获授权。除已主验收的
+  `BLOCKED/CONTRACT_INCOMPLETE`，不证明真实能力或 `READY`。P0 纯离线操作入口完成，C1C1 真实运行
+  仍未开始、未授权。C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。除已主验收的
   C0A/C0B/C1A-R3 离线合同、C1B-R1 和该 C1C0-R3 运行就绪化外，
-  后续 C1C1/C2、S1-07D、S1-08 尚未开始、未获授权。
+  后续 C1C1 真实运行、C2、S1-07D、S1-08 尚未开始、未获授权。
 
 ## 授权边界
 
@@ -70,6 +70,7 @@ S1-01 数据合同、元数据持久化与安全迁移基础（已主验收）
     → S1-07C0A 版本化按 case 证据合同（已主验收；纯离线）
     → S1-07C0B 受控执行、seal 持久化与 DataCenter 深验读侧（已主验收；纯离线 Fake provider）
     → S1-07C1C0 XTData ST observation runner（已主验收；纯离线、非真实能力证明）
+    → S1-07C1C1-P0 正式操作入口与逐次授权交接（纯离线实现完成，等待独立主验收）
     → S1-07C1C1 逐项授权的真实来源运行和差异评估
     → S1-07D 旧项目候选 DATA_ONLY/REJECTED 审计
     → S1-08 真实或明确范围 Canonical 构建及 Stage 1 最终验收
@@ -102,7 +103,8 @@ S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 
 完成独立主验收（纯离线 Fake provider），证据见
 [S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。S1-07C1A-R3 随后完成纯离线 REAL
 控制链合同主验收，证据见 [S1-07C1A-R3 主验收证据](S1-07C1A-R3_ACCEPTANCE.md)；不证明
-XTQuant 真实数据能力或真实运行。C1C1/C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。
+XTQuant 真实数据能力或真实运行。P0 纯离线操作入口完成，C1C1 真实运行仍未开始、未授权。C2、
+S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。
 
 ## S1-06 主验收
 

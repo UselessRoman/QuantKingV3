@@ -13,5 +13,5 @@
   证明该方法在真实 SDK 中存在；本次真实 MiniQMT/XTQuant 调用数为 0，observation 始终为
   `BLOCKED/CONTRACT_INCOMPLETE`，不证明 `READY` 或生产 capability。
 
-C1C1/C2、S1-07D、S1-08 和 Stage 2 均未开始、未获授权。真实 XTQuant/QMT、网络、正式数据根和
-REAL marker 仍必须按任务单独授权。
+**“P0 纯离线操作入口完成，C1C1 真实运行仍未开始、未授权。”** C2、S1-07D、S1-08 和 Stage 2
+均未开始、未获授权。真实 XTQuant/QMT、网络、正式数据根和 REAL marker 仍必须按任务单独授权。

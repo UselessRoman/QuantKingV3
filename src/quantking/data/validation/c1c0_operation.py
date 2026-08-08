@@ -210,6 +210,44 @@ def _metadata_database_sha256(path: Path) -> str:
         ) from error
 
 
+def _external_canonical_output_path(path: Path, *, field: str) -> Path:
+    """Validate one external canonical material destination before any signing."""
+    target = _external_path(path, field=field)
+    if not target.parent.is_dir():
+        raise C1C0OperationError("C1C0_PARAMETER_INVALID", f"{field} parent must already exist")
+    if target.exists():
+        raise C1C0OperationError("C1C0_OUTPUT_EXISTS", f"{field} already exists")
+    return target
+
+
+def preflight_plan_output(*, plan_file: Path) -> None:
+    """Reject an unsafe plan destination before creating authorization material."""
+    _external_canonical_output_path(plan_file, field="plan file")
+
+
+def preflight_authorization_output(*, authorization_file: Path) -> None:
+    """Reject an unsafe authorization destination before it is signed."""
+    _external_canonical_output_path(authorization_file, field="authorization file")
+
+
+def _write_external_canonical(path: Path, payload: bytes, *, field: str) -> None:
+    target = _external_canonical_output_path(path, field=field)
+    try:
+        _write_exclusive(target, payload)
+    except FileExistsError as error:
+        raise C1C0OperationError("C1C0_OUTPUT_EXISTS", f"{field} already exists") from error
+    except OSError as error:
+        raise C1C0OperationError("C1C0_OUTPUT_UNAVAILABLE", f"{field} cannot be written") from error
+
+
+def _load_external_canonical(path: Path, *, field: str) -> bytes:
+    target = _external_path(path, field=field, require_file=True)
+    try:
+        return target.read_bytes()
+    except OSError as error:
+        raise C1C0OperationError("C1C0_INPUT_UNAVAILABLE", f"{field} cannot be read") from error
+
+
 @dataclass(frozen=True, slots=True)
 class C1C0Plan:
     """A signed C1C0 contract which embeds the complete C1B/C1A context."""
@@ -456,6 +494,25 @@ def _plan_from_dict(raw: object) -> C1C0Plan:
     return plan
 
 
+def write_plan(*, plan: C1C0Plan, plan_file: Path) -> None:
+    """Persist one validated C1C0 plan as an external canonical file only."""
+    preflight_plan_output(plan_file=plan_file)
+    _validate_plan(plan)
+    _write_external_canonical(plan_file, plan.to_bytes(), field="plan file")
+
+
+def load_plan(*, plan_file: Path) -> C1C0Plan:
+    """Load exactly one external canonical C1C0 plan file."""
+    payload = _load_external_canonical(plan_file, field="plan file")
+    try:
+        raw: Any = json.loads(payload)
+        if not isinstance(raw, dict) or payload != _canonical(raw):
+            raise ValueError
+        return _plan_from_dict(raw)
+    except (C1BOperationError, C1C0OperationError, TypeError, ValueError) as error:
+        raise C1C0OperationError("C1C0_PLAN_INVALID", "C1C0 plan is invalid") from error
+
+
 @dataclass(frozen=True, slots=True)
 class C1C0Authorization:
     plan: C1C0Plan
@@ -528,12 +585,12 @@ def _write_exclusive(path: Path, payload: bytes) -> None:
 
 
 def write_authorization(*, authorization: C1C0Authorization, authorization_file: Path) -> None:
-    target = _external_path(authorization_file, field="authorization file")
-    if target.exists():
-        raise C1C0OperationError("C1C0_OUTPUT_EXISTS", "authorization output already exists")
+    preflight_authorization_output(authorization_file=authorization_file)
     authorization_anchor, _runner_anchor = _validate_plan(authorization.plan)
     _verify_outer_authorization(authorization, authorization_anchor)
-    _write_exclusive(target, authorization.to_bytes())
+    _write_external_canonical(
+        authorization_file, authorization.to_bytes(), field="authorization file"
+    )
 
 
 def _authorization_from_bytes(payload: bytes) -> C1C0Authorization:
@@ -575,6 +632,57 @@ def _verify_outer_authorization(
         )
     ):
         raise C1C0OperationError("C1C0_AUTHORIZATION_UNTRUSTED", "C1C0 authorization is untrusted")
+
+
+def load_authorization(*, authorization_file: Path) -> C1C0Authorization:
+    """Load and verify a signed external canonical C1C0 authorization file."""
+    payload = _load_external_canonical(authorization_file, field="authorization file")
+    authorization = _authorization_from_bytes(payload)
+    authorization_anchor, _runner_anchor = _validate_plan(authorization.plan)
+    _verify_outer_authorization(authorization, authorization_anchor)
+    return authorization
+
+
+def review_authorization(*, authorization_file: Path) -> dict[str, object]:
+    """Return the stable, non-secret human approval facts for one authorization."""
+    authorization = load_authorization(authorization_file=authorization_file)
+    plan = authorization.plan
+    c1b_plan = plan.c1b_plan
+    identity = plan.identity.to_dict()
+    return {
+        "allowed_conclusion": _CONCLUSION,
+        "allowed_conclusions": [_CONCLUSION],
+        "assessment_id": identity["assessment_id"],
+        "authorization_file_sha256": _sha(authorization.to_bytes()),
+        "authorization_id": identity["authorization_id"],
+        "authorization_key_id": authorization.authorization_key_id,
+        "c1b_authorization_sha256": plan.c1b_authorization_sha256,
+        "case_id": "st_warning_603377_sh",
+        "claim_root": str(c1b_plan.claim_root),
+        "dataset": "trading_status",
+        "execute_acknowledgement": C1C0_EXECUTION_ACK,
+        "expires_at": plan.expires_at.to_iso(),
+        "fixed_request": dict(FIXED_ST_REQUEST),
+        "invocation_id": identity["invocation_id"],
+        "metadata_database_sha256": plan.metadata_database_sha256,
+        "output_root": str(c1b_plan.output_root),
+        "plan_sha256": plan.plan_sha256,
+        "real_execution_authorized": False,
+        "reference_bundle_id": c1b_plan.reference_bundle_id,
+        "reference_bundle_sha256": c1b_plan.reference_bundle_sha256,
+        "run_id": identity["run_id"],
+        "runner_contract_id": C1C0_RUNNER_CONTRACT_ID,
+        "runner_key_id": c1b_plan.keys.runner_key_id,
+        "runner_profile": C1C0_RUNNER_PROFILE,
+        "runner_version": C1C0_RUNNER_VERSION,
+        "session_id": identity["session_id"],
+        "site_packages_root": str(plan.site_packages_root),
+        "source": "XTQUANT",
+        "stage": "Stage 1",
+        "task": "S1-07C1C1-P0",
+        "valid_from": plan.valid_from.to_iso(),
+        "xtquant_package_version": plan.package_version,
+    }
 
 
 def _staging_directory(plan: C1C0Plan) -> Path:
@@ -965,15 +1073,8 @@ def execute(*, authorization_file: Path, acknowledgement: str) -> Path:
         raise C1C0OperationError(
             "C1C0_ACKNOWLEDGEMENT_REQUIRED", "exact C1C0 acknowledgement is required"
         )
-    try:
-        authorization_bytes = _external_path(
-            authorization_file, field="authorization file", require_file=True
-        ).read_bytes()
-    except OSError as error:
-        raise C1C0OperationError(
-            "C1C0_AUTHORIZATION_INVALID", "authorization cannot be read"
-        ) from error
-    authorization = _authorization_from_bytes(authorization_bytes)
+    authorization = load_authorization(authorization_file=authorization_file)
+    authorization_bytes = authorization.to_bytes()
     authorization_anchor, _runner_anchor, issuer, runner = _precheck(authorization)
     claim = _claim(
         plan=authorization.plan,
@@ -1021,8 +1122,14 @@ __all__ = [
     "C1C0Plan",
     "execute",
     "issue_authorization",
+    "load_authorization",
+    "load_plan",
     "parse_st_intervals",
+    "preflight_authorization_output",
+    "preflight_plan_output",
     "prepare_plan",
+    "review_authorization",
     "verify_observation",
     "write_authorization",
+    "write_plan",
 ]

@@ -29,9 +29,10 @@ S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 
 接受提交为 `85d5f44a0564a487540ba072f6ba75c4dce8ee34`，证据见
 [S1-07C1C0-R3 主验收证据](S1-07C1C0-R3_ACCEPTANCE.md)。Native XtData 官方页面尚未证明
 `xtdata.get_his_st_data` 存在；真实 MiniQMT/XTQuant 调用数为 0，observation 始终为
-`BLOCKED/CONTRACT_INCOMPLETE`，不证明真实能力或 `READY`。C1C1/C2、S1-07D、S1-08 和 Stage 2
-仍未开始、未获授权。除已主验收的 C0A/C0B/C1A-R3 离线合同、C1B-R1 和该 C1C0-R3 运行就绪化外，
-后续 C1C1/C2、S1-07D、S1-08 尚未开始、未获授权。
+`BLOCKED/CONTRACT_INCOMPLETE`，不证明真实能力或 `READY`。P0 纯离线操作入口完成，C1C1 真实运行
+仍未开始、未授权。C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。除已主验收的
+C0A/C0B/C1A-R3 离线合同、C1B-R1 和该 C1C0-R3 运行就绪化外，后续 C1C1 真实运行、C2、S1-07D、
+S1-08 尚未开始、未获授权。
 
 S1-07B 的固定样本版本链为：v1 → v2 → v3 → v4。v4 原样继承 v3 的 11 个 framework case
 （保持 `FRAMEWORK_ONLY`），并新增 603377.SH ST 权威 case（`AUTHORITY_APPROVED`）。v4
