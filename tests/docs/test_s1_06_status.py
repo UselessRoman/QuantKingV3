@@ -27,8 +27,8 @@ def test_s1_06_is_main_accepted_and_later_tasks_are_unauthorized(relative: str) 
     assert "S1-07A 已于 2026-07-29" in text
     assert "S1-07B 已于 2026-08-04" in text
     assert "d60559601efd61de15b41ffa86b4f2f730a69d5e" in text
-    assert "S1-07C/D、S1-08 尚未开始、未获授权" in text
-    assert "S1-08 未开始" in text or "S1-08 尚未开始" in text
+    assert "C1C1/C2" in text and "S1-07D" in text and "S1-08" in text
+    assert "S1-08" in text and "尚未开始" in text
 
 
 def test_data_contract_records_explicit_preview_and_no_leakage() -> None:

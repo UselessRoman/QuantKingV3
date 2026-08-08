@@ -37,7 +37,7 @@
 | S1-06 | 已主验收 | 数据中心 Web 与严格读侧验证 |
 | S1-07A | 已主验收 | 离线验证框架和 assessment seal 信任边界 |
 | S1-07B | 已主验收 | 固定样本 v4、首个权威 ST case、reference bundle v3、按 case 前置门 |
-| S1-07C | C0A/C0B/C1A-R3 已主验收；C1B 初版独立主验收未通过；**“S1-07C1B-R1 已完成独立主验收（纯离线运行就绪化）；真实运行数为 0。”** | C1A-R3：`564523eb883c15b6b52f0815f22a70b10fced5cf`，C1B-R1：`85bab3fb25840b73958c0c5fdfe2e0301605353d`；两者均不证明 XTQuant 真实数据能力或真实运行。C1（除 C1B）、C2、真实来源运行、稳定性、差异和来源结论仍未授权 |
+| S1-07C | C0A/C0B/C1A-R3/C1B-R1 已主验收；历史 C1B 结论为 **“S1-07C1B-R1 已完成独立主验收（纯离线运行就绪化）；真实运行数为 0。”** **“S1-07C1C0-R3 已完成独立主验收（纯离线 XTData ST observation 运行就绪化）；真实运行数为 0。”** | C1C0-R3：`85d5f44a0564a487540ba072f6ba75c4dce8ee34`。Native XtData 官方页面尚未证明 `xtdata.get_his_st_data` 存在；真实调用数为 0，observation 固定为 `BLOCKED/CONTRACT_INCOMPLETE`，不证明真实能力或 `READY`。C1C1/C2、真实来源运行、稳定性、差异和来源结论仍未授权 |
 | S1-07D | 未开始、未授权 | 旧项目 DATA_ONLY/REJECTED 审计 |
 | S1-08 | 未开始、未授权 | 明确范围 Canonical 构建与 Stage 1 最终验收 |
 
@@ -91,7 +91,11 @@ C0B S1-07C 受控执行、持久化和读侧纵切（纯离线 Fake provider）
     ↓
 C1A S1-07C REAL 控制链合同（纯离线，已主验收；不是真实运行）
     ↓
-C1  首个经授权 XTQuant REAL 单单元运行
+C1B S1-07C 完整 authorization/claim 运行就绪化（纯离线，已主验收）
+    ↓
+C1C0 S1-07C XTData ST observation runner（纯离线，已主验收；不是真实运行）
+    ↓
+C1C1 首个经授权 XTQuant REAL 单单元运行
     ↓
 C2  固定样本 v5+、来源合同和数据集晋级配置
     ↓
@@ -108,7 +112,7 @@ E8B S1-08 真实 Canonical 构建和纵向证据
 E8C Stage 1 独立最终验收
 ```
 
-除已主验收的 H0/C0A/C0B/C1A-R3 和 C1B-R1 纯离线运行就绪化外，C1（除 C1B）、C2 及
+除已主验收的 H0/C0A/C0B/C1A-R3、C1B-R1 和 C1C0-R3 纯离线运行就绪化外，C1C1/C2 及
 S1-07C/D、S1-08 的任何实现或真实运行都必须由用户按任务明确授权。前一项未主验收
 时不得开始后一项；不得把一个“大任务授权”解释为后续失败重试或其他来源/数据集的授权。
 
@@ -343,11 +347,12 @@ uv run --offline --frozen pytest `
 | 2026-08-08 | S1-07C1A-R3 独立主验收 | `a9b7207` | `564523eb883c15b6b52f0815f22a70b10fced5cf` | 已主验收（纯离线 REAL 控制链） | 0 | authorization/claim/runner/reader 合同；不证明 XTQuant 真实数据能力，不启动 C1/C1B/C2 |
 | 2026-08-08 | S1-07C1B 初版独立主验收 | `23a8212` | `72b10fd` | 未通过 | 0 | 计划、完整 authorization 和 signer 私钥可位于仓库内；建立 R1，不构成真实运行 |
 | 2026-08-08 | S1-07C1B-R1 独立主验收 | `72b10fd` | `85bab3fb25840b73958c0c5fdfe2e0301605353d` | 已主验收（纯离线运行就绪化） | 0 | 仓库外 plan/auth/key 边界；不证明 XTQuant 真实数据能力或真实运行 |
+| 2026-08-08 | S1-07C1C0-R3 独立主验收 | `85d5f44` | `85d5f44a0564a487540ba072f6ba75c4dce8ee34` | 已主验收（纯离线 XTData ST observation 运行就绪化） | 0 | 深预检在 claim 前验证 bundle/metadata；Native XtData 官方页面未证明固定方法存在，observation 固定为 BLOCKED/CONTRACT_INCOMPLETE |
 
 ## 9. 下一对话的默认入口
 
-C0A/C0B/C1A-R3 已完成纯离线独立主验收；C1B 初版独立主验收未通过；**“S1-07C1B-R1
-已完成独立主验收（纯离线运行就绪化）；真实运行数为 0。”**
-下一个任务仍需用户按任务明确授权领取；本次验收不自动开始 C1（除 C1B）、C2、任何真实运行、S1-07D、
+C0A/C0B/C1A-R3/C1B-R1 已完成纯离线独立主验收；**“S1-07C1C0-R3 已完成独立主验收
+（纯离线 XTData ST observation 运行就绪化）；真实运行数为 0。”**
+下一个任务仍需用户按任务明确授权领取；本次验收不自动开始 C1C1/C2、任何真实运行、S1-07D、
 S1-08 或 Stage 2，也不授予真实外部访问权限。任何对话不得根据
 本文件推定这些工作已经获得授权。

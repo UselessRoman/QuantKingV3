@@ -27,6 +27,8 @@ _REQUIRED_STAGE1_DOCS = (
     "S1-07C1B_IMPLEMENTATION.md",
     "S1-07C1B-R1_IMPLEMENTATION.md",
     "S1-07C1B-R1_ACCEPTANCE.md",
+    "S1-07C1C0-R3_ACCEPTANCE.md",
+    "HANDOFF.md",
     "STAGE1_COMPLETION_HANDOFF.md",
 )
 
@@ -48,6 +50,9 @@ _S1_07B_STATUS = (
     "17 个 purpose 仍是覆盖 backlog，不是 S1-07B 全局阻断门。"
 )
 _S1_07C1B_R1_STATUS = "S1-07C1B-R1 已完成独立主验收（纯离线运行就绪化）；真实运行数为 0。"
+_S1_07C1C0_R3_STATUS = (
+    "S1-07C1C0-R3 已完成独立主验收（纯离线 XTData ST observation 运行就绪化）；真实运行数为 0。"
+)
 
 
 def _read(path: Path) -> str:
@@ -79,7 +84,7 @@ class TestStage1DocsExist:
         normalized = " ".join(_read(path).split())
         assert _S1_07A_STATUS in normalized
         assert _S1_07B_STATUS in normalized
-        assert "S1-07C/D、S1-08 尚未开始、未获授权。" in normalized
+        assert "C1C1/C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。" in normalized
 
     def test_stage1_readme_does_not_claim_accepted(self) -> None:
         text = _read(_STAGE1_DIR / "README.md")
@@ -117,6 +122,42 @@ class TestStage1DocsExist:
     )
     def test_s1_07c1b_r1_main_acceptance_status_is_synced(self, path: Path) -> None:
         assert "".join(_S1_07C1B_R1_STATUS.split()) in "".join(_read(path).split())
+
+    @pytest.mark.parametrize(
+        "path",
+        (
+            _STAGE1_DIR / "README.md",
+            _STAGE1_DIR / "TASKS.md",
+            _STAGE1_DIR / "ACCEPTANCE.md",
+            _STAGE1_DIR / "DATA_CONTRACTS.md",
+            _STAGE1_DIR / "HANDOFF.md",
+            _STAGE1_DIR / "STAGE1_COMPLETION_HANDOFF.md",
+            _REPO_ROOT / "docs" / "ROADMAP.md",
+            _REPO_ROOT / "docs" / "ARCHITECTURE.md",
+        ),
+    )
+    def test_s1_07c1c0_r3_main_acceptance_status_is_synced(self, path: Path) -> None:
+        text = _read(path)
+        normalized = "".join(text.split())
+        assert "".join(_S1_07C1C0_R3_STATUS.split()) in normalized
+        assert "xtdata.get_his_st_data" in text
+        assert "BLOCKED/CONTRACT_INCOMPLETE" in text
+        assert "C1C1/C2" in text and "S1-07D" in text and "S1-08" in text
+
+    def test_s1_07c1c0_r3_acceptance_evidence_preserves_offline_boundary(self) -> None:
+        text = _read(_STAGE1_DIR / "S1-07C1C0-R3_ACCEPTANCE.md")
+        for commit in (
+            "63c901721923a1b758dcb426f41ec436c593bc0c",
+            "b0104634af0a55f12fbc03088671a8a9b822300b",
+            "0dd7c6c08aebac9152d3e06049434b759cbb1614",
+            "85d5f44a0564a487540ba072f6ba75c4dce8ee34",
+        ):
+            assert commit in text
+        assert "80 passed" in text
+        assert "1363 passed, 2 skipped, 3 deselected, 4 warnings" in text
+        assert "20260729_0012" in text
+        assert "Native XtData 官方页面尚未证明" in text
+        assert "真实运行数为 0" in text
 
     def test_stage1_completion_handoff_preserves_pending_and_authorization_boundaries(self) -> None:
         text = _read(_STAGE1_DIR / "STAGE1_COMPLETION_HANDOFF.md")
@@ -190,7 +231,7 @@ class TestStage1DocsExist:
             assert "S1-02 主验收证据" in text
             assert "d60559601efd61de15b41ffa86b4f2f730a69d5e" in text
             assert "S1-07B" in text and "完成主验收" in text
-            assert "S1-07C/D、S1-08 尚未开始、未获授权" in text
+            assert "C1C1/C2、S1-07D、S1-08 尚未开始、未获授权" in text
         evidence = _read(_STAGE1_DIR / "S1-02_ACCEPTANCE.md")
         assert "S1-02（Warehouse、原子发布与显式版本查询）完成主验收" in evidence
 
@@ -204,7 +245,7 @@ class TestStage1DocsExist:
             "S1-06 数据中心 Web",
             "S1-07A 离线验证框架",
             "S1-07B 权威固定样本",
-            "S1-07C 逐项授权的真实来源运行",
+            "S1-07C1C1 逐项授权的真实来源运行",
             "S1-07D 旧项目候选 DATA_ONLY/REJECTED 审计",
             "S1-08 真实或明确范围 Canonical 构建及 Stage 1 最终验收",
         )
