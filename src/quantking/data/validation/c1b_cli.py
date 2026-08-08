@@ -14,6 +14,8 @@ from quantking.data.validation.c1b_operation import (
     issue_authorization,
     load_authorization,
     load_plan,
+    preflight_authorization_output,
+    preflight_plan_output,
     prepare_plan,
     write_authorization,
     write_plan,
@@ -75,6 +77,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _prepare(args: argparse.Namespace) -> dict[str, object]:
+    preflight_plan_output(plan_file=args.plan_file)
     plan = prepare_plan(
         source=args.source,
         dataset=DatasetKind(args.dataset),
@@ -120,7 +123,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.action in {"prepare", "plan"}:
             result = _prepare(args)
         elif args.action in {"issue", "authorize"}:
-            authorization = issue_authorization(plan=load_plan(plan_file=args.plan_file))
+            plan = load_plan(plan_file=args.plan_file)
+            preflight_authorization_output(authorization_file=args.authorization_file)
+            authorization = issue_authorization(plan=plan)
             write_authorization(
                 authorization=authorization, authorization_file=args.authorization_file
             )

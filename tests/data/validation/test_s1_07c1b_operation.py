@@ -28,6 +28,7 @@ from quantking.data.validation.c1b_operation import (
     execute,
     issue_authorization,
     load_authorization,
+    load_plan,
     prepare_plan,
     write_authorization,
     write_plan,
@@ -206,6 +207,15 @@ def _prepare_cli_args(kwargs: dict[str, object], plan_file: Path) -> list[str]:
         args.extend((flag, str(kwargs[key][0])))  # type: ignore[index]
     args.extend(("--plan-file", str(plan_file)))
     return args
+
+
+def _repository_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _assert_no_execution_side_effects(root: Path) -> None:
+    assert not (root / "claims").exists()
+    assert not (root / "output").exists()
 
 
 def test_help_prepare_issue_and_review_do_not_import_xtquant_or_execute(
@@ -531,3 +541,148 @@ def test_noncanonical_old_dto_and_cli_overrides_cannot_execute(tmp_path: Path) -
     assert plan_file.is_file()
     with pytest.raises(TypeError):
         issue_authorization(plan=plan, authorization={"legacy": "dto"})  # type: ignore[call-arg]
+
+
+def test_repository_plan_and_authorization_paths_fail_before_io_or_signing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kwargs = _prepare_kwargs(tmp_path)
+    plan = prepare_plan(**kwargs)  # type: ignore[arg-type]
+    authorization = issue_authorization(plan=plan)
+    repository = _repository_root()
+    ignored_plan = repository / "tmp" / "c1b-r1-plan.json"
+    ignored_authorization = repository / "frontend" / "dist" / "c1b-r1-authorization.json"
+
+    def unexpected_open(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("repository path policy must fail before os.open")
+
+    def unexpected_read(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("repository path policy must fail before read_bytes")
+
+    monkeypatch.setattr(c1b_operation.os, "open", unexpected_open)
+    with pytest.raises(C1BOperationError) as repository_root_write:
+        write_plan(plan=plan, plan_file=repository)
+    assert repository_root_write.value.code == "C1B_REPOSITORY_PATH_FORBIDDEN"
+    with pytest.raises(C1BOperationError) as plan_write:
+        write_plan(plan=plan, plan_file=ignored_plan)
+    assert plan_write.value.code == "C1B_REPOSITORY_PATH_FORBIDDEN"
+    with pytest.raises(C1BOperationError) as authorization_write:
+        write_authorization(authorization=authorization, authorization_file=ignored_authorization)
+    assert authorization_write.value.code == "C1B_REPOSITORY_PATH_FORBIDDEN"
+
+    monkeypatch.setattr(Path, "read_bytes", unexpected_read)
+    with pytest.raises(C1BOperationError) as repository_root_load:
+        load_plan(plan_file=repository)
+    assert repository_root_load.value.code == "C1B_REPOSITORY_PATH_FORBIDDEN"
+    with pytest.raises(C1BOperationError) as plan_load:
+        load_plan(plan_file=ignored_plan)
+    assert plan_load.value.code == "C1B_REPOSITORY_PATH_FORBIDDEN"
+    with pytest.raises(C1BOperationError) as authorization_load:
+        load_authorization(authorization_file=ignored_authorization)
+    assert authorization_load.value.code == "C1B_REPOSITORY_PATH_FORBIDDEN"
+
+    assert main(["review", "--authorization-file", str(ignored_authorization)]) == 2
+    assert (
+        main(
+            [
+                "execute",
+                "--authorization-file",
+                str(ignored_authorization),
+                "--ack",
+                C1B_EXECUTION_ACK,
+            ]
+        )
+        == 2
+    )
+    assert not ignored_plan.exists()
+    assert not ignored_authorization.exists()
+    _assert_no_execution_side_effects(tmp_path)
+
+
+def test_cli_preflights_repository_outputs_before_plan_or_authorization_issuance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kwargs = _prepare_kwargs(tmp_path)
+    repository = _repository_root()
+    ignored_plan = repository / "tmp" / "c1b-r1-cli-plan.json"
+    ignored_authorization = repository / "tmp" / "c1b-r1-cli-authorization.json"
+
+    def unexpected_prepare(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("repository plan target must fail before plan construction")
+
+    monkeypatch.setattr("quantking.data.validation.c1b_cli.prepare_plan", unexpected_prepare)
+    assert main(_prepare_cli_args(kwargs, ignored_plan)) == 2
+    assert not ignored_plan.exists()
+
+    external_plan = tmp_path / "external-plan.json"
+    plan = prepare_plan(**kwargs)  # type: ignore[arg-type]
+    write_plan(plan=plan, plan_file=external_plan)
+
+    def unexpected_issue(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("repository authorization target must fail before signing")
+
+    monkeypatch.setattr("quantking.data.validation.c1b_cli.issue_authorization", unexpected_issue)
+    assert (
+        main(
+            [
+                "issue",
+                "--plan-file",
+                str(external_plan),
+                "--authorization-file",
+                str(ignored_authorization),
+            ]
+        )
+        == 2
+    )
+    assert not ignored_authorization.exists()
+    _assert_no_execution_side_effects(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "private_field",
+    ("authorization_private_key_file", "runner_private_key_file"),
+)
+def test_repository_private_keys_are_rejected_during_prepare_without_side_effects(
+    tmp_path: Path, private_field: str
+) -> None:
+    kwargs = _prepare_kwargs(tmp_path)
+    kwargs[private_field] = _repository_root() / "tmp" / f"{private_field}.pem"
+
+    with pytest.raises(C1BOperationError) as rejected:
+        prepare_plan(**kwargs)  # type: ignore[arg-type]
+
+    assert rejected.value.code == "C1B_REPOSITORY_PATH_FORBIDDEN"
+    assert not list(tmp_path.glob("*.json"))
+    _assert_no_execution_side_effects(tmp_path)
+
+
+def test_casefolded_repository_and_ignored_paths_cannot_bypass_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = prepare_plan(**_prepare_kwargs(tmp_path))  # type: ignore[arg-type]
+    casefolded_repository = Path(str(_repository_root()).swapcase())
+    ignored_plan = casefolded_repository / "TMP" / "c1b-r1-casefolded-plan.json"
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(C1BOperationError) as rejected:
+        write_plan(plan=plan, plan_file=ignored_plan)
+
+    assert rejected.value.code == "C1B_REPOSITORY_PATH_FORBIDDEN"
+    assert not ignored_plan.exists()
+    _assert_no_execution_side_effects(tmp_path)
+
+
+def test_external_controlled_temporary_paths_remain_usable(tmp_path: Path) -> None:
+    plan = prepare_plan(**_prepare_kwargs(tmp_path))  # type: ignore[arg-type]
+    plan_file = tmp_path / "reviewed-plan.json"
+    write_plan(plan=plan, plan_file=plan_file)
+    loaded_plan = load_plan(plan_file=plan_file)
+    authorization = issue_authorization(plan=loaded_plan)
+    authorization_file = tmp_path / "c1b-authorization.json"
+    write_authorization(authorization=authorization, authorization_file=authorization_file)
+
+    assert (
+        load_authorization(authorization_file=authorization_file).plan.plan_sha256
+        == plan.plan_sha256
+    )
+    _assert_no_execution_side_effects(tmp_path)

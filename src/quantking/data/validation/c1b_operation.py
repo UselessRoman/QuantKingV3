@@ -10,6 +10,7 @@ only that file and an exact acknowledgement at execution time.
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import re
 import tempfile
@@ -83,7 +84,52 @@ class C1BOperationError(ValueError):
         self.code = code
 
 
-def _absolute_path(value: object, *, field: str, require_file: bool = False) -> Path:
+def _repository_root() -> Path:
+    """Find this source checkout's Git root without trusting the current directory."""
+    try:
+        source = Path(__file__).resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise C1BOperationError(
+            "C1B_REPOSITORY_BOUNDARY_UNAVAILABLE", "repository boundary cannot be resolved"
+        ) from error
+    for candidate in source.parents:
+        marker = candidate / ".git"
+        try:
+            if marker.exists():
+                if marker.is_symlink() or is_reparse_point(marker):
+                    raise C1BOperationError(
+                        "C1B_REPOSITORY_BOUNDARY_UNAVAILABLE",
+                        "repository boundary is unsafe",
+                    )
+                return _absolute_path(str(candidate), field="repository root")
+        except C1BOperationError:
+            raise
+        except OSError as error:
+            raise C1BOperationError(
+                "C1B_REPOSITORY_BOUNDARY_UNAVAILABLE", "repository boundary cannot be inspected"
+            ) from error
+    raise C1BOperationError(
+        "C1B_REPOSITORY_BOUNDARY_UNAVAILABLE", "repository boundary is unavailable"
+    )
+
+
+def _is_same_or_descendant(candidate: Path, parent: Path) -> bool:
+    """Compare resolved Windows paths case-insensitively without prefix confusion."""
+    normalized_candidate = ntpath.normcase(ntpath.normpath(str(candidate)))
+    normalized_parent = ntpath.normcase(ntpath.normpath(str(parent)))
+    try:
+        return ntpath.commonpath([normalized_candidate, normalized_parent]) == normalized_parent
+    except ValueError:
+        return False
+
+
+def _absolute_path(
+    value: object,
+    *,
+    field: str,
+    require_file: bool = False,
+    require_external_to_repository: bool = False,
+) -> Path:
     if not isinstance(value, str) or not value:
         raise C1BOperationError("C1B_PARAMETER_INVALID", f"{field} must be an absolute path")
     path = Path(value)
@@ -97,20 +143,57 @@ def _absolute_path(value: object, *, field: str, require_file: bool = False) -> 
                 raise C1BOperationError("C1B_PATH_UNSAFE", f"{field} contains a reparse point")
     except OSError as error:
         raise C1BOperationError("C1B_PATH_UNSAFE", f"{field} is unreadable") from error
+    try:
+        resolved = path.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise C1BOperationError("C1B_PATH_UNSAFE", f"{field} cannot be resolved") from error
+    if require_external_to_repository and _is_same_or_descendant(resolved, _repository_root()):
+        raise C1BOperationError(
+            "C1B_REPOSITORY_PATH_FORBIDDEN", f"{field} must be outside the repository"
+        )
     if require_file and (not path.is_file() or path.is_symlink()):
         raise C1BOperationError(
             "C1B_PARAMETER_INVALID", f"{field} must name an existing regular file"
         )
-    return path.resolve(strict=False)
+    return resolved
+
+
+def _external_canonical_output_path(path: Path, *, field: str) -> Path:
+    safe = _absolute_path(str(path), field=field, require_external_to_repository=True)
+    if not safe.parent.is_dir():
+        raise C1BOperationError("C1B_PARAMETER_INVALID", f"{field} parent must already exist")
+    if safe.exists():
+        raise C1BOperationError("C1B_OUTPUT_EXISTS", f"{field} already exists")
+    return safe
+
+
+def preflight_plan_output(*, plan_file: Path) -> None:
+    """Reject unsafe plan destinations before plan construction or signing material reads."""
+    _external_canonical_output_path(plan_file, field="plan file")
+
+
+def preflight_authorization_output(*, authorization_file: Path) -> None:
+    """Reject unsafe authorization destinations before the authorization is signed."""
+    _external_canonical_output_path(authorization_file, field="authorization file")
+
+
+def _assert_private_keys_outside_repository(keys: C1BKeyConfiguration) -> None:
+    _absolute_path(
+        str(keys.authorization_private_key_file),
+        field="authorization private key",
+        require_external_to_repository=True,
+    )
+    _absolute_path(
+        str(keys.runner_private_key_file),
+        field="runner private key",
+        require_external_to_repository=True,
+    )
 
 
 def _write_canonical_exclusive(path: Path, payload: bytes, *, field: str) -> None:
-    _absolute_path(str(path), field=field)
-    parent = path.parent
-    if not parent.is_dir():
-        raise C1BOperationError("C1B_PARAMETER_INVALID", f"{field} parent must already exist")
+    safe = _external_canonical_output_path(path, field=field)
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        descriptor = os.open(safe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError as error:
         raise C1BOperationError("C1B_OUTPUT_EXISTS", f"{field} already exists") from error
     except OSError as error:
@@ -127,7 +210,9 @@ def _write_canonical_exclusive(path: Path, payload: bytes, *, field: str) -> Non
 
 
 def _load_canonical(path: Path, *, field: str) -> bytes:
-    safe = _absolute_path(str(path), field=field, require_file=True)
+    safe = _absolute_path(
+        str(path), field=field, require_file=True, require_external_to_repository=True
+    )
     try:
         return safe.read_bytes()
     except OSError as error:
@@ -200,14 +285,18 @@ class C1BKeyConfiguration:
             raise C1BOperationError("C1B_PLAN_INVALID", "C1B key identities are invalid")
         return cls(
             authorization_private_key_file=_absolute_path(
-                raw["authorization_private_key_file"], field="authorization private key"
+                raw["authorization_private_key_file"],
+                field="authorization private key",
+                require_external_to_repository=True,
             ),
             authorization_public_key_file=_absolute_path(
                 raw["authorization_public_key_file"], field="authorization public key"
             ),
             authorization_allowed_key_ids=authorization_ids,
             runner_private_key_file=_absolute_path(
-                raw["runner_private_key_file"], field="runner private key"
+                raw["runner_private_key_file"],
+                field="runner private key",
+                require_external_to_repository=True,
             ),
             runner_public_key_file=_absolute_path(
                 raw["runner_public_key_file"], field="runner public key"
@@ -495,13 +584,19 @@ def _key_configuration(
     runner_allowed_key_ids: tuple[str, ...],
 ) -> C1BKeyConfiguration:
     authorization_private = _absolute_path(
-        str(authorization_private_key_file), field="authorization private key", require_file=True
+        str(authorization_private_key_file),
+        field="authorization private key",
+        require_file=True,
+        require_external_to_repository=True,
     )
     authorization_public = _absolute_path(
         str(authorization_public_key_file), field="authorization public key", require_file=True
     )
     runner_private = _absolute_path(
-        str(runner_private_key_file), field="runner private key", require_file=True
+        str(runner_private_key_file),
+        field="runner private key",
+        require_file=True,
+        require_external_to_repository=True,
     )
     runner_public = _absolute_path(
         str(runner_public_key_file), field="runner public key", require_file=True
@@ -776,6 +871,8 @@ def prepare_plan(
 
 
 def write_plan(*, plan: C1BExecutionPlan, plan_file: Path) -> None:
+    preflight_plan_output(plan_file=plan_file)
+    _assert_private_keys_outside_repository(plan.keys)
     _write_canonical_exclusive(plan_file, plan.to_bytes(), field="plan file")
 
 
@@ -837,6 +934,8 @@ def issue_authorization(*, plan: C1BExecutionPlan) -> C1BExecutionAuthorization:
 def write_authorization(
     *, authorization: C1BExecutionAuthorization, authorization_file: Path
 ) -> None:
+    preflight_authorization_output(authorization_file=authorization_file)
+    _assert_private_keys_outside_repository(authorization.plan.keys)
     _write_canonical_exclusive(
         authorization_file, authorization.to_bytes(), field="authorization file"
     )
