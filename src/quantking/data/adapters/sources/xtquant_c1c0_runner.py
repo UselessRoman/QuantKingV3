@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import ModuleType
+from typing import Protocol
+
+from quantking.data.adapters.sources.xtquant import ExplicitXtQuantModuleLoader
 
 RUNNER_CONTRACT_ID = "xtquant.xtdata.get_his_st_data.603377-sh.v1"
 RUNNER_PROFILE = "miniqmt-xtdata-readonly-st-observation.c1c0.v1"
@@ -16,30 +20,50 @@ RUNNER_VERSION = "c1c0.xtdata-runner.v1"
 _FORBIDDEN_MODULES = (".".join(("xtquant", "xt" + "trader")),)
 
 
-def read_fixed_st_observation(*, site_packages_root: Path) -> object:
-    """Load one explicit package root and make the one allowed SDK read."""
-    old_path = list(sys.path)
-    previous = {
-        name: sys.modules.pop(name)
-        for name in tuple(sys.modules)
-        if name == "xtquant" or name.startswith("xtquant.")
-    }
+class _ModuleLoader(Protocol):
+    def __init__(self, site_packages_root: Path) -> None: ...
+
+    def load(self) -> ModuleType: ...
+
+
+def _within_root(module: object, root: Path) -> bool:
+    module_file = getattr(module, "__file__", None)
+    if not isinstance(module_file, str):
+        return False
     try:
-        sys.path.insert(0, str(site_packages_root))
-        # The C1C0 contract permits exactly this deferred import.
+        Path(module_file).resolve(strict=True).relative_to(root.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def read_fixed_st_observation(
+    *,
+    site_packages_root: Path,
+    module_loader: type[_ModuleLoader] = ExplicitXtQuantModuleLoader,
+) -> object:
+    """Load one explicit package root and make the one allowed SDK read."""
+    root = site_packages_root.resolve(strict=True)
+    try:
+        loaded = module_loader(root).load()
+        # This import is delayed until after C1C0's durable CLAIM; the loader
+        # has already rejected a redirected or preloaded external module.
         from xtquant import xtdata  # type: ignore[import-not-found]
 
+        package = sys.modules.get("xtquant")
+        if (
+            xtdata is not loaded
+            or not _within_root(package, root)
+            or not _within_root(xtdata, root)
+        ):
+            raise RuntimeError("XTQuant module origin is outside the authorized root")
         # Reject a package that turns the controlled read into a trading,
         # account, or order import before the only allowed provider call.
         if any(name in sys.modules for name in _FORBIDDEN_MODULES):
             raise RuntimeError("forbidden XTQuant trading module was imported")
         return xtdata.get_his_st_data("603377.SH")
-    finally:
-        for name in tuple(sys.modules):
-            if name == "xtquant" or name.startswith("xtquant."):
-                del sys.modules[name]
-        sys.modules.update(previous)
-        sys.path[:] = old_path
+    except Exception:
+        raise
 
 
 __all__ = ["RUNNER_CONTRACT_ID", "RUNNER_PROFILE", "RUNNER_VERSION", "read_fixed_st_observation"]
