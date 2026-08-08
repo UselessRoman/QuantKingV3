@@ -24,6 +24,7 @@ _REQUIRED_STAGE1_DOCS = (
     "S1-06_ACCEPTANCE.md",
     "S1-07A_ACCEPTANCE.md",
     "S1-07B_ACCEPTANCE.md",
+    "S1-07C1B_IMPLEMENTATION.md",
     "STAGE1_COMPLETION_HANDOFF.md",
 )
 
@@ -83,6 +84,12 @@ class TestStage1DocsExist:
         assert "Stage 1 已验收" not in text, "Stage 1 must not be described as accepted"
         assert "Stage 1 已完成验收" not in text
         assert "已获实施授权" in text
+
+    def test_s1_07c1b_implementation_status_is_exact_and_not_main_accepted(self) -> None:
+        text = _read(_STAGE1_DIR / "S1-07C1B_IMPLEMENTATION.md")
+        assert "**“C1B 纯离线就绪化实现完成，等待独立主验收；真实运行数为 0。”**" in text
+        assert "C1B 主验收通过" not in text
+        assert "真实运行数为 0" in text
 
     def test_stage1_completion_handoff_preserves_pending_and_authorization_boundaries(self) -> None:
         text = _read(_STAGE1_DIR / "STAGE1_COMPLETION_HANDOFF.md")

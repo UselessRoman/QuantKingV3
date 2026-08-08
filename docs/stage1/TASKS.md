@@ -25,8 +25,9 @@ S1-07C0A 已于 2026-08-07 在提交 `5a48909355d7a023fd404780688d070106a2522f` 
 [S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。S1-07C1A-R3 已于 2026-08-08 在提交
 `564523eb883c15b6b52f0815f22a70b10fced5cf` 完成纯离线 REAL 控制链合同主验收，证据见
 [S1-07C1A-R3 主验收证据](S1-07C1A-R3_ACCEPTANCE.md)；不证明 XTQuant 真实数据能力或真实运行。
-C1、C1B、C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。
-除已主验收的 C0A/C0B/C1A-R3 离线合同外，后续 S1-07C/D、S1-08 尚未开始、未获授权。
+**“C1B 纯离线就绪化实现完成，等待独立主验收；真实运行数为 0。”** C1（除 C1B）、C2、S1-07D、
+S1-08 和 Stage 2 仍未开始、未获授权。除已主验收的 C0A/C0B/C1A-R3 离线合同和该 C1B 实现外，
+后续 S1-07C/D、S1-08 尚未开始、未获授权。
 
 真实 XTQuant 和备用源验证仍延期并阻断 Stage 1 最终验收。
 
@@ -162,7 +163,7 @@ C1、C1B、C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。
   完成独立主验收（纯离线 Fake provider），证据见
   [S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。S1-07C1A-R3 已完成纯离线 REAL
   控制链合同主验收，证据见 [S1-07C1A-R3 主验收证据](S1-07C1A-R3_ACCEPTANCE.md)；不证明
-  XTQuant 真实数据能力或真实运行。C1、C1B、C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。
+  XTQuant 真实数据能力或真实运行。C1（除 C1B）、C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。
 - **S1-07A**：离线验证框架及其证据信任边界，已完成主验收。
 - **S1-07B**：权威固定样本 v4、首个 AUTHORITY_APPROVED case（603377.SH ST）、reference
   bundle v3 证据链和按 case 放行运行时已定版。17 个 purpose 仍是覆盖 backlog；后续新增
