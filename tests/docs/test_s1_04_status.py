@@ -71,7 +71,10 @@ def test_s1_06_is_main_accepted_but_external_and_later_tasks_remain_unauthorized
     assert "S1-07A 已于 2026-07-29" in tasks
     assert "S1-07B 已于 2026-08-04" in tasks
     assert "d60559601efd61de15b41ffa86b4f2f730a69d5e" in tasks
-    assert "P0纯离线操作入口完成，C1C1真实运行仍未开始、未授权。" in "".join(tasks.split())
+    assert (
+        "S1-07C1C1-P0已完成独立主验收（纯离线正式file-only操作入口与逐次授权交接）；"
+        "C1C1真实运行数为0，仍未授权、未开始。"
+    ) in "".join(tasks.split())
     contracts = _read("docs/stage1/DATA_CONTRACTS.md")
     # 真实 XTQuant 样本验证仍须逐项授权
     assert "真实 XTQuant" in contracts or "逐项授权" in contracts

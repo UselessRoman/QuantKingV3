@@ -30,8 +30,7 @@ C1B 初版独立主验收未通过；**“S1-07C1B-R1 已完成独立主验收�
 接受提交为 `85d5f44a0564a487540ba072f6ba75c4dce8ee34`，证据见
 [S1-07C1C0-R3 主验收证据](S1-07C1C0-R3_ACCEPTANCE.md)。Native XtData 官方页面尚未证明
 `xtdata.get_his_st_data` 存在；真实 MiniQMT/XTQuant 调用数为 0，observation 始终为
-`BLOCKED/CONTRACT_INCOMPLETE`，不证明真实能力或 `READY`。P0 纯离线操作入口完成，C1C1 真实运行
-仍未开始、未授权。C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。除已主验收的
+`BLOCKED/CONTRACT_INCOMPLETE`，不证明真实能力或 `READY`。**“S1-07C1C1-P0 已完成独立主验收（纯离线正式 file-only 操作入口与逐次授权交接）；C1C1 真实运行数为 0，仍未授权、未开始。”** 证据见 [P0 独立主验收记录](S1-07C1C1-P0_ACCEPTANCE.md)。C2、S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。除已主验收的
 C0A/C0B/C1A-R3 离线合同、C1B-R1 和该 C1C0-R3 运行就绪化外，后续 C1C1 真实运行、C2、S1-07D、
 S1-08 尚未开始、未获授权。
 
@@ -129,7 +128,7 @@ S1-07A 已完成主验收；S1-07B 已于 2026-08-04 在提交 `d60559601efd61de
 S1-07C0B-R1 已完成独立主验收（纯离线 Fake provider），证据见
 [S1-07C0B-R1 主验收证据](S1-07C0B-R1_ACCEPTANCE.md)。S1-07C1A-R3 已完成纯离线 REAL
 控制链合同主验收，证据见 [S1-07C1A-R3 主验收证据](S1-07C1A-R3_ACCEPTANCE.md)；不证明
-XTQuant 真实数据能力或真实运行。P0 纯离线操作入口完成，C1C1 真实运行仍未开始、未授权。C2、
+XTQuant 真实数据能力或真实运行。**“S1-07C1C1-P0 已完成独立主验收（纯离线正式 file-only 操作入口与逐次授权交接）；C1C1 真实运行数为 0，仍未授权、未开始。”** C2、
 S1-07D、S1-08 和 Stage 2 仍未开始、未获授权。
 真实 XTQuant 和备用源验证仍阻断 Stage 1 最终验收。
 

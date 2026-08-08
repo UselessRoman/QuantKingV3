@@ -28,6 +28,7 @@ _REQUIRED_STAGE1_DOCS = (
     "S1-07C1B-R1_IMPLEMENTATION.md",
     "S1-07C1B-R1_ACCEPTANCE.md",
     "S1-07C1C0-R3_ACCEPTANCE.md",
+    "S1-07C1C1-P0_ACCEPTANCE.md",
     "S1-07C1C1-P0_IMPLEMENTATION.md",
     "S1-07C1C1_RUNBOOK.md",
     "HANDOFF.md",
@@ -55,7 +56,10 @@ _S1_07C1B_R1_STATUS = "S1-07C1B-R1 已完成独立主验收（纯离线运行就
 _S1_07C1C0_R3_STATUS = (
     "S1-07C1C0-R3 已完成独立主验收（纯离线 XTData ST observation 运行就绪化）；真实运行数为 0。"
 )
-_S1_07C1C1_P0_STATUS = "P0 纯离线操作入口完成，C1C1 真实运行仍未开始、未授权。"
+_S1_07C1C1_P0_STATUS = (
+    "S1-07C1C1-P0 已完成独立主验收（纯离线正式 file-only 操作入口与逐次授权交接）；"
+    "C1C1 真实运行数为 0，仍未授权、未开始。"
+)
 
 
 def _read(path: Path) -> str:
@@ -116,8 +120,15 @@ class TestStage1DocsExist:
     def test_s1_07c1c1_p0_status_and_runbook_are_offline_only(self) -> None:
         implementation = _read(_STAGE1_DIR / "S1-07C1C1-P0_IMPLEMENTATION.md")
         runbook = _read(_STAGE1_DIR / "S1-07C1C1_RUNBOOK.md")
+        acceptance = _read(_STAGE1_DIR / "S1-07C1C1-P0_ACCEPTANCE.md")
         assert _S1_07C1C1_P0_STATUS in implementation
-        assert "P0 已完成独立主验收" not in implementation
+        assert _S1_07C1C1_P0_STATUS in acceptance
+        assert "5054d2354b77dd6cf36cf3d62b8fbfef0113e83d" in acceptance
+        assert "17354fa160a8f97e4721a2c620709ec12b43e401" in acceptance
+        assert "不证明本机" in acceptance
+        assert "不是用户授权本身" in acceptance
+        assert "C1C0_ACKNOWLEDGEMENT_REQUIRED" in acceptance
+        assert "C1C0_CLI_ARGUMENT_INVALID" in acceptance
         for command in ("prepare", "issue", "review", "execute"):
             assert command in runbook
         assert "I_ACKNOWLEDGE_C1C0_R3_AUTHORIZED_XTDATA_ST_OBSERVATION" in runbook
@@ -263,7 +274,7 @@ class TestStage1DocsExist:
             "S1-07A 离线验证框架",
             "S1-07B 权威固定样本",
             "S1-07C1C1-P0 正式操作入口与逐次授权交接",
-            "S1-07C1C1 逐项授权的真实来源运行",
+            "S1-07C1C1 基于具体 review 的单次用户授权后真实来源运行",
             "S1-07D 旧项目候选 DATA_ONLY/REJECTED 审计",
             "S1-08 真实或明确范围 Canonical 构建及 Stage 1 最终验收",
         )
