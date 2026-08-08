@@ -1,6 +1,5 @@
 """Fixed, delayed-load validation runners.
 
-Only the C0B Fake provider is present in this package.  Provider SDK runners
-remain deliberately absent and may only be introduced by a separately
-authorized task under ``data.adapters``.
+Only the C0B Fake provider is present here.  C1C0's delayed SDK runner lives
+at the allowed ``data.adapters.sources`` boundary.
 """
