@@ -19,8 +19,7 @@ from quantking.data.adapters.canonical_schema import (
     validate_table,
 )
 from quantking.data.adapters.persistence.sqlite import DataSqliteUnitOfWorkFactory
-from quantking.data.adapters.sources.capabilities import capability_for
-from quantking.data.adapters.sources.ingestion import XtQuantIngestionService
+from quantking.data.adapters.sources.ingestion import AkshareIngestionService
 from quantking.data.adapters.warehouse.publish_coordinator import (
     CanonicalPublishCoordinator,
     CanonicalPublishCoordinatorRequest,
@@ -140,7 +139,7 @@ class EodWorkerHandler:
     def __init__(
         self,
         *,
-        ingestion: XtQuantIngestionService,
+        ingestion: AkshareIngestionService,
         quality_runner: QualityRunner,
         quality_writer: QualityArtifactWriter,
         publish_coordinator: CanonicalPublishCoordinator,
@@ -162,7 +161,7 @@ class EodWorkerHandler:
         self._data_root = data_root
         self._clock = clock
         self._capability_check = capability_check or (
-            lambda dataset: capability_for(dataset).available
+            lambda dataset: dataset is DatasetKind.DAILY_BAR_UNADJUSTED
         )
         self._log_root = log_root
         self._query = query_adapter or CanonicalQueryAdapter(
@@ -419,7 +418,7 @@ class EodWorkerHandler:
             if not self._capability_check(plan.dataset):
                 raise EodExecutionError(
                     "CAPABILITY_UNAVAILABLE",
-                    f"XTQuant capability is unavailable for {plan.dataset.value}",
+                    f"AKShare EOD capability is unavailable for {plan.dataset.value}",
                 )
             if not plan.scope:
                 raise EodExecutionError(

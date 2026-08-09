@@ -40,7 +40,7 @@ from quantking.data.models import (
     BatchFailureKind,
     DatasetVersion,
     DatasetVersionStatus,
-    DataSource,
+    DataUpstream,
     QualityResult,
     QualityRun,
     QualityRunStatus,
@@ -162,8 +162,8 @@ class CreateOverrideRequest:
         )
         if self.primary_batch_id == self.fallback_batch_id:
             raise ValueError("primary_batch_id and fallback_batch_id must differ")
-        primary = DataSource(self.primary_source)
-        fallback = DataSource(self.fallback_source)
+        primary = DataUpstream(self.primary_source)
+        fallback = DataUpstream(self.fallback_source)
         if primary == fallback:
             raise ValueError("primary_source and fallback_source must differ")
         object.__setattr__(self, "primary_source", primary.value)
@@ -281,8 +281,8 @@ class SourceOverrideService:
                 difference_report_id=request.difference_report_id,
                 primary_batch_id=request.primary_batch_id,
                 fallback_batch_id=request.fallback_batch_id,
-                primary_source=DataSource(request.primary_source),
-                fallback_source=DataSource(request.fallback_source),
+                primary_source=DataUpstream(request.primary_source),
+                fallback_source=DataUpstream(request.fallback_source),
                 scope_codes=request.scope_codes,
                 scope_dates=request.scope_dates,
                 fields=request.fields,

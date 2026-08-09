@@ -7,7 +7,8 @@ import ast
 from dataclasses import dataclass
 from pathlib import Path
 
-_VENDOR_DATA = frozenset({"akshare", "baostock", "tushare", "xtquant"})
+_ACTIVE_DATA_VENDOR = "akshare"
+_RETIRED_VENDORS = frozenset({"baostock", "miniqmt", "qmt", "tushare", "xtquant"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,11 +66,10 @@ def _request_allowed(parts: tuple[str, ...]) -> bool:
 
 
 def _allowed(top_level: str, parts: tuple[str, ...]) -> tuple[bool, str] | None:
-    if top_level in _VENDOR_DATA:
-        allowed = _starts_with(parts, ("data", "adapters")) or _starts_with(
-            parts, ("trading", "adapters")
-        )
-        return allowed, "data/adapters or trading/adapters"
+    if top_level in _RETIRED_VENDORS:
+        return False, "nowhere in active src (retired vendor)"
+    if top_level == _ACTIVE_DATA_VENDOR:
+        return _starts_with(parts, ("data", "adapters")), "data/adapters"
     if top_level == "qlib":
         allowed = _starts_with(parts, ("research", "adapters")) or _starts_with(
             parts, ("backtest", "adapters")

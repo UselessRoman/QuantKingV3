@@ -31,15 +31,17 @@
 3. A/B 任一失败、缺行、质量失败或分歧：调用 C。
 4. 三源中任意两源一致：从一致集合按 A、B、C 优先级选择。
 5. 找不到两源一致：该证券/日期隔离，不产生 Canonical 发布候选。
-6. 每行记录选择的 upstream、参与比较的 upstream、规则版本和决定原因。
+6. 通过 `ResolutionDecision` 记录选择的 upstream、参与比较的 upstream、规则版本、决定原因和差异报告。
 
 阈值不得在文档中凭经验拍定。K1 用真实小样本确认精度和单位，K2 再把阈值冻结为版本化配置。
 
 ## 保留与退役
 
-保留：S1-01～S1-06 的数据模型、Raw/Canonical/Warehouse、质量比较、EOD/Worker、原子发布、失败恢复、数据中心和对应通用测试。
+保留：S1-01～S1-06 的 Raw/Canonical/Warehouse、质量比较、Job/Worker、原子发布、数据中心和对应通用测试。
 
-退役：旧 S1-07 的 authority bundle、fixed sample release、签名/授权/claim/seal、REAL/Fake runner、file-only CLI、专用迁移写门上层实现及全部专用测试和文档。Git 历史仍可审计。
+K1 退役：XTQuant/QMT 生产适配与配置、旧来源枚举、`SourceCandidateAssessment`、24 单元矩阵和非日线 EOD 分支。
+
+K2 退役：`SourceOverride` active 工作流、平行 success/failure evidence 和多层 checkpoint 恢复。Git 历史与既有数据库字节仍可审计，不在未授权数据根上执行破坏性清理。
 
 过渡：S1-03 XTQuant 适配器只因当前 EOD runtime 仍引用而暂留；K1 必须以 AKShare 替换后删除，不得继续扩展。
 
@@ -48,7 +50,7 @@
 ```text
 S1-07K1 三渠道适配、XTQuant 退役、小样本真实探针
     → 独立主验收
-S1-07K2 A/B 常态比较、C 异常仲裁、生产 EOD
+S1-07K2 `ResolutionDecision`、C 异常仲裁、旧 override/evidence 退役、生产 EOD
     → 独立主验收
 S1-08 明确范围真实日线发布
     → Stage 1 最终验收

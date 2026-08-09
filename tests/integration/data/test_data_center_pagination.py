@@ -13,19 +13,15 @@ from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
 )
-from quantking.data.assessment.models import (
-    AssessmentStatus,
-    EvidenceKind,
-    SourceCandidateAssessment,
-)
 from quantking.data.center import DataCenterQueryService
 from quantking.data.models import (
     BatchFailureInfo,
     BatchFailureKind,
+    DataProvider,
     DatasetKind,
     DatasetVersion,
     DatasetVersionStatus,
-    DataSource,
+    DataUpstream,
     IngestionBatch,
     IngestionBatchStatus,
     QualityRun,
@@ -62,10 +58,19 @@ class _NoJobs:
 def _batch(index: int, *, at: datetime) -> IngestionBatch:
     return IngestionBatch.running(
         batch_id=new_entity_id("data_batch"),
-        source=DataSource.XTQUANT,
-        dataset=DatasetKind.EXCHANGE_CALENDAR,
+        provider=DataProvider.AKSHARE,
+        upstream=DataUpstream.EASTMONEY,
+        endpoint="stock_zh_a_hist",
+        library_version="test",
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         adapter_version="s1-06-test",
-        request_params={"index": str(index)},
+        request_params={
+            "provider": "AKSHARE",
+            "upstream": "EASTMONEY",
+            "endpoint": "stock_zh_a_hist",
+            "akshare_version": "test",
+            "index": str(index),
+        },
         started_at=UtcTimestamp(at),
     )
 
@@ -84,8 +89,8 @@ def test_database_keyset_page_is_stable_across_concurrent_insert(tmp_path: Path)
 
     with factory() as uow:
         first = uow.data.list_batches_page(
-            dataset=DatasetKind.EXCHANGE_CALENDAR,
-            source=DataSource.XTQUANT,
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            upstream=DataUpstream.EASTMONEY,
             status=IngestionBatchStatus.RUNNING,
             started_from=None,
             started_to=None,
@@ -104,8 +109,8 @@ def test_database_keyset_page_is_stable_across_concurrent_insert(tmp_path: Path)
     for _ in range(3):
         with factory() as uow:
             page = uow.data.list_batches_page(
-                dataset=DatasetKind.EXCHANGE_CALENDAR,
-                source=DataSource.XTQUANT,
+                dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+                upstream=DataUpstream.EASTMONEY,
                 status=IngestionBatchStatus.RUNNING,
                 started_from=None,
                 started_to=None,
@@ -121,52 +126,6 @@ def test_database_keyset_page_is_stable_across_concurrent_insert(tmp_path: Path)
         raise AssertionError("keyset pagination did not terminate")
 
     assert seen == {str(item.batch_id) for item in originals}
-    engine.dispose()
-
-
-def test_latest_source_assessment_is_selected_in_sql_by_time_and_stable_id(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "source-assessment.db"
-    initialize_database(database)
-    engine = create_data_engine(database, busy_timeout_ms=250)
-    factory = DataSqliteUnitOfWorkFactory(engine)
-    base = datetime(2026, 7, 28, tzinfo=UTC)
-    assessments = [
-        SourceCandidateAssessment(
-            assessment_id=new_entity_id("data_assessment"),
-            source="BAOSTOCK",
-            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-            evidence_kind=EvidenceKind.SYNTHETIC,
-            semantic_contract_verified=True,
-            schema_unit_verified=True,
-            coverage_adequate=True,
-            quality_passed=True,
-            fixed_sample_differences_adequate=True,
-            stability_runs=index,
-            status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
-            blocking_reason="external validation required",
-            assessment_config_version="assessment.v1",
-            sample_spec_version="sample.v1",
-            rule_version="rules.v1",
-            evidence_relative_path=f"assessments/{index}.json",
-            evidence_sha256=f"{index + 1:x}".rjust(64, "0"),
-            created_at=UtcTimestamp(base + timedelta(seconds=index)),
-        )
-        for index in range(2)
-    ]
-    with factory() as uow:
-        for assessment in assessments:
-            uow.data.save_source_candidate_assessment(assessment)
-        uow.commit()
-
-    with factory() as uow:
-        latest = uow.data.find_latest_source_candidate_assessment(
-            source="BAOSTOCK",
-            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        )
-
-    assert latest == assessments[-1]
     engine.dispose()
 
 
@@ -240,8 +199,8 @@ def test_summary_and_failure_pages_share_the_same_mixed_entity_scope(tmp_path: P
     )
     building = DatasetVersion.building(
         version_id=new_entity_id("data_version"),
-        dataset=DatasetKind.EXCHANGE_CALENDAR,
-        schema_version="exchange-calendar.v1",
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        schema_version="daily_bar_unadjusted.v1",
         code_version="s1-06-r2-test",
         parent_version_id=None,
         input_batch_ids=(batch.batch_id,),

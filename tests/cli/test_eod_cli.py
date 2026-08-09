@@ -43,7 +43,7 @@ def test_cli_enqueue_outputs_stable_created_and_reused_json(tmp_path: Path) -> N
         "--trade-date",
         "2026-07-15",
         "--datasets",
-        "exchange_calendar",
+        "daily_bar_unadjusted",
         "--idempotency-key",
         "cli-key",
         "--publish-intent",
@@ -72,18 +72,18 @@ def test_cli_freezes_controlled_exact_base_mapping(tmp_path: Path) -> None:
     version_id = "data_version:11111111-1111-4111-8111-111111111111"
     base = EodBaseVersion(
         version_id=version_id,
-        dataset="exchange_calendar",
-        schema_version="exchange_calendar.v1",
+        dataset="daily_bar_unadjusted",
+        schema_version="daily_bar_unadjusted.v1",
         content_sha256="a" * 64,
         manifest_sha256="b" * 64,
-        coverage=tuple((exchange, "2026-07-15", "2026-07-15") for exchange in ("BJ", "SH", "SZ")),
+        coverage=(),
     )
 
     class Resolver:
         def resolve(self, *, dataset: str, version_id: str, scope: tuple[str, ...]):
             assert dataset == base.dataset
             assert version_id == base.version_id
-            assert scope == ("BJ", "SH", "SZ")
+            assert scope == ()
             return base
 
     command = EodCommandService(
@@ -98,9 +98,9 @@ def test_cli_freezes_controlled_exact_base_mapping(tmp_path: Path) -> None:
             "--trade-date",
             "2026-07-15",
             "--datasets",
-            "exchange_calendar",
+            "daily_bar_unadjusted",
             "--base-version",
-            f"exchange_calendar={version_id}",
+            f"daily_bar_unadjusted={version_id}",
             "--idempotency-key",
             "cli-base",
             "--publish-intent",
@@ -115,7 +115,7 @@ def test_cli_freezes_controlled_exact_base_mapping(tmp_path: Path) -> None:
     job = jobs.get_job(json.loads(output.getvalue())["job_id"])
     frozen = json.loads(job.config_manifest["config_json"])
     assert code == 0
-    assert frozen["datasets"]["exchange_calendar"]["base_version"]["version_id"] == version_id
+    assert frozen["datasets"]["daily_bar_unadjusted"]["base_version"]["version_id"] == version_id
 
 
 def test_cli_invalid_or_forbidden_inputs_return_stable_nonzero_error(tmp_path: Path) -> None:
@@ -174,7 +174,7 @@ def test_internal_type_error_is_runtime_failure_not_argument_error(tmp_path: Pat
             "--trade-date",
             "2026-07-15",
             "--datasets",
-            "exchange_calendar",
+            "daily_bar_unadjusted",
             "--idempotency-key",
             "internal-error",
             "--publish-intent",

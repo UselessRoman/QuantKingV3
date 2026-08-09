@@ -73,13 +73,13 @@ def _provenance() -> dict[str, object]:
         "difference_report_id": str(new_entity_id("data_diff")),
         "report_sha256": "a" * 64,
         "primary": {
-            "source": "XTQUANT",
+            "source": "EASTMONEY",
             "batch_id": str(new_entity_id("data_batch")),
             "version_id": str(new_entity_id("data_version")),
             "content_sha256": "b" * 64,
         },
         "fallback": {
-            "source": "BAOSTOCK",
+            "source": "TENCENT",
             "batch_id": str(new_entity_id("data_batch")),
             "version_id": str(new_entity_id("data_version")),
             "content_sha256": "c" * 64,

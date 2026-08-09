@@ -14,7 +14,6 @@ from quantking.common.paths import RuntimePaths
 
 _EXPECTED_KEYS: Mapping[str, frozenset[str]] = {
     "paths": frozenset({"code_root", "data_root", "offsite_backup_root"}),
-    "xtquant": frozenset({"site_packages_root"}),
     "web": frozenset({"host", "port"}),
     "sqlite": frozenset(
         {
@@ -32,7 +31,6 @@ _ENV_FIELDS: Mapping[str, tuple[str, str]] = {
     "QUANTKING_CODE_ROOT": ("paths", "code_root"),
     "QUANTKING_DATA_ROOT": ("paths", "data_root"),
     "QUANTKING_OFFSITE_BACKUP_ROOT": ("paths", "offsite_backup_root"),
-    "QUANTKING_XTQUANT_SITE_PACKAGES_ROOT": ("xtquant", "site_packages_root"),
     "QUANTKING_WEB_HOST": ("web", "host"),
     "QUANTKING_WEB_PORT": ("web", "port"),
     "QUANTKING_SQLITE_BUSY_TIMEOUT_MS": ("sqlite", "busy_timeout_ms"),
@@ -50,7 +48,6 @@ class AppSettings:
     """Validated Stage 0 settings with explicit fields and ranges."""
 
     paths: RuntimePaths
-    xtquant_site_packages_root: Path
     web_host: str
     web_port: int
     sqlite_busy_timeout_ms: int
@@ -65,14 +62,6 @@ class AppSettings:
         if not isinstance(self.paths, RuntimePaths):
             raise ConfigurationError(
                 "paths must be validated RuntimePaths", context={"field": "paths"}
-            )
-        if (
-            not isinstance(self.xtquant_site_packages_root, Path)
-            or not self.xtquant_site_packages_root.is_absolute()
-        ):
-            raise ConfigurationError(
-                "xtquant_site_packages_root must be an absolute controlled path",
-                context={"field": "xtquant_site_packages_root"},
             )
         if not isinstance(self.web_host, str) or self.web_host != "127.0.0.1":
             raise ConfigurationError(
@@ -220,12 +209,6 @@ def load_settings(default_config: Path, *, environ: Mapping[str, str] | None = N
         )
         return AppSettings(
             paths=paths,
-            xtquant_site_packages_root=Path(
-                _text(
-                    document["xtquant"]["site_packages_root"],
-                    field="xtquant.site_packages_root",
-                )
-            ),
             web_host=_text(document["web"]["host"], field="web_host"),
             web_port=_integer(document["web"]["port"], field="web_port"),
             sqlite_busy_timeout_ms=_integer(

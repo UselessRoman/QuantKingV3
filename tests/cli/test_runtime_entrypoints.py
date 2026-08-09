@@ -16,7 +16,6 @@ def _runtime_environment(tmp_path: Path, *, data_name: str) -> dict[str, str]:
             "QUANTKING_CODE_ROOT": str(Path.cwd()),
             "QUANTKING_DATA_ROOT": str(tmp_path / data_name),
             "QUANTKING_OFFSITE_BACKUP_ROOT": str(tmp_path / f"{data_name}-offsite"),
-            "QUANTKING_XTQUANT_SITE_PACKAGES_ROOT": str(tmp_path / "missing-sdk"),
         }
     )
     return environment
@@ -49,7 +48,7 @@ def test_subprocess_cli_uses_formal_composition_to_enqueue_only(tmp_path: Path) 
             "--trade-date",
             "2026-07-15",
             "--datasets",
-            "exchange_calendar",
+            "daily_bar_unadjusted",
             "--idempotency-key",
             "subprocess-enqueue",
             "--publish-intent",

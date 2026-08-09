@@ -7,7 +7,8 @@ QuantKing V3 是单用户、本机运行的 A 股日频量化研究项目。当�
 - 统一使用 AKShare。
 - A=东财、B=腾讯：每次日线更新互相校验。
 - C=新浪：A/B 任一失败、缺失或分歧时参与第三方判定。
-- 三个上游分别落 Raw，Canonical 每行记录最终选择来源和原因。
+- 三个上游分别落 Raw；每个证券/交易日的最终选择来源和原因都可由 resolution 摘要与例外记录追溯。
+- K2 使用 `ResolutionDecision` 记录正常仲裁，不使用人工备用源审批状态机。
 - 无法得到两源一致时隔离，不发布。
 - 不依赖 XTQuant、MiniQMT、QMT 客户端、券商账号或密码。
 
@@ -24,6 +25,7 @@ AKShare(Eastmoney/Tencent/Sina)
 
 - Python 3.12，`uv` 管理依赖。
 - Parquet 保存批量数据，DuckDB 查询，SQLite 保存元数据和任务。
+- Stage 1 生产 EOD 只处理 `daily_bar_unadjusted`，不为其他数据集预建运行分支。
 - FastAPI + React 仅监听 `127.0.0.1`。
 - Qlib 用于研究，Backtrader 用于正式回测验收。
 - 代码根：`E:\QuantKingV3`；运行数据根：`E:\QuantKingV3Data`。

@@ -18,13 +18,13 @@ from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
 )
-from quantking.data.adapters.sources.ingestion import (
-    MarketDataGateway,
-    XtQuantIngestionService,
+from quantking.data.adapters.sources.akshare import (
+    AkshareDailyBarAdapter,
+    AkshareMarketDataGateway,
 )
-from quantking.data.adapters.sources.xtquant import (
-    ExplicitXtQuantModuleLoader,
-    XtQuantMarketDataGateway,
+from quantking.data.adapters.sources.ingestion import (
+    AkshareIngestionService,
+    MarketDataGateway,
 )
 from quantking.data.adapters.warehouse.canonical_warehouse import CanonicalWarehouse
 from quantking.data.adapters.warehouse.publish_coordinator import (
@@ -41,6 +41,7 @@ from quantking.data.center import (
 from quantking.data.comparison.verifier import DifferenceReportVerifier
 from quantking.data.eod.artifacts import EodEvidenceWriter
 from quantking.data.eod.service import EodCommandService, EodExecutionConfig
+from quantking.data.models import DataUpstream
 from quantking.data.quality.artifacts import QualityArtifactWriter
 from quantking.data.quality.engine import QualityEngine
 from quantking.data.quality.references import PublishedReferenceLoader
@@ -58,7 +59,7 @@ from quantking.web.app import create_app
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = _REPOSITORY_ROOT / "configs" / "default.toml"
-EOD_CODE_VERSION = "s1-05-r5"
+EOD_CODE_VERSION = "s1-07k1"
 EXPECTED_DATABASE_REVISION = "20260808_0013"
 WORKER_LEASE_TIMEOUT = timedelta(minutes=2)
 
@@ -82,17 +83,18 @@ def load_runtime_settings(config_path: Path = DEFAULT_CONFIG_PATH) -> AppSetting
     return load_settings(config_path)
 
 
-def _gateway(settings: AppSettings) -> MarketDataGateway:
-    root = settings.xtquant_site_packages_root
-    return XtQuantMarketDataGateway(module_loader=lambda: ExplicitXtQuantModuleLoader(root).load())
+def _gateway() -> MarketDataGateway:
+    return AkshareMarketDataGateway(AkshareDailyBarAdapter(DataUpstream.EASTMONEY))
 
 
 def build_eod_runtime(
     settings: AppSettings,
     *,
     gateway: MarketDataGateway | None = None,
+    execution_config: EodExecutionConfig | None = None,
+    quality_runner: QualityRunner | None = None,
 ) -> EodRuntime:
-    """Build the production object graph without importing the XTQuant SDK.
+    """Build the production object graph without importing AKShare eagerly.
 
     Filesystem/database initialization happens only when this explicit function is
     called. Module import and ``--help`` do not call it.
@@ -132,14 +134,14 @@ def build_eod_runtime(
     )
     jobs = JobService(SqliteUnitOfWorkFactory(jobs_engine), retry_policy=retry)
     data_uow = DataSqliteUnitOfWorkFactory(data_engine)
-    ingestion = XtQuantIngestionService(
-        gateway=gateway or _gateway(settings),
+    ingestion = AkshareIngestionService(
+        gateway=gateway or _gateway(),
         raw_publisher=RawBatchPublisher(data_root=data_root),
         data_root=data_root,
         uow_factory=data_uow,
         clock=utc_now,
     )
-    quality_runner = QualityRunner(
+    selected_quality_runner = quality_runner or QualityRunner(
         engine=QualityEngine(rule_set=default_rule_set()),
         reference_loader=PublishedReferenceLoader(
             data_root=data_root,
@@ -148,7 +150,7 @@ def build_eod_runtime(
     )
     handler = EodWorkerHandler(
         ingestion=ingestion,
-        quality_runner=quality_runner,
+        quality_runner=selected_quality_runner,
         quality_writer=QualityArtifactWriter(artifacts_root=data_root / "artifacts" / "quality"),
         publish_coordinator=CanonicalPublishCoordinator(
             warehouse=CanonicalWarehouse(data_root=data_root),
@@ -165,7 +167,7 @@ def build_eod_runtime(
     worker = Worker(jobs, registry, worker_id=f"local-worker-{os.getpid()}")
     commands = EodCommandService(
         jobs,
-        config=EodExecutionConfig.production(code_version=EOD_CODE_VERSION),
+        config=execution_config or EodExecutionConfig.production(code_version=EOD_CODE_VERSION),
         base_resolver=PublishedEodBaseResolver(
             data_root=data_root,
             uow_factory=data_uow,

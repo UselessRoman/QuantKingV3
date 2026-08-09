@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import sys
-
 from fastapi.testclient import TestClient
 
 from quantking.data.center import DataCenterReadIntegrityError
@@ -23,30 +21,15 @@ class _DataCenter:
         return {
             "datasets": [],
             "failures": 0,
-            "blocked_sources": 23,
             "generated_at": "2026-07-28T00:00:00Z",
         }
-
-    def sources(self) -> list[dict[str, object]]:
-        return [
-            {
-                "source": "XTQUANT",
-                "dataset": "exchange_calendar",
-                "role": "PRIMARY",
-                "status": "PRODUCTION_READY",
-                "evidence_kind": "REAL",
-                "blocking_reason": None,
-                "auto_switch": False,
-            }
-        ]
 
     def list_batches(self, **filters: object) -> DataCenterPage:
         assert filters["limit"] == 50
         return DataCenterPage(items=(), next_cursor=None)
 
 
-def test_data_center_routes_are_injected_and_do_not_load_xtquant() -> None:
-    before = set(sys.modules)
+def test_data_center_routes_are_injected_without_source_readiness_api() -> None:
     app = create_app(_Jobs(), data_center_port=_DataCenter())
     with TestClient(app) as client:
         summary = client.get("/api/data/summary")
@@ -54,12 +37,10 @@ def test_data_center_routes_are_injected_and_do_not_load_xtquant() -> None:
         batches = client.get("/api/data/batches")
 
     assert summary.status_code == 200
-    assert summary.json()["blocked_sources"] == 23
-    assert sources.status_code == 200
-    assert sources.json()[0]["auto_switch"] is False
+    assert summary.json()["failures"] == 0
+    assert sources.status_code == 404
     assert batches.status_code == 200
     assert batches.json() == {"items": [], "next_cursor": None}
-    assert "xtquant" not in {name.casefold() for name in set(sys.modules) - before}
 
 
 def test_list_contract_rejects_invalid_cursor_limit_and_enum() -> None:

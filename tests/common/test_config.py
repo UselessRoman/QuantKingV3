@@ -15,9 +15,6 @@ def _write_defaults(path: Path, *, web_port: int = 8765) -> None:
                 f'data_root = "{path.parent.as_posix()}/data"',
                 f'offsite_backup_root = "{path.parent.as_posix()}/offsite"',
                 "",
-                "[xtquant]",
-                f'site_packages_root = "{path.parent.as_posix()}/sdk-site-packages"',
-                "",
                 "[web]",
                 'host = "127.0.0.1"',
                 f"port = {web_port}",
@@ -52,7 +49,6 @@ def test_load_settings_uses_defaults_and_known_environment_overrides(tmp_path: P
     assert isinstance(settings, AppSettings)
     assert settings.paths.data_root == tmp_path / "overridden-data"
     assert settings.paths.local_backup_root == tmp_path / "overridden-data" / "backups"
-    assert settings.xtquant_site_packages_root == tmp_path / "sdk-site-packages"
     assert settings.web_host == "127.0.0.1"
     assert settings.web_port == 9000
     assert settings.sqlite_busy_timeout_ms == 7500

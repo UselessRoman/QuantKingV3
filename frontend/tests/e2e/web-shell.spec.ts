@@ -27,10 +27,6 @@ test("数据中心显式版本、血缘、EOD 入队取消与 SSE 重连", async
   await expect(page.getByRole("heading", { name: "QuantKing 数据中心" })).toBeVisible();
   await expect(page.getByText("服务正常")).toBeVisible();
 
-  await page.getByRole("button", { name: "数据源" }).click();
-  await expect(page.getByText("PRODUCTION_READY").first()).toBeVisible();
-  await expect(page.getByText("BLOCKED_EXTERNAL_VALIDATION").first()).toBeVisible();
-
   await page.getByRole("button", { name: "版本" }).click();
   await expect(page.getByRole("cell", { name: "PUBLISHED" }).first()).toBeVisible();
   await expect(page.getByText("2026-07-15").first()).toBeVisible();
@@ -55,14 +51,7 @@ test("数据中心显式版本、血缘、EOD 入队取消与 SSE 重连", async
 
   await page.getByRole("button", { name: "EOD" }).click();
   await page.getByLabel("完整精确 version mapping").check();
-  for (const dataset of [
-    "security_master",
-    "exchange_calendar",
-    "daily_bar_unadjusted",
-    "adjustment_factor",
-    "trading_status",
-    "benchmark_index_daily",
-  ]) {
+  for (const dataset of ["daily_bar_unadjusted"]) {
     await page.getByLabel(`${dataset} version`).fill(
       "data_version:00000000-0000-4000-8000-000000000006",
     );

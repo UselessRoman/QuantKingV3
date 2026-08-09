@@ -30,14 +30,18 @@ from quantking.data.override_scope import contribution_scope_sha256, normalize_o
 # ---------------------------------------------------------------------------
 
 
-class DataSource(StrEnum):
-    """Canonical data sources; vendor SDKs stay inside adapters."""
+class DataProvider(StrEnum):
+    """In-process market-data access library."""
 
-    XTQUANT = "XTQUANT"
-    BAOSTOCK = "BAOSTOCK"
     AKSHARE = "AKSHARE"
-    TUSHARE = "TUSHARE"
-    LEGACY_DATA_ONLY = "LEGACY_DATA_ONLY"
+
+
+class DataUpstream(StrEnum):
+    """Actual remote upstream reached through the provider library."""
+
+    EASTMONEY = "EASTMONEY"
+    TENCENT = "TENCENT"
+    SINA = "SINA"
 
 
 class BatchFailureKind(StrEnum):
@@ -279,7 +283,10 @@ class IngestionBatch:
     """One supplier fetch batch, deliberately separate from any ORM row."""
 
     batch_id: EntityId
-    source: DataSource
+    provider: DataProvider
+    upstream: DataUpstream
+    endpoint: str
+    library_version: str
     dataset: DatasetKind
     status: IngestionBatchStatus
     adapter_version: str
@@ -299,8 +306,12 @@ class IngestionBatch:
             raise TypeError("batch_id must be an EntityId")
         if self.batch_id.namespace != "data_batch":
             raise ValueError("batch_id must use the data_batch namespace")
-        if not isinstance(self.source, DataSource):
-            raise TypeError("source must be a DataSource")
+        if not isinstance(self.provider, DataProvider):
+            raise TypeError("provider must be a DataProvider")
+        if not isinstance(self.upstream, DataUpstream):
+            raise TypeError("upstream must be a DataUpstream")
+        _text(self.endpoint, field="endpoint")
+        _text(self.library_version, field="library_version")
         if not isinstance(self.dataset, DatasetKind):
             raise TypeError("dataset must be a DatasetKind")
         if not isinstance(self.status, IngestionBatchStatus):
@@ -368,7 +379,10 @@ class IngestionBatch:
         cls,
         *,
         batch_id: EntityId,
-        source: DataSource,
+        provider: DataProvider,
+        upstream: DataUpstream,
+        endpoint: str,
+        library_version: str,
         dataset: DatasetKind,
         adapter_version: str,
         request_params: Mapping[str, str],
@@ -379,7 +393,10 @@ class IngestionBatch:
         params = _sorted_manifest(request_params, field="request_params")
         return cls(
             batch_id=batch_id,
-            source=source,
+            provider=provider,
+            upstream=upstream,
+            endpoint=endpoint,
+            library_version=library_version,
             dataset=dataset,
             status=IngestionBatchStatus.RUNNING,
             adapter_version=adapter_version,
@@ -688,8 +705,8 @@ class DifferenceReport:
 
     report_id: EntityId
     version_id: EntityId
-    primary_source: DataSource
-    fallback_source: DataSource
+    primary_source: DataUpstream
+    fallback_source: DataUpstream
     created_at: UtcTimestamp
     field_differences: Mapping[str, str]
     total_compared: int
@@ -712,10 +729,10 @@ class DifferenceReport:
             raise ValueError("report_id must use the data_diff namespace")
         if not isinstance(self.version_id, EntityId) or self.version_id.namespace != "data_version":
             raise ValueError("version_id must use the data_version namespace")
-        if not isinstance(self.primary_source, DataSource):
-            raise TypeError("primary_source must be a DataSource")
-        if not isinstance(self.fallback_source, DataSource):
-            raise TypeError("fallback_source must be a DataSource")
+        if not isinstance(self.primary_source, DataUpstream):
+            raise TypeError("primary_source must be a DataUpstream")
+        if not isinstance(self.fallback_source, DataUpstream):
+            raise TypeError("fallback_source must be a DataUpstream")
         if self.primary_source == self.fallback_source:
             raise ValueError("primary and fallback sources must differ")
         for field_name, namespace in (
@@ -775,8 +792,8 @@ class SourceOverride:
     difference_report_id: EntityId
     primary_batch_id: EntityId
     fallback_batch_id: EntityId
-    primary_source: DataSource
-    fallback_source: DataSource
+    primary_source: DataUpstream
+    fallback_source: DataUpstream
     status: SourceOverrideStatus
     scope_codes: tuple[str, ...]
     scope_dates: tuple[TradingDate, ...]
@@ -808,10 +825,10 @@ class SourceOverride:
                 raise ValueError(f"{field} must use the {namespace} namespace")
         if self.primary_batch_id == self.fallback_batch_id:
             raise ValueError("primary_batch_id and fallback_batch_id must differ")
-        if not isinstance(self.primary_source, DataSource):
-            raise TypeError("primary_source must be a DataSource")
-        if not isinstance(self.fallback_source, DataSource):
-            raise TypeError("fallback_source must be a DataSource")
+        if not isinstance(self.primary_source, DataUpstream):
+            raise TypeError("primary_source must be a DataUpstream")
+        if not isinstance(self.fallback_source, DataUpstream):
+            raise TypeError("fallback_source must be a DataUpstream")
         if self.primary_source == self.fallback_source:
             raise ValueError("primary and fallback sources must differ")
         if not isinstance(self.status, SourceOverrideStatus):
@@ -890,8 +907,8 @@ class SourceOverride:
         difference_report_id: EntityId,
         primary_batch_id: EntityId,
         fallback_batch_id: EntityId,
-        primary_source: DataSource,
-        fallback_source: DataSource,
+        primary_source: DataUpstream,
+        fallback_source: DataUpstream,
         scope_codes: tuple[str, ...],
         scope_dates: tuple[TradingDate, ...],
         fields: tuple[str, ...],

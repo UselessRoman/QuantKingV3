@@ -16,13 +16,15 @@
 ## 近期路径
 
 ```text
-S1-07K1 AKShare 东财/腾讯/新浪适配 + 小样本实测
-    → S1-07K2 A/B 互验 + C 异常仲裁 + 生产 EOD
+S1-07K1 AKShare 三适配 + 旧来源/assessment 退役 + 日线单数据集运行时
+    → S1-07K2 ResolutionDecision + override/evidence 退役 + 生产 EOD
     → S1-08 明确范围日线版本 + Stage 1 最终验收
     → Stage 2 因子与标签
 ```
 
 Stage 1 不再包含 XTQuant、QMT、券商账号、机构级签名授权链、17 类 purpose 或 24 单元证据矩阵。
+
+K2 完成后再单独评审 DataCenter 读侧深验；Stage 3 开始时复核模型生命周期，Stage 4 开始时复核双回测成本。在相应 Stage 前不提前修改 ADR 或建设代码。
 
 ## 首期完成定义
 

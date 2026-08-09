@@ -1,4 +1,4 @@
-"""Stable source-boundary contracts with no vendor or dataframe objects."""
+"""Stable AKShare source-boundary contracts without dataframe objects."""
 
 from __future__ import annotations
 
@@ -9,101 +9,190 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
+from quantking.data.adapters.sources.request_window import AkshareRequestWindow
 from quantking.data.incremental import FetchChunk, validate_fetch_chunk
-from quantking.data.models import BatchFailureKind, DatasetKind
+from quantking.data.models import BatchFailureKind, DataProvider, DatasetKind, DataUpstream
 
-_RAW_RESPONSE_SCHEMA_VERSION = "xtquant-raw-response.v1"
+_RAW_RESPONSE_SCHEMA_VERSION = "akshare-raw-response.v1"
 
 
 class SourceErrorCode(StrEnum):
-    """Stable, redacted source failure categories."""
+    """Stable, redacted failure categories exposed outside the adapter."""
 
-    NETWORK = "XTQUANT_NETWORK"
-    PERMISSION = "XTQUANT_PERMISSION"
-    REQUEST_REJECTED = "XTQUANT_REQUEST_REJECTED"
-    RESPONSE_CONTRACT = "XTQUANT_RESPONSE_CONTRACT"
-    CAPABILITY_UNAVAILABLE = "XTQUANT_CAPABILITY_UNAVAILABLE"
-    UNEXPECTED_EMPTY = "XTQUANT_UNEXPECTED_EMPTY"
-    PARTIAL_RESPONSE = "XTQUANT_PARTIAL_RESPONSE"
-    INTERNAL_SDK = "XTQUANT_INTERNAL_SDK"
+    NETWORK = "AKSHARE_NETWORK"
+    RATE_LIMITED = "AKSHARE_RATE_LIMITED"
+    REQUEST_REJECTED = "AKSHARE_REQUEST_REJECTED"
+    SCHEMA_DRIFT = "AKSHARE_SCHEMA_DRIFT"
+    PARSE = "AKSHARE_PARSE"
+    UNIT_UNVERIFIED = "AKSHARE_UNIT_UNVERIFIED"
+    UNEXPECTED_EMPTY = "AKSHARE_UNEXPECTED_EMPTY"
+    PARTIAL_RESPONSE = "AKSHARE_PARTIAL_RESPONSE"
+    INTERNAL_PROVIDER = "AKSHARE_INTERNAL_PROVIDER"
+
+
+class NetworkReason(StrEnum):
+    """Stable, redacted reason for a network-boundary failure."""
+
+    PROXY = "proxy"
+    REMOTE_DISCONNECTED = "remote_disconnected"
+    DNS = "dns"
+    TLS = "tls"
+    TIMEOUT = "timeout"
+    CONNECTION = "connection"
+    UNKNOWN = "unknown"
 
 
 _MESSAGES: dict[SourceErrorCode, str] = {
-    SourceErrorCode.NETWORK: "XTQuant network or connection failed",
-    SourceErrorCode.PERMISSION: "XTQuant permission or authorization failed",
-    SourceErrorCode.REQUEST_REJECTED: "XTQuant request was rejected",
-    SourceErrorCode.RESPONSE_CONTRACT: "XTQuant response contract is invalid",
-    SourceErrorCode.CAPABILITY_UNAVAILABLE: "XTQuant capability is not verified",
-    SourceErrorCode.UNEXPECTED_EMPTY: "XTQuant returned an unexpected empty response",
-    SourceErrorCode.PARTIAL_RESPONSE: "XTQuant returned a partial response",
-    SourceErrorCode.INTERNAL_SDK: "XTQuant internal SDK failure",
+    SourceErrorCode.NETWORK: "AKShare upstream network request failed",
+    SourceErrorCode.RATE_LIMITED: "AKShare upstream rate limit was reached",
+    SourceErrorCode.REQUEST_REJECTED: "AKShare request was rejected",
+    SourceErrorCode.SCHEMA_DRIFT: "AKShare upstream response schema changed",
+    SourceErrorCode.PARSE: "AKShare upstream response could not be parsed",
+    SourceErrorCode.UNIT_UNVERIFIED: "AKShare volume or amount unit is not verified",
+    SourceErrorCode.UNEXPECTED_EMPTY: "AKShare upstream returned an unexpected empty response",
+    SourceErrorCode.PARTIAL_RESPONSE: "AKShare upstream returned a partial response",
+    SourceErrorCode.INTERNAL_PROVIDER: "AKShare provider failed internally",
 }
 
 _FAILURE_KIND: dict[SourceErrorCode, BatchFailureKind] = {
     SourceErrorCode.NETWORK: BatchFailureKind.NETWORK,
-    SourceErrorCode.PERMISSION: BatchFailureKind.PERMISSION,
+    SourceErrorCode.RATE_LIMITED: BatchFailureKind.NETWORK,
     SourceErrorCode.REQUEST_REJECTED: BatchFailureKind.PARSE,
-    SourceErrorCode.RESPONSE_CONTRACT: BatchFailureKind.PARSE,
-    SourceErrorCode.CAPABILITY_UNAVAILABLE: BatchFailureKind.INTERNAL,
+    SourceErrorCode.SCHEMA_DRIFT: BatchFailureKind.PARSE,
+    SourceErrorCode.PARSE: BatchFailureKind.PARSE,
+    SourceErrorCode.UNIT_UNVERIFIED: BatchFailureKind.PARSE,
     SourceErrorCode.UNEXPECTED_EMPTY: BatchFailureKind.UNEXPECTED_EMPTY,
     SourceErrorCode.PARTIAL_RESPONSE: BatchFailureKind.PARTIAL_SOURCE,
-    SourceErrorCode.INTERNAL_SDK: BatchFailureKind.INTERNAL,
+    SourceErrorCode.INTERNAL_PROVIDER: BatchFailureKind.INTERNAL,
 }
 
 _RETRYABLE: dict[SourceErrorCode, bool] = {
     SourceErrorCode.NETWORK: True,
-    SourceErrorCode.PERMISSION: False,
+    SourceErrorCode.RATE_LIMITED: True,
     SourceErrorCode.REQUEST_REJECTED: False,
-    SourceErrorCode.RESPONSE_CONTRACT: False,
-    SourceErrorCode.CAPABILITY_UNAVAILABLE: False,
-    SourceErrorCode.UNEXPECTED_EMPTY: True,
+    SourceErrorCode.SCHEMA_DRIFT: False,
+    SourceErrorCode.PARSE: False,
+    SourceErrorCode.UNIT_UNVERIFIED: False,
+    SourceErrorCode.UNEXPECTED_EMPTY: False,
     SourceErrorCode.PARTIAL_RESPONSE: True,
-    SourceErrorCode.INTERNAL_SDK: True,
+    SourceErrorCode.INTERNAL_PROVIDER: False,
 }
 
 
 class SourceAdapterError(Exception):
-    """Public source error whose text never includes vendor exception content."""
+    """Public adapter error whose message never includes third-party text."""
 
-    def __init__(self, code: SourceErrorCode) -> None:
+    def __init__(
+        self,
+        code: SourceErrorCode,
+        *,
+        network_reason: NetworkReason | None = None,
+    ) -> None:
         if not isinstance(code, SourceErrorCode):
             raise TypeError("code must be a SourceErrorCode")
+        if network_reason is not None and not isinstance(network_reason, NetworkReason):
+            raise TypeError("network_reason must be a NetworkReason or None")
+        if code is SourceErrorCode.NETWORK:
+            network_reason = network_reason or NetworkReason.UNKNOWN
+        elif network_reason is not None:
+            raise ValueError("network_reason is valid only for network failures")
         self.code = code
+        self.network_reason = network_reason
         self.message = _MESSAGES[code]
         self.failure_kind = _FAILURE_KIND[code]
         self.retryable = _RETRYABLE[code]
         super().__init__(self.message)
 
 
+def _exception_chain(error: BaseException) -> tuple[BaseException, ...]:
+    """Return a cycle-safe exception chain without inspecting unstable messages."""
+    pending = [error]
+    result: list[BaseException] = []
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop(0)
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        result.append(current)
+        for attribute in ("__cause__", "__context__", "reason", "original_error"):
+            try:
+                nested = getattr(current, attribute, None)
+            except Exception:
+                continue
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+    return tuple(result)
+
+
+def _is_rate_limited(chain: tuple[BaseException, ...]) -> bool:
+    for error in chain:
+        if type(error).__name__ in {"RateLimitError", "TooManyRequests"}:
+            return True
+        try:
+            response = getattr(error, "response", None)
+            status_code = getattr(response, "status_code", None)
+        except Exception:
+            continue
+        if status_code == 429:
+            return True
+    return False
+
+
+def _network_reason(chain: tuple[BaseException, ...]) -> NetworkReason | None:
+    type_names = {type(error).__name__ for error in chain}
+    if "ProxyError" in type_names:
+        return NetworkReason.PROXY
+    if type_names & {"RemoteDisconnected", "RemoteDisconnectedError"}:
+        return NetworkReason.REMOTE_DISCONNECTED
+    if type_names & {"gaierror", "DNSLookupError", "NameResolutionError"}:
+        return NetworkReason.DNS
+    if type_names & {"SSLError", "SSLCertVerificationError", "CertificateError"}:
+        return NetworkReason.TLS
+    if type_names & {
+        "Timeout",
+        "TimeoutError",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "ReadTimeoutError",
+        "ConnectTimeoutError",
+    }:
+        return NetworkReason.TIMEOUT
+    if type_names & {
+        "ConnectionError",
+        "NewConnectionError",
+        "ProtocolError",
+        "MaxRetryError",
+        "ConnectionResetError",
+        "ConnectionAbortedError",
+        "BrokenPipeError",
+    }:
+        return NetworkReason.CONNECTION
+    if any(isinstance(error, OSError) for error in chain):
+        return NetworkReason.UNKNOWN
+    return None
+
+
 def classify_source_error(error: BaseException) -> SourceAdapterError:
-    """Map an unknown boundary exception without inspecting its sensitive text."""
+    """Map boundary failures without leaking unstable exception details."""
     if isinstance(error, SourceAdapterError):
         return error
-    if isinstance(error, PermissionError):
-        return SourceAdapterError(SourceErrorCode.PERMISSION)
-    if isinstance(error, (TimeoutError, ConnectionError, OSError)):
-        return SourceAdapterError(SourceErrorCode.NETWORK)
-    if isinstance(error, (KeyError, TypeError, ValueError)):
-        return SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
-    return SourceAdapterError(SourceErrorCode.INTERNAL_SDK)
-
-
-class CodeFormat(StrEnum):
-    """Explicit input code encodings accepted by the normalizer."""
-
-    CANONICAL = "000001.SZ"
-    EXCHANGE_PREFIX = "SZ000001"
-
-
-class DateFormat(StrEnum):
-    """Explicit exchange-local date encodings."""
-
-    ISO_YYYY_MM_DD = "YYYY-MM-DD"
-    COMPACT_YYYYMMDD = "YYYYMMDD"
+    chain = _exception_chain(error)
+    if _is_rate_limited(chain):
+        return SourceAdapterError(SourceErrorCode.RATE_LIMITED)
+    network_reason = _network_reason(chain)
+    if network_reason is not None:
+        return SourceAdapterError(SourceErrorCode.NETWORK, network_reason=network_reason)
+    if isinstance(error, KeyError):
+        return SourceAdapterError(SourceErrorCode.SCHEMA_DRIFT)
+    if isinstance(error, (TypeError, ValueError)):
+        return SourceAdapterError(SourceErrorCode.PARSE)
+    return SourceAdapterError(SourceErrorCode.INTERNAL_PROVIDER)
 
 
 class VolumeUnit(StrEnum):
-    """Explicit supplier volume units; never inferred from values."""
+    """Observed upstream volume unit resolved by the locked package policy."""
 
     SHARE = "share"
     LOT_100_SHARES = "lot_100_shares"
@@ -111,134 +200,62 @@ class VolumeUnit(StrEnum):
 
 
 class AmountUnit(StrEnum):
-    """Explicit supplier amount units; never inferred from values."""
+    """Observed upstream amount unit resolved by the locked package policy."""
 
     CNY_YUAN = "cny_yuan"
     UNVERIFIED = "unverified"
 
 
 @dataclass(frozen=True, slots=True)
+class SourceLineage:
+    """Provider/upstream facts bound to one endpoint response."""
+
+    provider: DataProvider
+    upstream: DataUpstream
+    endpoint: str
+    library_version: str
+    fetched_at: str
+
+    def __post_init__(self) -> None:
+        if self.provider is not DataProvider.AKSHARE:
+            raise ValueError("Stage 1 provider must be AKSHARE")
+        if not isinstance(self.upstream, DataUpstream):
+            raise TypeError("upstream must be a DataUpstream")
+        for field in ("endpoint", "library_version", "fetched_at"):
+            value = getattr(self, field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field} must be non-empty text")
+
+
+@dataclass(frozen=True, slots=True)
 class SupplierResponseContract:
-    """Verified interpretation attached to one raw supplier response."""
+    """Verified interpretation attached to one unadjusted daily-bar response."""
 
     dataset: DatasetKind
     contract_version: str
     required_fields: tuple[str, ...]
-    code_format: CodeFormat
-    date_format: DateFormat
-    exchange_map: Mapping[str, str]
     volume_unit: VolumeUnit
     amount_unit: AmountUnit
-    point_in_time: bool
     unadjusted: bool
-    official_status: bool
-    adjustment_formula: str | None
-    semantics_verified: bool
+    lineage: SourceLineage
 
     def __post_init__(self) -> None:
-        if not isinstance(self.dataset, DatasetKind):
-            raise TypeError("dataset must be a DatasetKind")
+        if self.dataset is not DatasetKind.DAILY_BAR_UNADJUSTED:
+            raise ValueError("AKShare production contract supports daily_bar_unadjusted only")
         if not isinstance(self.contract_version, str) or not self.contract_version.strip():
             raise ValueError("contract_version must be non-empty text")
         if not isinstance(self.required_fields, tuple) or not self.required_fields:
             raise ValueError("required_fields must be a non-empty tuple")
         if len(set(self.required_fields)) != len(self.required_fields):
             raise ValueError("required_fields must be unique")
-        if any(not isinstance(field, str) or not field for field in self.required_fields):
-            raise ValueError("required_fields must contain non-empty text")
-        if not isinstance(self.code_format, CodeFormat):
-            raise TypeError("code_format must be a CodeFormat")
-        if not isinstance(self.date_format, DateFormat):
-            raise TypeError("date_format must be a DateFormat")
         if not isinstance(self.volume_unit, VolumeUnit):
             raise TypeError("volume_unit must be a VolumeUnit")
         if not isinstance(self.amount_unit, AmountUnit):
             raise TypeError("amount_unit must be an AmountUnit")
-        normalized_exchange: dict[str, str] = {}
-        for supplier, canonical in self.exchange_map.items():
-            if not isinstance(supplier, str) or not supplier:
-                raise ValueError("exchange_map keys must be non-empty text")
-            if canonical not in {"SZ", "SH", "BJ"}:
-                raise ValueError("exchange_map values must be canonical exchanges")
-            normalized_exchange[supplier] = canonical
-        object.__setattr__(
-            self,
-            "exchange_map",
-            MappingProxyType(dict(sorted(normalized_exchange.items()))),
-        )
-        for field in ("point_in_time", "unadjusted", "official_status", "semantics_verified"):
-            if not isinstance(getattr(self, field), bool):
-                raise TypeError(f"{field} must be a bool")
-        if self.adjustment_formula is not None and (
-            not isinstance(self.adjustment_formula, str) or not self.adjustment_formula.strip()
-        ):
-            raise ValueError("adjustment_formula must be non-empty text or None")
-
-
-def _contract_payload(contract: SupplierResponseContract) -> dict[str, object]:
-    return {
-        "dataset": contract.dataset.value,
-        "contract_version": contract.contract_version,
-        "required_fields": list(contract.required_fields),
-        "code_format": contract.code_format.value,
-        "date_format": contract.date_format.value,
-        "exchange_map": dict(contract.exchange_map),
-        "volume_unit": contract.volume_unit.value,
-        "amount_unit": contract.amount_unit.value,
-        "point_in_time": contract.point_in_time,
-        "unadjusted": contract.unadjusted,
-        "official_status": contract.official_status,
-        "adjustment_formula": contract.adjustment_formula,
-        "semantics_verified": contract.semantics_verified,
-    }
-
-
-def _contract_from_payload(value: object) -> SupplierResponseContract:
-    keys = {
-        "dataset",
-        "contract_version",
-        "required_fields",
-        "code_format",
-        "date_format",
-        "exchange_map",
-        "volume_unit",
-        "amount_unit",
-        "point_in_time",
-        "unadjusted",
-        "official_status",
-        "adjustment_formula",
-        "semantics_verified",
-    }
-    if not isinstance(value, dict) or set(value) != keys:
-        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
-    required_fields = value["required_fields"]
-    exchange_map = value["exchange_map"]
-    if not isinstance(required_fields, list) or any(
-        not isinstance(field, str) for field in required_fields
-    ):
-        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
-    if not isinstance(exchange_map, dict) or any(
-        not isinstance(key, str) or not isinstance(item, str) for key, item in exchange_map.items()
-    ):
-        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
-    try:
-        return SupplierResponseContract(
-            dataset=DatasetKind(value["dataset"]),
-            contract_version=value["contract_version"],
-            required_fields=tuple(required_fields),
-            code_format=CodeFormat(value["code_format"]),
-            date_format=DateFormat(value["date_format"]),
-            exchange_map=exchange_map,
-            volume_unit=VolumeUnit(value["volume_unit"]),
-            amount_unit=AmountUnit(value["amount_unit"]),
-            point_in_time=value["point_in_time"],
-            unadjusted=value["unadjusted"],
-            official_status=value["official_status"],
-            adjustment_formula=value["adjustment_formula"],
-            semantics_verified=value["semantics_verified"],
-        )
-    except (TypeError, ValueError) as error:
-        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT) from error
+        if self.unadjusted is not True:
+            raise ValueError("daily bars must be explicitly unadjusted")
+        if not isinstance(self.lineage, SourceLineage):
+            raise TypeError("lineage must be SourceLineage")
 
 
 def _chunk_payload(chunk: FetchChunk) -> dict[str, object]:
@@ -252,6 +269,67 @@ def _chunk_payload(chunk: FetchChunk) -> dict[str, object]:
         "end_inclusive": chunk.end_inclusive,
         "request_sha256": chunk.request_sha256,
     }
+
+
+def _contract_payload(contract: SupplierResponseContract) -> dict[str, object]:
+    return {
+        "dataset": contract.dataset.value,
+        "contract_version": contract.contract_version,
+        "required_fields": list(contract.required_fields),
+        "volume_unit": contract.volume_unit.value,
+        "amount_unit": contract.amount_unit.value,
+        "unadjusted": contract.unadjusted,
+        "lineage": {
+            "provider": contract.lineage.provider.value,
+            "upstream": contract.lineage.upstream.value,
+            "endpoint": contract.lineage.endpoint,
+            "library_version": contract.lineage.library_version,
+            "fetched_at": contract.lineage.fetched_at,
+        },
+    }
+
+
+def _contract_from_payload(value: object) -> SupplierResponseContract:
+    if not isinstance(value, dict) or set(value) != {
+        "dataset",
+        "contract_version",
+        "required_fields",
+        "volume_unit",
+        "amount_unit",
+        "unadjusted",
+        "lineage",
+    }:
+        raise SourceAdapterError(SourceErrorCode.SCHEMA_DRIFT)
+    lineage = value["lineage"]
+    required = value["required_fields"]
+    if not isinstance(lineage, dict) or set(lineage) != {
+        "provider",
+        "upstream",
+        "endpoint",
+        "library_version",
+        "fetched_at",
+    }:
+        raise SourceAdapterError(SourceErrorCode.SCHEMA_DRIFT)
+    if not isinstance(required, list) or any(not isinstance(item, str) for item in required):
+        raise SourceAdapterError(SourceErrorCode.SCHEMA_DRIFT)
+    try:
+        return SupplierResponseContract(
+            dataset=DatasetKind(value["dataset"]),
+            contract_version=str(value["contract_version"]),
+            required_fields=tuple(required),
+            volume_unit=VolumeUnit(value["volume_unit"]),
+            amount_unit=AmountUnit(value["amount_unit"]),
+            unadjusted=value["unadjusted"],
+            lineage=SourceLineage(
+                provider=DataProvider(lineage["provider"]),
+                upstream=DataUpstream(lineage["upstream"]),
+                endpoint=str(lineage["endpoint"]),
+                library_version=str(lineage["library_version"]),
+                fetched_at=str(lineage["fetched_at"]),
+            ),
+        )
+    except (TypeError, ValueError) as error:
+        raise SourceAdapterError(SourceErrorCode.SCHEMA_DRIFT) from error
 
 
 def _reject_constant(_value: str) -> None:
@@ -269,9 +347,8 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _load_canonical_json(payload: bytes) -> object:
     try:
-        decoded = payload.decode("utf-8")
         value = json.loads(
-            decoded,
+            payload.decode("utf-8"),
             object_pairs_hook=_reject_duplicate_keys,
             parse_constant=_reject_constant,
         )
@@ -283,9 +360,9 @@ def _load_canonical_json(payload: bytes) -> object:
             sort_keys=True,
         ).encode("utf-8")
     except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT) from error
+        raise SourceAdapterError(SourceErrorCode.PARSE) from error
     if canonical != payload:
-        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+        raise SourceAdapterError(SourceErrorCode.PARSE)
     return value
 
 
@@ -300,84 +377,59 @@ def _plain_records(records: tuple[Mapping[str, object], ...]) -> list[dict[str, 
         ).encode("utf-8")
         value = _load_canonical_json(payload)
     except (TypeError, ValueError) as error:
-        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT) from error
+        raise SourceAdapterError(SourceErrorCode.PARSE) from error
     if not isinstance(value, list) or any(not isinstance(record, dict) for record in value):
-        raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+        raise SourceAdapterError(SourceErrorCode.PARSE)
     return value
 
 
 @dataclass(frozen=True, slots=True)
 class SupplierResponse:
-    """Raw bytes and typed record views returned by a source gateway."""
+    """Canonicalizable records plus immutable provider payload and lineage."""
 
     records: tuple[Mapping[str, object], ...]
     raw_payload: bytes
     contract: SupplierResponseContract
     complete: bool
     partial_reason: str | None
-    chunk: FetchChunk | None = None
+    chunk: FetchChunk
+    upstream_row_count: int
+    request_window: AkshareRequestWindow
 
     def __post_init__(self) -> None:
-        if not isinstance(self.records, tuple):
-            raise TypeError("records must be a tuple")
-        normalized: list[Mapping[str, object]] = []
-        for record in self.records:
-            if not isinstance(record, Mapping):
-                raise TypeError("records must contain mappings")
-            normalized.append(MappingProxyType(dict(record)))
-        object.__setattr__(self, "records", tuple(normalized))
-        if not isinstance(self.raw_payload, (bytes, bytearray)):
-            raise TypeError("raw_payload must be bytes")
+        normalized = tuple(MappingProxyType(dict(record)) for record in self.records)
+        object.__setattr__(self, "records", normalized)
         object.__setattr__(self, "raw_payload", bytes(self.raw_payload))
         if not isinstance(self.contract, SupplierResponseContract):
             raise TypeError("contract must be a SupplierResponseContract")
-        if not isinstance(self.complete, bool):
-            raise TypeError("complete must be a bool")
+        if not isinstance(self.request_window, AkshareRequestWindow):
+            raise TypeError("request_window must be an AkshareRequestWindow")
+        if (
+            self.request_window.target_start != self.chunk.start.value
+            or self.request_window.target_end != self.chunk.end.value
+        ):
+            raise SourceAdapterError(SourceErrorCode.PARSE)
+        if (
+            isinstance(self.upstream_row_count, bool)
+            or not isinstance(self.upstream_row_count, int)
+            or self.upstream_row_count < len(self.records)
+        ):
+            raise ValueError("upstream_row_count must cover all canonicalizable records")
+        validate_fetch_chunk(self.chunk)
+        if self.contract.dataset is not self.chunk.dataset:
+            raise SourceAdapterError(SourceErrorCode.SCHEMA_DRIFT)
         if self.complete and self.partial_reason is not None:
             raise ValueError("complete response cannot carry partial_reason")
-        if not self.complete and (
-            not isinstance(self.partial_reason, str) or not self.partial_reason.strip()
+        if not self.complete and self.partial_reason != SourceErrorCode.PARTIAL_RESPONSE.value:
+            raise ValueError("partial response requires the stable partial code")
+        rebuilt = self.from_raw_payload(self.raw_payload, expected_chunk=self.chunk)
+        if (
+            rebuilt.records != self.records
+            or rebuilt.contract != self.contract
+            or rebuilt.upstream_row_count != self.upstream_row_count
+            or rebuilt.request_window != self.request_window
         ):
-            raise ValueError("partial response requires a non-empty partial_reason")
-        if self.partial_reason is not None and self.partial_reason not in {
-            code.value for code in SourceErrorCode
-        }:
-            raise ValueError("partial_reason must be a stable source error code")
-        raw = _load_canonical_json(self.raw_payload)
-        expected_records = _plain_records(self.records)
-        if self.chunk is None:
-            if raw != expected_records:
-                raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
-            return
-        validate_fetch_chunk(self.chunk)
-        expected_keys = {
-            "schema_version",
-            "binding",
-            "contract",
-            "response",
-            "provider_payload",
-        }
-        if not isinstance(raw, dict) or set(raw) != expected_keys:
-            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
-        response = raw["response"]
-        if not isinstance(response, dict) or set(response) != {
-            "complete",
-            "partial_reason",
-            "records",
-        }:
-            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
-        if raw["schema_version"] != _RAW_RESPONSE_SCHEMA_VERSION:
-            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
-        if raw["binding"] != _chunk_payload(self.chunk):
-            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
-        if _contract_from_payload(raw["contract"]) != self.contract:
-            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
-        if response["records"] != expected_records:
-            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
-        if response["complete"] is not self.complete:
-            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
-        if response["partial_reason"] != self.partial_reason:
-            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+            raise SourceAdapterError(SourceErrorCode.PARSE)
 
     @classmethod
     def create_bound(
@@ -389,25 +441,40 @@ class SupplierResponse:
         complete: bool,
         partial_reason: str | None,
         provider_payload: object,
+        request_window: AkshareRequestWindow,
+        upstream_row_count: int | None = None,
     ) -> SupplierResponse:
-        """Create the only response form eligible for Raw ingestion."""
         validate_fetch_chunk(chunk)
-        if contract.dataset is not chunk.dataset:
-            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
-        plain_records = _plain_records(records)
+        if not isinstance(request_window, AkshareRequestWindow):
+            raise TypeError("request_window must be an AkshareRequestWindow")
+        if (
+            request_window.target_start != chunk.start.value
+            or request_window.target_end != chunk.end.value
+        ):
+            raise ValueError("request_window target must match chunk")
+        plain = _plain_records(records)
+        upstream_rows = len(plain) if upstream_row_count is None else upstream_row_count
+        if (
+            isinstance(upstream_rows, bool)
+            or not isinstance(upstream_rows, int)
+            or upstream_rows < len(plain)
+        ):
+            raise ValueError("upstream_row_count must cover all canonicalizable records")
         envelope = {
             "schema_version": _RAW_RESPONSE_SCHEMA_VERSION,
             "binding": _chunk_payload(chunk),
+            "request_window": request_window.to_payload(),
             "contract": _contract_payload(contract),
             "response": {
                 "complete": complete,
                 "partial_reason": partial_reason,
-                "records": plain_records,
+                "records": plain,
+                "upstream_row_count": upstream_rows,
             },
             "provider_payload": provider_payload,
         }
         try:
-            raw_payload = json.dumps(
+            payload = json.dumps(
                 envelope,
                 ensure_ascii=False,
                 allow_nan=False,
@@ -415,58 +482,94 @@ class SupplierResponse:
                 sort_keys=True,
             ).encode("utf-8")
         except (TypeError, ValueError) as error:
-            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT) from error
+            raise SourceAdapterError(SourceErrorCode.PARSE) from error
         return cls(
-            records=tuple(plain_records),
-            raw_payload=raw_payload,
+            records=tuple(plain),
+            raw_payload=payload,
             contract=contract,
             complete=complete,
             partial_reason=partial_reason,
             chunk=chunk,
+            upstream_row_count=upstream_rows,
+            request_window=request_window,
         )
 
     @classmethod
     def from_raw_payload(
         cls,
-        raw_payload: bytes,
+        payload: bytes,
         *,
         expected_chunk: FetchChunk,
     ) -> SupplierResponse:
-        """Rebuild a typed response solely from verified Raw bytes."""
-        validate_fetch_chunk(expected_chunk)
-        raw = _load_canonical_json(raw_payload)
-        if not isinstance(raw, dict):
-            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT)
+        value = _load_canonical_json(payload)
+        if not isinstance(value, dict) or set(value) != {
+            "schema_version",
+            "binding",
+            "request_window",
+            "contract",
+            "response",
+            "provider_payload",
+        }:
+            raise SourceAdapterError(SourceErrorCode.SCHEMA_DRIFT)
+        if value["schema_version"] != _RAW_RESPONSE_SCHEMA_VERSION:
+            raise SourceAdapterError(SourceErrorCode.SCHEMA_DRIFT)
+        if value["binding"] != _chunk_payload(expected_chunk):
+            raise SourceAdapterError(SourceErrorCode.PARSE)
         try:
-            contract = _contract_from_payload(raw["contract"])
-            response = raw["response"]
-            if not isinstance(response, dict):
-                raise TypeError("response must be an object")
-            records = response["records"]
-            if not isinstance(records, list) or any(
-                not isinstance(record, dict) for record in records
-            ):
-                raise TypeError("records must be an object list")
-            complete = response["complete"]
-            partial_reason = response["partial_reason"]
-        except (KeyError, TypeError) as error:
-            raise SourceAdapterError(SourceErrorCode.RESPONSE_CONTRACT) from error
-        return cls(
-            records=tuple(records),
-            raw_payload=raw_payload,
-            contract=contract,
-            complete=complete,
-            partial_reason=partial_reason,
-            chunk=expected_chunk,
-        )
+            request_window = AkshareRequestWindow.from_payload(value["request_window"])
+        except (TypeError, ValueError) as error:
+            raise SourceAdapterError(SourceErrorCode.PARSE) from error
+        if (
+            request_window.target_start != expected_chunk.start.value
+            or request_window.target_end != expected_chunk.end.value
+        ):
+            raise SourceAdapterError(SourceErrorCode.PARSE)
+        response = value["response"]
+        if not isinstance(response, dict) or set(response) != {
+            "complete",
+            "partial_reason",
+            "records",
+            "upstream_row_count",
+        }:
+            raise SourceAdapterError(SourceErrorCode.SCHEMA_DRIFT)
+        records = response["records"]
+        if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+            raise SourceAdapterError(SourceErrorCode.PARSE)
+        complete = response["complete"]
+        partial_reason = response["partial_reason"]
+        upstream_row_count = response["upstream_row_count"]
+        if not isinstance(complete, bool):
+            raise SourceAdapterError(SourceErrorCode.PARSE)
+        if partial_reason is not None and not isinstance(partial_reason, str):
+            raise SourceAdapterError(SourceErrorCode.PARSE)
+        if complete and partial_reason is not None:
+            raise SourceAdapterError(SourceErrorCode.PARSE)
+        if not complete and partial_reason != SourceErrorCode.PARTIAL_RESPONSE.value:
+            raise SourceAdapterError(SourceErrorCode.PARSE)
+        if (
+            isinstance(upstream_row_count, bool)
+            or not isinstance(upstream_row_count, int)
+            or upstream_row_count < len(records)
+        ):
+            raise SourceAdapterError(SourceErrorCode.PARSE)
+        obj = object.__new__(cls)
+        object.__setattr__(obj, "records", tuple(MappingProxyType(record) for record in records))
+        object.__setattr__(obj, "raw_payload", bytes(payload))
+        object.__setattr__(obj, "contract", _contract_from_payload(value["contract"]))
+        object.__setattr__(obj, "complete", complete)
+        object.__setattr__(obj, "partial_reason", partial_reason)
+        object.__setattr__(obj, "chunk", expected_chunk)
+        object.__setattr__(obj, "upstream_row_count", upstream_row_count)
+        object.__setattr__(obj, "request_window", request_window)
+        return obj
 
 
 __all__ = [
     "AmountUnit",
-    "CodeFormat",
-    "DateFormat",
+    "NetworkReason",
     "SourceAdapterError",
     "SourceErrorCode",
+    "SourceLineage",
     "SupplierResponse",
     "SupplierResponseContract",
     "VolumeUnit",

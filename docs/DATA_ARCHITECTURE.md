@@ -22,6 +22,8 @@
 
 AKShare 是统一依赖，不等于三个来源相同。必须记录实际 upstream；上游网页或接口变化属于可观测故障。
 
+来源合同只包含 `provider=AKSHARE`、三个 upstream、endpoint、库版本和最近运行结果。K1 不保留 `PRIMARY/FALLBACK` 候选审批、`PRODUCTION_READY`、稳定运行次数或 source×dataset 能力矩阵。
+
 ## 分层
 
 ```text
@@ -29,7 +31,7 @@ Raw              各 upstream 原始响应，独立、只追加
     ↓
 Canonical        统一代码、字段、单位和日期
     ↓
-Resolved         多源比较后的选源结果与原因
+Resolved         `ResolutionDecision` 与日线候选；不是人工 override
     ↓
 Warehouse        已发布 DatasetVersion
     ↓
@@ -43,6 +45,7 @@ Research         复权、股票池、因子、标签和 Qlib 派生视图
 - Canonical 主键至少为 `(symbol, trade_date)`，排序确定。
 - 已发布版本不可原地修改；新数据或修订生成新版本。
 - 失败或未达成两源一致的行进入隔离，不进入发布候选。
+- Stage 1 运行时只处理 `daily_bar_unadjusted`；其他数据集 schema 不进入抓取、比较或发布枚举。
 
 ## 单源检查
 
@@ -61,7 +64,9 @@ Research         复权、股票池、因子、标签和 Qlib 派生视图
 4. 至少两源一致才可选择；从一致集合按 A、B、C 优先级选择。
 5. 无两源一致时隔离并报告。
 
-允许逐证券/交易日选源，但每行必须有 `selected_upstream`、参与比较的来源、规则版本和决定原因；这不是静默补洞。
+允许逐证券/交易日选源。每个决定至少记录 `selected_upstream`、参与比较的来源、规则版本、决定原因和差异报告标识；它属于正常 `ResolutionDecision`，不是 `SourceOverride` 或静默补洞。
+
+K2 可以在版本级记录共同默认决定，并只为例外证券/交易日保存行级决定，避免为完全一致的普通行重复存储相同审计文本。
 
 价格精度、成交量和成交额单位及容差先由 K1 真实小样本确认，再由 K2 冻结。不得在未实测时猜测。
 
@@ -72,6 +77,15 @@ Research         复权、股票池、因子、标签和 Qlib 派生视图
 ```
 
 失败目录保留且不能改成成功。研究、回测和 Web 只能消费显式 `PUBLISHED DatasetVersion`，不能读取“latest”路径。
+
+## EOD 恢复
+
+Stage 1 的权威恢复事实仅包括冻结 `JobRun`、各 upstream Raw manifest、最终 DatasetVersion manifest 和 JSON Lines 日志：
+
+1. 进程中断后把旧 Job 标记为 `INTERRUPTED`，不在原 Job 中继续执行。
+2. 用户重试时创建新 Job。
+3. 相同输入指纹若已有完整 `PUBLISHED DatasetVersion`，复验发布 manifest 后直接复用。
+4. 否则从最近的安全业务边界重新执行，不增加独立 success/failure evidence 或多层 checkpoint 状态。
 
 ## 后续研究边界
 

@@ -1,21 +1,29 @@
-"""Read-only market-data source adapters for Stage 1."""
+"""Read-only AKShare upstream adapters for Stage 1."""
 
-from quantking.data.adapters.sources.capabilities import (
-    XTQUANT_CAPABILITIES,
-    XtQuantCapability,
+from quantking.data.adapters.sources.akshare import (
+    AkshareDailyBarAdapter,
+    AkshareEndpointResponse,
+    AkshareMarketDataGateway,
 )
 from quantking.data.adapters.sources.contracts import (
+    NetworkReason,
     SourceAdapterError,
     SourceErrorCode,
     SupplierResponse,
     SupplierResponseContract,
 )
+from quantking.data.adapters.sources.registry import SourceSpec, source_registry, source_spec
 
 __all__ = [
-    "XTQUANT_CAPABILITIES",
+    "AkshareDailyBarAdapter",
+    "AkshareEndpointResponse",
+    "AkshareMarketDataGateway",
+    "NetworkReason",
     "SourceAdapterError",
     "SourceErrorCode",
+    "SourceSpec",
     "SupplierResponse",
     "SupplierResponseContract",
-    "XtQuantCapability",
+    "source_registry",
+    "source_spec",
 ]

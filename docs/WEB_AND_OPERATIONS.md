@@ -52,6 +52,8 @@ PENDING → RUNNING → SUCCEEDED
 
 被程序重启中断的运行中任务必须在恢复时标记为 `INTERRUPTED` 或等价失败状态，不能继续显示为运行中。
 
+Stage 1 的旧 EOD Job 不原地续跑。重试创建新 Job；只有冻结输入指纹对应的 DatasetVersion 已完整发布时才复用该版本。Job、Raw/DatasetVersion manifest 和 JSON Lines 是权威事实，不再扩展平行 success/failure evidence 或多层 checkpoint 合同。
+
 每个 `JobRun` 保存：
 
 - 任务类型、输入版本、配置版本和请求者。
@@ -144,6 +146,10 @@ Web 修改业务参数时创建新版本；已经被实验、回测或计划引�
 - Worker 心跳和队列积压。
 - 最新数据、因子、模型和账户快照时间。
 - 最近失败任务、未关闭对账差异和风险阻断。
+
+## 延后评审点
+
+K2 完成后单独评审 DataCenter 日常读取是否改为轻量检查，并把全文件 SHA/血缘深验收敛到发布时和显式完整性任务。该项不阻断 K1/K2，未经独立任务不得削弱发布时完整验证。
 
 ## 备份
 

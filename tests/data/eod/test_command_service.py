@@ -34,7 +34,7 @@ def _request(*, day: date = date(2026, 7, 15)) -> EodRunRequest:
     return EodRunRequest(
         start_date=day,
         end_date=day,
-        datasets=("exchange_calendar",),
+        datasets=("daily_bar_unadjusted",),
         publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
         base_versions={},
     )

@@ -10,12 +10,11 @@ from quantking.data.center import DataCenterPage
 
 class DataCenterReadPort(Protocol):
     def summary(self) -> Mapping[str, object]: ...
-    def sources(self) -> list[Mapping[str, object]]: ...
     def list_batches(
         self,
         *,
         dataset: str | None,
-        source: str | None,
+        upstream: str | None,
         status: str | None,
         started_from: str | None,
         started_to: str | None,

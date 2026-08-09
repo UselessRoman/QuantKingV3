@@ -126,7 +126,7 @@ class EodRunRequest:
             "datasets": list(self.datasets),
             "base_versions": dict(self.base_versions),
             "publish_intent": self.publish_intent.value,
-            "source": "XTQUANT",
+            "source": "AKSHARE",
         }
 
     @classmethod
@@ -146,8 +146,8 @@ class EodRunRequest:
             raise ValueError("EOD request fields do not match the frozen schema")
         if value.get("schema_version") != EOD_REQUEST_SCHEMA:
             raise ValueError("EOD request schema_version is unsupported")
-        if value.get("source") != "XTQUANT":
-            raise ValueError("EOD source must be XTQUANT")
+        if value.get("source") != "AKSHARE":
+            raise ValueError("EOD source must be AKSHARE")
         raw_datasets = value.get("datasets")
         raw_bases = value.get("base_versions")
         if not isinstance(raw_datasets, list):

@@ -31,9 +31,10 @@ from quantking.data.comparison.comparator import (
 from quantking.data.comparison.thresholds import default_thresholds
 from quantking.data.comparison.verifier import DifferenceReportVerifier
 from quantking.data.models import (
+    DataProvider,
     DatasetKind,
     DatasetVersion,
-    DataSource,
+    DataUpstream,
     IngestionBatch,
     IngestionBatchStatus,
     ManifestFileEntry,
@@ -93,15 +94,29 @@ def _daily(close: float) -> pa.Table:
     )
 
 
-def _batch(source: DataSource, dataset: DatasetKind) -> IngestionBatch:
+def _batch(source: DataUpstream, dataset: DatasetKind) -> IngestionBatch:
+    endpoint = {
+        DataUpstream.EASTMONEY: "stock_zh_a_hist",
+        DataUpstream.TENCENT: "stock_zh_a_hist_tx",
+        DataUpstream.SINA: "stock_zh_a_daily",
+    }[source]
     return IngestionBatch(
         batch_id=new_entity_id("data_batch"),
-        source=source,
+        provider=DataProvider.AKSHARE,
+        upstream=source,
+        endpoint=endpoint,
+        library_version="test",
         dataset=dataset,
         status=IngestionBatchStatus.SUCCEEDED,
         adapter_version="s1-04-r4",
-        request_params={"scope": "fixed"},
-        request_params_json='{"scope":"fixed"}',
+        request_params={
+            "provider": "AKSHARE",
+            "upstream": source.value,
+            "endpoint": endpoint,
+            "akshare_version": "test",
+            "scope": "fixed",
+        },
+        request_params_json="{}",
         started_at=utc_now(),
         ended_at=utc_now(),
         row_count=1,
@@ -144,7 +159,7 @@ def _quality_domain(outcome: QualityRunArtifact, relative_path: str) -> QualityR
 def _publish(
     *,
     dataset: DatasetKind,
-    source: DataSource,
+    source: DataUpstream,
     table: pa.Table,
     data_root: Path,
     artifacts_root: Path,
@@ -219,7 +234,7 @@ def test_source_override_full_real_production_path(
     )
     calendar, _, _ = _publish(
         dataset=DatasetKind.EXCHANGE_CALENDAR,
-        source=DataSource.XTQUANT,
+        source=DataUpstream.EASTMONEY,
         table=_calendar(),
         data_root=tmp_path,
         artifacts_root=artifacts_root,
@@ -237,7 +252,7 @@ def test_source_override_full_real_production_path(
     fallback_table = _daily(10.8)
     primary, primary_run_id, primary_batch = _publish(
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        source=DataSource.XTQUANT,
+        source=DataUpstream.EASTMONEY,
         table=primary_table,
         data_root=tmp_path,
         artifacts_root=artifacts_root,
@@ -248,7 +263,7 @@ def test_source_override_full_real_production_path(
     )
     fallback, fallback_run_id, fallback_batch = _publish(
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        source=DataSource.BAOSTOCK,
+        source=DataUpstream.TENCENT,
         table=fallback_table,
         data_root=tmp_path,
         artifacts_root=artifacts_root,
@@ -261,8 +276,8 @@ def test_source_override_full_real_production_path(
         request=CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version=primary.schema_version,
-            primary_source=DataSource.XTQUANT.value,
-            fallback_source=DataSource.BAOSTOCK.value,
+            primary_source=DataUpstream.EASTMONEY.value,
+            fallback_source=DataUpstream.TENCENT.value,
             primary_version_id=primary.version_id,
             fallback_version_id=fallback.version_id,
             primary_batch_id=primary_batch.batch_id,
@@ -299,8 +314,8 @@ def test_source_override_full_real_production_path(
             difference_report_id=comparison.report_id,
             primary_batch_id=primary_batch.batch_id,
             fallback_batch_id=fallback_batch.batch_id,
-            primary_source=DataSource.XTQUANT.value,
-            fallback_source=DataSource.BAOSTOCK.value,
+            primary_source=DataUpstream.EASTMONEY.value,
+            fallback_source=DataUpstream.TENCENT.value,
             scope_codes=("000001.SZ",),
             scope_dates=(TradingDate(date(2026, 7, 15)),),
             fields=("close",),

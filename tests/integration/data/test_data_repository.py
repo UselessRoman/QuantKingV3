@@ -21,10 +21,11 @@ from quantking.data.comparison.verifier import VerifiedDifferenceReport
 from quantking.data.models import (
     BatchFailureInfo,
     BatchFailureKind,
+    DataProvider,
     DatasetKind,
     DatasetVersion,
     DatasetVersionStatus,
-    DataSource,
+    DataUpstream,
     DifferenceReport,
     IngestionBatch,
     IngestionBatchStatus,
@@ -58,16 +59,34 @@ def factory(tmp_path: Path) -> DataSqliteUnitOfWorkFactory:
 
 def _running_batch(
     *,
-    source: DataSource = DataSource.XTQUANT,
+    source: DataUpstream = DataUpstream.EASTMONEY,
     dataset: DatasetKind = DatasetKind.DAILY_BAR_UNADJUSTED,
     batch_id: EntityId | None = None,
 ) -> IngestionBatch:
     return IngestionBatch.running(
         batch_id=batch_id or new_entity_id("data_batch"),
-        source=source,
+        provider=DataProvider.AKSHARE,
+        upstream=source,
+        endpoint={
+            DataUpstream.EASTMONEY: "stock_zh_a_hist",
+            DataUpstream.TENCENT: "stock_zh_a_hist_tx",
+            DataUpstream.SINA: "stock_zh_a_daily",
+        }[source],
+        library_version="test",
         dataset=dataset,
         adapter_version=f"{source.value.lower()}-1",
-        request_params={"code": "000001.SZ", "start": "2026-01-01"},
+        request_params={
+            "provider": "AKSHARE",
+            "upstream": source.value,
+            "endpoint": {
+                DataUpstream.EASTMONEY: "stock_zh_a_hist",
+                DataUpstream.TENCENT: "stock_zh_a_hist_tx",
+                DataUpstream.SINA: "stock_zh_a_daily",
+            }[source],
+            "akshare_version": "test",
+            "code": "000001.SZ",
+            "start": "2026-01-01",
+        },
         started_at=_NOW,
     )
 
@@ -82,7 +101,7 @@ def _succeeded_batch(**kwargs: object) -> IngestionBatch:
         security_count=1,
         manifest_files=(
             ManifestFileEntry(
-                relative_path=f"raw/{running.source.value.lower()}/part.parquet",
+                relative_path=f"raw/{running.upstream.value.lower()}/part.parquet",
                 size=10,
                 sha256=_SHA,
             ),
@@ -177,8 +196,8 @@ def _verified(report: DifferenceReport) -> VerifiedDifferenceReport:
 def _persist_override_graph(
     factory: DataSqliteUnitOfWorkFactory,
 ) -> tuple[SourceOverride, DatasetVersion, IngestionBatch]:
-    primary = _succeeded_batch(source=DataSource.XTQUANT)
-    fallback = _succeeded_batch(source=DataSource.BAOSTOCK)
+    primary = _succeeded_batch(source=DataUpstream.EASTMONEY)
+    fallback = _succeeded_batch(source=DataUpstream.TENCENT)
     compared_version = _building_version((primary.batch_id,))
     fallback_version = _building_version((fallback.batch_id,))
     primary_quality_run = QualityRun(
@@ -226,8 +245,8 @@ def _persist_override_graph(
     report = DifferenceReport(
         report_id=new_entity_id("data_diff"),
         version_id=compared_version.version_id,
-        primary_source=DataSource.XTQUANT,
-        fallback_source=DataSource.BAOSTOCK,
+        primary_source=DataUpstream.EASTMONEY,
+        fallback_source=DataUpstream.TENCENT,
         created_at=_DECIDED,
         field_differences={"close": "1"},
         total_compared=100,
@@ -251,8 +270,8 @@ def _persist_override_graph(
         difference_report_id=report.report_id,
         primary_batch_id=primary.batch_id,
         fallback_batch_id=fallback.batch_id,
-        primary_source=DataSource.XTQUANT,
-        fallback_source=DataSource.BAOSTOCK,
+        primary_source=DataUpstream.EASTMONEY,
+        fallback_source=DataUpstream.TENCENT,
         scope_codes=("000001.SZ",),
         scope_dates=(_TRADE_DATE,),
         fields=("close",),
@@ -426,8 +445,8 @@ class TestQualityAndDifferencePersistence:
     def test_difference_report_save_read_and_query(
         self, factory: DataSqliteUnitOfWorkFactory
     ) -> None:
-        primary_batch = _succeeded_batch(source=DataSource.XTQUANT)
-        fallback_batch = _succeeded_batch(source=DataSource.BAOSTOCK)
+        primary_batch = _succeeded_batch(source=DataUpstream.EASTMONEY)
+        fallback_batch = _succeeded_batch(source=DataUpstream.TENCENT)
         primary_version = _building_version((primary_batch.batch_id,))
         fallback_version = _building_version((fallback_batch.batch_id,))
         primary_quality_run = QualityRun(
@@ -475,8 +494,8 @@ class TestQualityAndDifferencePersistence:
         report = DifferenceReport(
             report_id=new_entity_id("data_diff"),
             version_id=primary_version.version_id,
-            primary_source=DataSource.XTQUANT,
-            fallback_source=DataSource.BAOSTOCK,
+            primary_source=DataUpstream.EASTMONEY,
+            fallback_source=DataUpstream.TENCENT,
             created_at=_DECIDED,
             field_differences={"amount": "2", "close": "1"},
             total_compared=100,
@@ -510,7 +529,7 @@ class TestQualityAndDifferencePersistence:
         with factory() as uow:
             assert uow.data.get_difference_report(str(report.report_id)) == report
             assert uow.data.list_difference_reports(
-                version_id=str(primary_version.version_id), primary_source=DataSource.XTQUANT
+                version_id=str(primary_version.version_id), primary_source=DataUpstream.EASTMONEY
             ) == [report]
 
 

@@ -43,27 +43,22 @@ from quantking.data.adapters.persistence.models import (
     IngestionBatchRow,
     QualityResultRow,
     QualityRunRow,
-    SourceCandidateAssessmentRow,
     SourceOverrideApplicationAttemptRow,
     SourceOverrideApplicationRow,
     SourceOverrideRow,
 )
 from quantking.data.adapters.warehouse.manifest import compute_sha256
-from quantking.data.assessment.models import (
-    AssessmentStatus,
-    EvidenceKind,
-    SourceCandidateAssessment,
-)
 from quantking.data.comparison.verifier import VerifiedDifferenceReport
 from quantking.data.models import (
     BATCH_TRANSITIONS,
     DATASET_VERSION_TRANSITIONS,
     BatchFailureInfo,
     BatchFailureKind,
+    DataProvider,
     DatasetKind,
     DatasetVersion,
     DatasetVersionStatus,
-    DataSource,
+    DataUpstream,
     DifferenceReport,
     EmptyResultInfo,
     IngestionBatch,
@@ -254,7 +249,7 @@ def _batch_row_values(batch: IngestionBatch) -> dict[str, object]:
     )
     return {
         "batch_id": str(batch.batch_id),
-        "source": batch.source.value,
+        "source": batch.upstream.value,
         "dataset": batch.dataset.value,
         "status": batch.status.value,
         "adapter_version": batch.adapter_version,
@@ -285,7 +280,10 @@ def _batch_domain(row: IngestionBatchRow) -> IngestionBatch:
     )
     return IngestionBatch(
         batch_id=parse_entity_id(row.batch_id),
-        source=DataSource(row.source),
+        provider=DataProvider(_load_mapping(row.request_params_json)["provider"]),
+        upstream=DataUpstream(row.source),
+        endpoint=_load_mapping(row.request_params_json)["endpoint"],
+        library_version=_load_mapping(row.request_params_json)["akshare_version"],
         dataset=DatasetKind(row.dataset),
         status=IngestionBatchStatus(row.status),
         adapter_version=row.adapter_version,
@@ -468,8 +466,8 @@ def _difference_from_verified(report: VerifiedDifferenceReport) -> DifferenceRep
     return DifferenceReport(
         report_id=report.report_id,
         version_id=report.primary_version_id,
-        primary_source=DataSource(report.primary_source),
-        fallback_source=DataSource(report.fallback_source),
+        primary_source=DataUpstream(report.primary_source),
+        fallback_source=DataUpstream(report.fallback_source),
         created_at=report.created_at,
         field_differences=report.field_differences,
         total_compared=report.total_compared,
@@ -495,8 +493,8 @@ def _difference_domain(row: DifferenceReportRow) -> DifferenceReport:
     return DifferenceReport(
         report_id=parse_entity_id(row.report_id),
         version_id=parse_entity_id(row.version_id),
-        primary_source=DataSource(row.primary_source),
-        fallback_source=DataSource(row.fallback_source),
+        primary_source=DataUpstream(row.primary_source),
+        fallback_source=DataUpstream(row.fallback_source),
         created_at=UtcTimestamp.from_iso(row.created_at),
         field_differences=_load_mapping(row.field_differences_json),
         total_compared=row.total_compared,
@@ -571,8 +569,8 @@ def _override_domain(row: SourceOverrideRow) -> SourceOverride:
         difference_report_id=parse_entity_id(row.difference_report_id),
         primary_batch_id=parse_entity_id(row.primary_batch_id),
         fallback_batch_id=parse_entity_id(row.fallback_batch_id),
-        primary_source=DataSource(row.primary_source),
-        fallback_source=DataSource(row.fallback_source),
+        primary_source=DataUpstream(row.primary_source),
+        fallback_source=DataUpstream(row.fallback_source),
         status=SourceOverrideStatus(row.status),
         scope_codes=_load_str_sequence(row.scope_codes_json),
         scope_dates=scope_dates,
@@ -613,54 +611,6 @@ def _override_attempt_domain(
         started_at=UtcTimestamp.from_iso(row.started_at),
         ended_at=_timestamp(row.ended_at),
         failure_message=row.failure_message,
-    )
-
-
-def _assessment_row_values(assessment: SourceCandidateAssessment) -> dict[str, object]:
-    return {
-        "assessment_id": str(assessment.assessment_id),
-        "source": assessment.source,
-        "dataset": assessment.dataset.value,
-        "evidence_kind": assessment.evidence_kind.value,
-        "semantic_contract_verified": int(assessment.semantic_contract_verified),
-        "schema_unit_verified": int(assessment.schema_unit_verified),
-        "coverage_adequate": int(assessment.coverage_adequate),
-        "quality_passed": int(assessment.quality_passed),
-        "fixed_sample_differences_adequate": int(assessment.fixed_sample_differences_adequate),
-        "stability_runs": assessment.stability_runs,
-        "status": assessment.status.value,
-        "blocking_reason": assessment.blocking_reason,
-        "assessment_config_version": assessment.assessment_config_version,
-        "sample_spec_version": assessment.sample_spec_version,
-        "rule_version": assessment.rule_version,
-        "evidence_relative_path": assessment.evidence_relative_path,
-        "evidence_sha256": assessment.evidence_sha256,
-        "created_at": assessment.created_at.to_iso(),
-    }
-
-
-def _assessment_domain(row: SourceCandidateAssessmentRow) -> SourceCandidateAssessment:
-    from quantking.common.ids import parse_entity_id
-
-    return SourceCandidateAssessment(
-        assessment_id=parse_entity_id(row.assessment_id),
-        source=row.source,
-        dataset=DatasetKind(row.dataset),
-        evidence_kind=EvidenceKind(row.evidence_kind),
-        semantic_contract_verified=bool(row.semantic_contract_verified),
-        schema_unit_verified=bool(row.schema_unit_verified),
-        coverage_adequate=bool(row.coverage_adequate),
-        quality_passed=bool(row.quality_passed),
-        fixed_sample_differences_adequate=bool(row.fixed_sample_differences_adequate),
-        stability_runs=row.stability_runs,
-        status=AssessmentStatus(row.status),
-        blocking_reason=row.blocking_reason,
-        assessment_config_version=row.assessment_config_version,
-        sample_spec_version=row.sample_spec_version,
-        rule_version=row.rule_version,
-        evidence_relative_path=row.evidence_relative_path,
-        evidence_sha256=row.evidence_sha256,
-        created_at=UtcTimestamp.from_iso(row.created_at),
     )
 
 
@@ -733,7 +683,7 @@ class DataRepository:
         self,
         *,
         dataset: DatasetKind | None,
-        source: DataSource | None,
+        upstream: DataUpstream | None,
         status: IngestionBatchStatus | None,
         started_from: str | None,
         started_to: str | None,
@@ -744,8 +694,8 @@ class DataRepository:
         statement = select(IngestionBatchRow)
         if dataset is not None:
             statement = statement.where(IngestionBatchRow.dataset == dataset.value)
-        if source is not None:
-            statement = statement.where(IngestionBatchRow.source == source.value)
+        if upstream is not None:
+            statement = statement.where(IngestionBatchRow.source == upstream.value)
         if status is not None:
             statement = statement.where(IngestionBatchRow.status == status.value)
         if started_from is not None:
@@ -1164,7 +1114,7 @@ class DataRepository:
         self,
         *,
         version_id: str | None = None,
-        primary_source: DataSource | None = None,
+        primary_source: DataUpstream | None = None,
     ) -> list[DifferenceReport]:
         statement = select(DifferenceReportRow).order_by(
             DifferenceReportRow.created_at, DifferenceReportRow.report_id
@@ -1179,7 +1129,7 @@ class DataRepository:
         self,
         *,
         version_id: str | None,
-        primary_source: DataSource | None,
+        primary_source: DataUpstream | None,
         before: tuple[str, str] | None,
         limit: int,
     ) -> list[DifferenceReport]:
@@ -1869,67 +1819,6 @@ class DataRepository:
             child_status=DatasetVersionStatus.FAILED,
             failure_message=sanitized,
         )
-
-    # -- source candidate assessments -------------------------------------
-
-    def save_source_candidate_assessment(
-        self, assessment: SourceCandidateAssessment
-    ) -> SourceCandidateAssessment:
-        values = _assessment_row_values(assessment)
-        row = self._session.get(SourceCandidateAssessmentRow, str(assessment.assessment_id))
-        if row is not None and not _row_matches(row, values):
-            raise InvalidDataTransitionError("source assessment evidence is immutable")
-        if row is None:
-            self._session.add(SourceCandidateAssessmentRow(**values))
-        self._session.flush()
-        return assessment
-
-    def get_source_candidate_assessment(self, assessment_id: str) -> SourceCandidateAssessment:
-        row = self._session.get(SourceCandidateAssessmentRow, assessment_id)
-        if row is None:
-            raise InvalidIdError("source candidate assessment does not exist")
-        return _assessment_domain(row)
-
-    def list_source_candidate_assessments(
-        self,
-        *,
-        source: str | None = None,
-        dataset: DatasetKind | None = None,
-        status: AssessmentStatus | None = None,
-    ) -> list[SourceCandidateAssessment]:
-        statement = select(SourceCandidateAssessmentRow).order_by(
-            SourceCandidateAssessmentRow.source,
-            SourceCandidateAssessmentRow.dataset,
-            SourceCandidateAssessmentRow.created_at,
-        )
-        if source is not None:
-            statement = statement.where(SourceCandidateAssessmentRow.source == source)
-        if dataset is not None:
-            statement = statement.where(SourceCandidateAssessmentRow.dataset == dataset.value)
-        if status is not None:
-            statement = statement.where(SourceCandidateAssessmentRow.status == status.value)
-        return [_assessment_domain(item) for item in self._session.scalars(statement)]
-
-    def find_latest_source_candidate_assessment(
-        self,
-        *,
-        source: str,
-        dataset: DatasetKind,
-    ) -> SourceCandidateAssessment | None:
-        """Return the newest persisted assessment for one exact matrix cell."""
-        row = self._session.scalar(
-            select(SourceCandidateAssessmentRow)
-            .where(
-                SourceCandidateAssessmentRow.source == source,
-                SourceCandidateAssessmentRow.dataset == dataset.value,
-            )
-            .order_by(
-                SourceCandidateAssessmentRow.created_at.desc(),
-                SourceCandidateAssessmentRow.assessment_id.desc(),
-            )
-            .limit(1)
-        )
-        return _assessment_domain(row) if row is not None else None
 
     # -- audit (delegates to the shared audit_records table) --------------
 

@@ -3,9 +3,6 @@ code_root = "E:\\QuantKingV3"
 data_root = "E:\\QuantKingV3Data"
 offsite_backup_root = "F:\\QuantKingV3Backups"
 
-[xtquant]
-site_packages_root = "C:\\Program Files\\QMT\\bin.x64\\Lib\\site-packages"
-
 [web]
 host = "127.0.0.1"
 port = 8765

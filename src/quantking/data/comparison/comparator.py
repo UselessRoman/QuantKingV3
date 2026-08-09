@@ -36,7 +36,7 @@ from quantking.common.ids import EntityId
 from quantking.common.time import UtcTimestamp
 from quantking.data.adapters.canonical_schema import canonical_schema, validate_table
 from quantking.data.comparison.thresholds import ThresholdSet, ThresholdSpec
-from quantking.data.models import DatasetKind, DataSource
+from quantking.data.models import DatasetKind, DataUpstream
 from quantking.data.schemas import descriptor_for
 
 # ---------------------------------------------------------------------------
@@ -119,16 +119,16 @@ def _json_value(value: Any) -> Any:
     return str(value)
 
 
-def _coerce_data_source(value: Any, *, field: str) -> DataSource:
-    """Accept a DataSource enum or its string value."""
-    if isinstance(value, DataSource):
+def _coerce_data_source(value: Any, *, field: str) -> DataUpstream:
+    """Accept a DataUpstream enum or its string value."""
+    if isinstance(value, DataUpstream):
         return value
     if isinstance(value, str):
         try:
-            return DataSource(value)
+            return DataUpstream(value)
         except ValueError as error:
-            raise ValueError(f"{field} is not a valid DataSource value: {value!r}") from error
-    raise TypeError(f"{field} must be a DataSource or its string value")
+            raise ValueError(f"{field} is not a valid DataUpstream value: {value!r}") from error
+    raise TypeError(f"{field} must be a DataUpstream or its string value")
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +150,8 @@ class CrossSourceComparisonRequest:
 
     dataset: DatasetKind
     schema_version: str
-    primary_source: DataSource
-    fallback_source: DataSource
+    primary_source: DataUpstream
+    fallback_source: DataUpstream
     primary_version_id: EntityId
     fallback_version_id: EntityId
     primary_batch_id: EntityId
@@ -171,7 +171,7 @@ class CrossSourceComparisonRequest:
             raise TypeError("dataset must be a DatasetKind")
         if not isinstance(self.schema_version, str) or not self.schema_version.strip():
             raise ValueError("schema_version must be non-empty text")
-        # Accept DataSource enum or its string value (e.g. "XTQUANT").
+        # Accept a DataUpstream enum or its string value.
         primary_source = _coerce_data_source(self.primary_source, field="primary_source")
         fallback_source = _coerce_data_source(self.fallback_source, field="fallback_source")
         object.__setattr__(self, "primary_source", primary_source)
@@ -245,8 +245,8 @@ class CrossSourceComparisonOutcome:
     report_id: EntityId
     dataset: DatasetKind
     schema_version: str
-    primary_source: DataSource
-    fallback_source: DataSource
+    primary_source: DataUpstream
+    fallback_source: DataUpstream
     primary_version_id: EntityId
     fallback_version_id: EntityId
     primary_batch_id: EntityId
@@ -269,10 +269,10 @@ class CrossSourceComparisonOutcome:
             raise ValueError("report_id must use the data_diff namespace")
         if not isinstance(self.dataset, DatasetKind):
             raise TypeError("dataset must be a DatasetKind")
-        if not isinstance(self.primary_source, DataSource):
-            raise TypeError("primary_source must be a DataSource")
-        if not isinstance(self.fallback_source, DataSource):
-            raise TypeError("fallback_source must be a DataSource")
+        if not isinstance(self.primary_source, DataUpstream):
+            raise TypeError("primary_source must be a DataUpstream")
+        if not isinstance(self.fallback_source, DataUpstream):
+            raise TypeError("fallback_source must be a DataUpstream")
         if (
             not isinstance(self.threshold_rule_version, str)
             or not self.threshold_rule_version.strip()

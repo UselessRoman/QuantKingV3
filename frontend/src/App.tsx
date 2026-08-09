@@ -24,7 +24,6 @@ interface AppProps {
 
 type Tab =
   | "overview"
-  | "sources"
   | "batches"
   | "versions"
   | "quality"
@@ -35,7 +34,6 @@ type Tab =
 
 const tabs: Array<{ id: Tab; label: string; path?: string }> = [
   { id: "overview", label: "总览", path: "/api/data/summary" },
-  { id: "sources", label: "数据源", path: "/api/data/sources" },
   { id: "batches", label: "批次", path: "/api/data/batches" },
   { id: "versions", label: "版本", path: "/api/data/versions" },
   { id: "quality", label: "质量", path: "/api/data/quality-runs" },
@@ -51,19 +49,11 @@ const actionLabels: Partial<Record<Tab, string>> = {
   overrides: "审计血缘",
 };
 
-const datasets = [
-  "security_master",
-  "exchange_calendar",
-  "daily_bar_unadjusted",
-  "adjustment_factor",
-  "trading_status",
-  "benchmark_index_daily",
-] as const;
-const sources = ["XTQUANT", "BAOSTOCK", "AKSHARE", "TUSHARE"] as const;
+const datasets = ["daily_bar_unadjusted"] as const;
+const upstreams = ["EASTMONEY", "TENCENT", "SINA"] as const;
 const filterDefaults: Record<Tab, Record<string, string>> = {
   overview: {},
-  sources: {},
-  batches: { dataset: "", source: "", status: "", started_from: "", started_to: "" },
+  batches: { dataset: "", upstream: "", status: "", started_from: "", started_to: "" },
   versions: { dataset: "", status: "" },
   quality: { version_id: "", status: "" },
   differences: { version_id: "", primary_source: "" },
@@ -121,7 +111,8 @@ function DataTable({
   if (rows.length === 0) return <p className="empty">暂无记录</p>;
   const preferred = [
     "dataset",
-    "source",
+    "provider",
+    "upstream",
     "version_id",
     "batch_id",
     "run_id",
@@ -181,8 +172,8 @@ function FilterBar({
       )}
       {tab === "batches" && (
         <>
-          <label>来源<select aria-label="batches source" value={values.source} onChange={(event) => onChange("source", event.target.value)}>
-            <option value="">全部</option>{sources.map((value) => <option key={value}>{value}</option>)}
+          <label>上游<select aria-label="batches upstream" value={values.upstream} onChange={(event) => onChange("upstream", event.target.value)}>
+            <option value="">全部</option>{upstreams.map((value) => <option key={value}>{value}</option>)}
           </select></label>
           <label>状态<select aria-label="batches status" value={values.status} onChange={(event) => onChange("status", event.target.value)}>
             <option value="">全部</option>{["RUNNING", "SUCCEEDED", "PARTIAL", "FAILED"].map((value) => <option key={value}>{value}</option>)}
@@ -201,7 +192,7 @@ function FilterBar({
       {tab === "differences" && (
         <>
           <label>Version ID<input aria-label="differences version" value={values.version_id} onChange={(event) => onChange("version_id", event.target.value)} /></label>
-          <label>主来源<select aria-label="differences source" value={values.primary_source} onChange={(event) => onChange("primary_source", event.target.value)}><option value="">全部</option>{sources.map((value) => <option key={value}>{value}</option>)}</select></label>
+          <label>主上游<select aria-label="differences source" value={values.primary_source} onChange={(event) => onChange("primary_source", event.target.value)}><option value="">全部</option>{upstreams.map((value) => <option key={value}>{value}</option>)}</select></label>
         </>
       )}
       {tab === "overrides" && <label>状态<select aria-label="overrides status" value={values.status} onChange={(event) => onChange("status", event.target.value)}><option value="">全部</option>{["PENDING", "APPROVED", "REJECTED", "APPLIED"].map((value) => <option key={value}>{value}</option>)}</select></label>}
@@ -572,7 +563,6 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
         {dataState === "error" && <section className="error-panel"><p role="alert">{dataError}</p><button onClick={() => void load(tab)}>重试</button></section>}
         {dataState === "ready" && tab !== "eod" && (
           <section>
-            {tab === "sources" && <p className="notice">阻断状态是明确能力结论；合成证据不会显示为生产可用，且所有 auto_switch 均为 false。</p>}
             <FilterBar
               tab={tab}
               values={filters[tab]}

@@ -175,7 +175,7 @@ def _r5_context(tmp_path: Path) -> _R5Context:
     )
     from quantking.data.comparison.thresholds import default_thresholds
     from quantking.data.comparison.verifier import DifferenceReportVerifier
-    from quantking.data.models import DataSource
+    from quantking.data.models import DataUpstream
     from quantking.data.override.service import CreateOverrideRequest, SourceOverrideService
     from quantking.data.quality.engine import QualityEngine
     from quantking.data.quality.references import PublishedReferenceLoader
@@ -195,7 +195,7 @@ def _r5_context(tmp_path: Path) -> _R5Context:
     )
     calendar, _, _ = _publish(
         dataset=DatasetKind.EXCHANGE_CALENDAR,
-        source=DataSource.XTQUANT,
+        source=DataUpstream.EASTMONEY,
         table=_table(
             "exchange_calendar",
             [
@@ -270,7 +270,7 @@ def _r5_context(tmp_path: Path) -> _R5Context:
     )
     primary, primary_run_id, primary_batch = _publish(
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        source=DataSource.XTQUANT,
+        source=DataUpstream.EASTMONEY,
         table=primary_table,
         data_root=tmp_path,
         artifacts_root=artifacts_root,
@@ -281,7 +281,7 @@ def _r5_context(tmp_path: Path) -> _R5Context:
     )
     fallback, fallback_run_id, fallback_batch = _publish(
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        source=DataSource.BAOSTOCK,
+        source=DataUpstream.TENCENT,
         table=fallback_table,
         data_root=tmp_path,
         artifacts_root=artifacts_root,
@@ -294,8 +294,8 @@ def _r5_context(tmp_path: Path) -> _R5Context:
         request=CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version=primary.schema_version,
-            primary_source=DataSource.XTQUANT.value,
-            fallback_source=DataSource.BAOSTOCK.value,
+            primary_source=DataUpstream.EASTMONEY.value,
+            fallback_source=DataUpstream.TENCENT.value,
             primary_version_id=primary.version_id,
             fallback_version_id=fallback.version_id,
             primary_batch_id=primary_batch.batch_id,
@@ -334,8 +334,8 @@ def _r5_context(tmp_path: Path) -> _R5Context:
             difference_report_id=comparison.report_id,
             primary_batch_id=primary_batch.batch_id,
             fallback_batch_id=fallback_batch.batch_id,
-            primary_source=DataSource.XTQUANT.value,
-            fallback_source=DataSource.BAOSTOCK.value,
+            primary_source=DataUpstream.EASTMONEY.value,
+            fallback_source=DataUpstream.TENCENT.value,
             scope_codes=("000002.SZ",),
             scope_dates=(TradingDate(date(2026, 7, 15)),),
             fields=(),

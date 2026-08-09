@@ -13,7 +13,7 @@ from quantking.data.eod.contracts import EodRunRequest
 from quantking.data.models import (
     DatasetKind,
     DatasetVersionStatus,
-    DataSource,
+    DataUpstream,
     IngestionBatchStatus,
     QualityRunStatus,
     SourceOverrideStatus,
@@ -83,14 +83,10 @@ def create_api_router(
         def data_summary() -> object:
             return data_center_port.summary()
 
-        @router.get("/data/sources")
-        def data_sources() -> object:
-            return data_center_port.sources()
-
         @router.get("/data/batches")
         def data_batches(
             dataset: DatasetKind | None = None,
-            source: DataSource | None = None,
+            upstream: DataUpstream | None = None,
             status: IngestionBatchStatus | None = None,
             started_from: datetime | None = None,
             started_to: datetime | None = None,
@@ -101,7 +97,7 @@ def create_api_router(
             return page(
                 data_center_port.list_batches(
                     dataset=dataset.value if dataset else None,
-                    source=source.value if source else None,
+                    upstream=upstream.value if upstream else None,
                     status=status.value if status else None,
                     started_from=started_from.isoformat() if started_from else None,
                     started_to=started_to.isoformat() if started_to else None,
@@ -178,7 +174,7 @@ def create_api_router(
         @router.get("/data/difference-reports")
         def difference_reports(
             version_id: str | None = None,
-            primary_source: DataSource | None = None,
+            primary_source: DataUpstream | None = None,
             cursor: str | None = None,
             limit: int = Query(default=50, ge=1, le=100),
         ) -> object:

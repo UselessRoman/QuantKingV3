@@ -74,7 +74,17 @@ _WINDOWS_RESERVED_NAMES = frozenset(
     | {f"COM{index}" for index in range(1, 10)}
     | {f"LPT{index}" for index in range(1, 10)}
 )
-_FAILURE_PARAM_KEYS = frozenset({"adapter_version", "dataset", "request_sha256"})
+_FAILURE_PARAM_KEYS = frozenset(
+    {
+        "adapter_version",
+        "dataset",
+        "request_sha256",
+        "provider",
+        "upstream",
+        "endpoint",
+        "akshare_version",
+    }
+)
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 

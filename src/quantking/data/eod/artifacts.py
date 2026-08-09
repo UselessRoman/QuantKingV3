@@ -272,7 +272,7 @@ def verify_eod_completed_results(
                 batch is None
                 or batch.status is not IngestionBatchStatus.SUCCEEDED
                 or batch.dataset.value != result.dataset
-                or batch.source.value != "XTQUANT"
+                or batch.provider.value != "AKSHARE"
                 or batch.adapter_version != command.adapter_version
                 or result.batch_id not in {str(item) for item in version.input_batch_ids}
             ):
@@ -293,7 +293,14 @@ def verify_eod_completed_results(
                     adapter_version=command.adapter_version,
                 )
             )
-            if dict(batch.request_params) != dict(expected_plan.request_params):
+            expected_params = {
+                **dict(expected_plan.request_params),
+                "provider": batch.provider.value,
+                "upstream": batch.upstream.value,
+                "endpoint": batch.endpoint,
+                "akshare_version": batch.library_version,
+            }
+            if dict(batch.request_params) != expected_params:
                 raise EodEvidenceConflictError("EOD batch request does not match frozen command")
         elif (
             plan.base_version is None

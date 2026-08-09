@@ -40,9 +40,10 @@ from quantking.data.comparison.verifier import DifferenceReportVerifier
 from quantking.data.eod.contracts import EodBaseVersion
 from quantking.data.eod.service import EodCommandService, EodExecutionConfig
 from quantking.data.models import (
+    DataProvider,
     DatasetKind,
     DatasetVersion,
-    DataSource,
+    DataUpstream,
     IngestionBatch,
     IngestionBatchStatus,
     ManifestFileEntry,
@@ -126,14 +127,28 @@ def _daily(close: float) -> pa.Table:
     )
 
 
-def _batch(source: DataSource, dataset: DatasetKind, row_count: int) -> IngestionBatch:
+def _batch(upstream: DataUpstream, dataset: DatasetKind, row_count: int) -> IngestionBatch:
+    endpoint = {
+        DataUpstream.EASTMONEY: "stock_zh_a_hist",
+        DataUpstream.TENCENT: "stock_zh_a_hist_tx",
+        DataUpstream.SINA: "stock_zh_a_daily",
+    }[upstream]
     return IngestionBatch(
         batch_id=new_entity_id("data_batch"),
-        source=source,
+        provider=DataProvider.AKSHARE,
+        upstream=upstream,
+        endpoint=endpoint,
+        library_version="playwright-fixture",
         dataset=dataset,
         status=IngestionBatchStatus.SUCCEEDED,
         adapter_version="playwright-real-query-chain",
-        request_params={"scope": "synthetic-loopback"},
+        request_params={
+            "provider": DataProvider.AKSHARE.value,
+            "upstream": upstream.value,
+            "endpoint": endpoint,
+            "akshare_version": "playwright-fixture",
+            "scope": "synthetic-loopback",
+        },
         request_params_json='{"scope":"synthetic-loopback"}',
         started_at=utc_now(),
         ended_at=utc_now(),
@@ -177,7 +192,7 @@ def _quality_domain(outcome: QualityRunArtifact, relative_path: str) -> QualityR
 def _publish(
     *,
     dataset: DatasetKind,
-    source: DataSource,
+    upstream: DataUpstream,
     table: pa.Table,
     artifacts_root: Path,
     uow_factory: DataSqliteUnitOfWorkFactory,
@@ -185,7 +200,7 @@ def _publish(
     runner: QualityRunner,
     reference_data: dict[str, ReferenceDataBinding],
 ) -> tuple[DatasetVersion, EntityId, IngestionBatch]:
-    batch = _batch(source, dataset, table.num_rows)
+    batch = _batch(upstream, dataset, table.num_rows)
     version = DatasetVersion.building(
         version_id=new_entity_id("data_version"),
         dataset=dataset,
@@ -254,7 +269,7 @@ def _seed_data_center(
     )
     calendar, _, _ = _publish(
         dataset=DatasetKind.EXCHANGE_CALENDAR,
-        source=DataSource.XTQUANT,
+        upstream=DataUpstream.EASTMONEY,
         table=_calendar(),
         artifacts_root=artifacts_root,
         uow_factory=uow_factory,
@@ -271,7 +286,7 @@ def _seed_data_center(
     fallback_table = _daily(10.8)
     primary, primary_run_id, primary_batch = _publish(
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        source=DataSource.XTQUANT,
+        upstream=DataUpstream.EASTMONEY,
         table=primary_table,
         artifacts_root=artifacts_root,
         uow_factory=uow_factory,
@@ -281,7 +296,7 @@ def _seed_data_center(
     )
     fallback, fallback_run_id, fallback_batch = _publish(
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        source=DataSource.BAOSTOCK,
+        upstream=DataUpstream.TENCENT,
         table=fallback_table,
         artifacts_root=artifacts_root,
         uow_factory=uow_factory,
@@ -293,8 +308,8 @@ def _seed_data_center(
         request=CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version=primary.schema_version,
-            primary_source=DataSource.XTQUANT,
-            fallback_source=DataSource.BAOSTOCK,
+            primary_source=DataUpstream.EASTMONEY,
+            fallback_source=DataUpstream.TENCENT,
             primary_version_id=primary.version_id,
             fallback_version_id=fallback.version_id,
             primary_batch_id=primary_batch.batch_id,
@@ -331,8 +346,8 @@ def _seed_data_center(
             difference_report_id=comparison.report_id,
             primary_batch_id=primary_batch.batch_id,
             fallback_batch_id=fallback_batch.batch_id,
-            primary_source=DataSource.XTQUANT.value,
-            fallback_source=DataSource.BAOSTOCK.value,
+            primary_source=DataUpstream.EASTMONEY.value,
+            fallback_source=DataUpstream.TENCENT.value,
             scope_codes=("000001.SZ",),
             scope_dates=(TradingDate(date(2026, 7, 28)),),
             fields=("close",),

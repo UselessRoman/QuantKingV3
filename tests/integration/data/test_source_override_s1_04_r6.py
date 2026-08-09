@@ -118,7 +118,7 @@ def test_0008_to_0007_restores_behavior_not_only_names(tmp_path: Path) -> None:
                 "VALUES ('data_override:22222222-2222-4222-8222-222222222222',"
                 "'daily_bar_unadjusted','data_diff:22222222-2222-4222-8222-222222222222',"
                 "'data_batch:22222222-2222-4222-8222-222222222222',"
-                "'data_batch:33333333-3333-4333-8333-333333333333','XTQUANT','BAOSTOCK',"
+                "'data_batch:33333333-3333-4333-8333-333333333333','EASTMONEY','TENCENT',"
                 "'PENDING','[\"000001.SZ\"]','[\"2026-07-15\"]','[\"close\"]','x',"
                 "'2026-07-22T00:00:00Z')"
             )

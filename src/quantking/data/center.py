@@ -25,14 +25,12 @@ from quantking.data.adapters.warehouse.errors import (
     ManifestIntegrityError,
     QueryContractError,
 )
-from quantking.data.assessment.matrix import default_source_matrix
-from quantking.data.assessment.models import SourceCandidateAssessment
 from quantking.data.models import (
     BatchFailureInfo,
     DatasetKind,
     DatasetVersion,
     DatasetVersionStatus,
-    DataSource,
+    DataUpstream,
     DifferenceReport,
     IngestionBatch,
     IngestionBatchStatus,
@@ -79,16 +77,13 @@ class DataRepositoryPort(Protocol):
         self, override_id: str
     ) -> OverrideAttempt | None: ...
     def list_override_audits(self, override_id: str, *, limit: int) -> list[AuditRecord]: ...
-    def find_latest_source_candidate_assessment(
-        self, *, source: str, dataset: DatasetKind
-    ) -> SourceCandidateAssessment | None: ...
     def count_failed_entities(self) -> int: ...
 
     def list_batches_page(
         self,
         *,
         dataset: DatasetKind | None,
-        source: DataSource | None,
+        upstream: DataUpstream | None,
         status: IngestionBatchStatus | None,
         started_from: str | None,
         started_to: str | None,
@@ -118,7 +113,7 @@ class DataRepositoryPort(Protocol):
         self,
         *,
         version_id: str | None,
-        primary_source: DataSource | None,
+        primary_source: DataUpstream | None,
         before: tuple[str, str] | None,
         limit: int,
     ) -> list[DifferenceReport]: ...
@@ -363,7 +358,10 @@ def _failure(value: BatchFailureInfo | FailureInfo | None) -> Mapping[str, objec
 def _batch(item: IngestionBatch) -> Mapping[str, object]:
     return {
         "batch_id": str(item.batch_id),
-        "source": item.source.value,
+        "provider": item.provider.value,
+        "upstream": item.upstream.value,
+        "endpoint": item.endpoint,
+        "library_version": item.library_version,
         "dataset": item.dataset.value,
         "status": item.status.value,
         "started_at": item.started_at.to_iso(),
@@ -647,78 +645,11 @@ class DataCenterQueryService:
         self._jobs = jobs
         self._clock = clock
 
-    def sources(self) -> list[Mapping[str, object]]:
-        rows: list[Mapping[str, object]] = []
-        with self._uow_factory() as uow:
-            for item in default_source_matrix().entries:
-                try:
-                    assessment = uow.data.find_latest_source_candidate_assessment(
-                        source=item.source,
-                        dataset=item.dataset,
-                    )
-                except (InvalidIdError, ValueError) as error:
-                    raise DataCenterReadIntegrityError(
-                        "source assessment evidence is invalid"
-                    ) from error
-                rows.append(
-                    {
-                        "source": item.source,
-                        "dataset": item.dataset.value,
-                        "role": item.role.value,
-                        "status": item.status.value,
-                        "matrix_status": item.status.value,
-                        "evidence_kind": (
-                            assessment.evidence_kind.value if assessment is not None else None
-                        ),
-                        "assessment_status": (
-                            assessment.status.value if assessment is not None else None
-                        ),
-                        "stability_runs": (
-                            assessment.stability_runs if assessment is not None else None
-                        ),
-                        "gates": (
-                            {
-                                "semantic_contract_verified": (
-                                    assessment.semantic_contract_verified
-                                ),
-                                "schema_unit_verified": assessment.schema_unit_verified,
-                                "coverage_adequate": assessment.coverage_adequate,
-                                "quality_passed": assessment.quality_passed,
-                                "fixed_sample_differences_adequate": (
-                                    assessment.fixed_sample_differences_adequate
-                                ),
-                            }
-                            if assessment is not None
-                            else None
-                        ),
-                        "blocking_reason": (
-                            assessment.blocking_reason
-                            if assessment is not None
-                            else item.blocking_reason
-                        ),
-                        "matrix_blocking_reason": item.blocking_reason,
-                        "assessment_config_version": (
-                            assessment.assessment_config_version if assessment is not None else None
-                        ),
-                        "sample_spec_version": (
-                            assessment.sample_spec_version if assessment is not None else None
-                        ),
-                        "rule_version": (
-                            assessment.rule_version if assessment is not None else None
-                        ),
-                        "assessment_id": (
-                            str(assessment.assessment_id) if assessment is not None else None
-                        ),
-                        "auto_switch": item.auto_switch,
-                    }
-                )
-        return rows
-
     def summary(self) -> Mapping[str, object]:
         datasets: list[Mapping[str, object]] = []
         with self._uow_factory() as uow:
             failure_count = uow.data.count_failed_entities()
-            for dataset in DatasetKind:
+            for dataset in (DatasetKind.DAILY_BAR_UNADJUSTED,):
                 versions = uow.data.list_versions_page(
                     dataset=dataset, status=None, before=None, limit=1
                 )
@@ -739,7 +670,6 @@ class DataCenterQueryService:
             "datasets": datasets,
             "failures": failure_count
             + self._jobs.count_jobs(job_type="data.eod.v1", status=JobStatus.FAILED),
-            "blocked_sources": sum(item["status"] != "PRODUCTION_READY" for item in self.sources()),
             "generated_at": utc_now(clock=self._clock).to_iso(),
         }
 
@@ -769,7 +699,7 @@ class DataCenterQueryService:
         self,
         *,
         dataset: str | None = None,
-        source: str | None = None,
+        upstream: str | None = None,
         status: str | None = None,
         started_from: str | None = None,
         started_to: str | None = None,
@@ -782,7 +712,7 @@ class DataCenterQueryService:
             "batches",
             {
                 "dataset": dataset,
-                "source": source,
+                "upstream": upstream,
                 "status": status,
                 "started_from": started_from,
                 "started_to": started_to,
@@ -797,7 +727,7 @@ class DataCenterQueryService:
         with self._uow_factory() as uow:
             rows = uow.data.list_batches_page(
                 dataset=DatasetKind(dataset) if dataset else None,
-                source=DataSource(source) if source else None,
+                upstream=DataUpstream(upstream) if upstream else None,
                 status=IngestionBatchStatus(status) if status else None,
                 started_from=started_from,
                 started_to=started_to,
@@ -991,7 +921,7 @@ class DataCenterQueryService:
         with self._uow_factory() as uow:
             rows = uow.data.list_difference_reports_page(
                 version_id=version_id,
-                primary_source=DataSource(primary_source) if primary_source else None,
+                primary_source=DataUpstream(primary_source) if primary_source else None,
                 before=(parsed[0], parsed[1]) if parsed else None,
                 limit=limit + 1,
             )
@@ -1119,7 +1049,7 @@ class DataCenterQueryService:
                 and quality.rule_version == version.rule_version
                 and quality.content_sha256 == version.content_sha256
                 and batch.batch_id == expected_batch
-                and batch.source is expected_source
+                and batch.upstream is expected_source
                 and batch.dataset is version.dataset
                 and batch.status in {IngestionBatchStatus.SUCCEEDED, IngestionBatchStatus.PARTIAL}
                 and expected_batch in version.input_batch_ids
@@ -1424,7 +1354,7 @@ class DataCenterQueryService:
         with self._uow_factory() as uow:
             batches = uow.data.list_batches_page(
                 dataset=None,
-                source=None,
+                upstream=None,
                 status=IngestionBatchStatus.FAILED,
                 started_from=None,
                 started_to=None,

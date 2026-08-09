@@ -22,12 +22,12 @@ def _request() -> dict[str, object]:
         "schema_version": "eod-request.v1",
         "start_date": "2026-07-15",
         "end_date": "2026-07-15",
-        "datasets": ["exchange_calendar"],
+        "datasets": ["daily_bar_unadjusted"],
         "base_versions": {},
         "publish_intent": "PUBLISH_AFTER_QUALITY",
-        "source": "XTQUANT",
+        "source": "AKSHARE",
     }
-    schema_versions = {"exchange_calendar": "exchange_calendar.v1"}
+    schema_versions = {"daily_bar_unadjusted": "daily_bar_unadjusted.v1"}
     config = {
         "schema_version": "eod-execution-config.v1",
         "code_version": "test-code",
@@ -37,8 +37,8 @@ def _request() -> dict[str, object]:
         "max_days_per_chunk": 31,
         "max_items_per_chunk": 500,
         "datasets": {
-            "exchange_calendar": {
-                "scope": ["BJ", "SH", "SZ"],
+            "daily_bar_unadjusted": {
+                "scope": ["000001.SZ"],
                 "known_coverage": [],
                 "base_version": None,
                 "references": {},
@@ -68,7 +68,7 @@ def _result() -> dict[str, object]:
         "status": "SUCCEEDED",
         "datasets": [
             {
-                "dataset": "exchange_calendar",
+                "dataset": "daily_bar_unadjusted",
                 "status": "PUBLISHED_NEW",
                 "batch_id": "data_batch:22222222-2222-4222-8222-222222222222",
                 "version_id": "data_version:33333333-3333-4333-8333-333333333333",

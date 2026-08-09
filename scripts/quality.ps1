@@ -45,7 +45,7 @@ try {
     )
     Invoke-NativeStep "offline pytest" $Uv @(
         "run", "--offline", "--frozen", "pytest",
-        "-m", "not real_external and not real_xtquant and not real_baostock and not real_akshare and not real_tushare and not real_legacy_data and not real_backup and not simulation_account",
+        "-m", "not real_external and not real_akshare and not real_legacy_data and not real_backup",
         "-q", "-p", "no:cacheprovider"
     )
     Invoke-NativeStep "architecture boundary check" $Uv @(

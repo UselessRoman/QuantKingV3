@@ -62,12 +62,23 @@ Adapters
   → A/B 比较
   → 异常时新浪(C)第三方判定
   → 两源一致才形成候选
+  → ResolutionDecision
   → 质量门
   → 临时目录 + manifest + COMPLETE
   → 原子发布 DatasetVersion
 ```
 
 失败任务保留日志、输入和失败目录，不污染已发布版本。来源替换允许细化到证券/交易日，但必须显式记录，禁止静默混合。
+
+Stage 1 的生产主链只处理 `daily_bar_unadjusted`。其他历史 schema 是后续阶段的静态合同，不进入 EOD 默认分支。
+
+## 复杂度边界
+
+- 来源模型只包含 `AKSHARE` provider 和 `EASTMONEY/TENCENT/SINA` upstream；不保留候选供应商审批矩阵。
+- A/B/C 仲裁是正常解析，由 `ResolutionDecision` 记录，不经过 `SourceOverride` 审批状态机。
+- EOD 的权威恢复事实只有冻结 `JobRun`、Raw manifest、DatasetVersion manifest 和 JSON Lines。中断任务失败关闭，新 Job 通过输入指纹复用完整发布。
+- K1/K2 不新增 evidence envelope、签名、claim、attempt、forensic/authoritative 双终态或额外 checkpoint 层。
+- Web/CLI/Worker 复用应用服务；内部简单函数不为了测试而机械包装 Protocol。
 
 ## 存储
 
@@ -90,5 +101,5 @@ Adapters
 
 ## 状态
 
-Stage 0 已完成。Stage 1 的 S1-01～S1-06 已主验收；旧 S1-07 证据链已退役。当前代码仍暂存 S1-03 XTQuant gateway 作为过渡依赖，必须由
-[S1-07K1](stage1/S1-07K1_TASK.md) 替换后删除。Stage 1 尚未完成，Stage 2 未开始。
+Stage 0 已完成。Stage 1 的 S1-01～S1-06 已主验收；旧 S1-07 证据链已退役。S1-07K1 的离线代码已用 AKShare gateway 替换 S1-03 XTQuant 路线并删除 active source assessment；精确依赖锁定、固定真实小样本和独立主验收仍待完成。`SourceOverride` 和 EOD evidence 仅作为 K2 前过渡实现保留，K2 将以 `ResolutionDecision` 和简化 EOD 替换。任务见
+[S1-07K1](stage1/S1-07K1_TASK.md) 与 [S1-07K2](stage1/S1-07K2_TASK.md)。Stage 1 尚未完成，Stage 2 未开始。

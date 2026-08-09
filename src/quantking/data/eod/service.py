@@ -67,21 +67,16 @@ class EodExecutionConfig:
 
     @classmethod
     def production(cls, *, code_version: str) -> EodExecutionConfig:
-        """Conservative offline production composition; only calendar has a usable scope."""
+        """K1 production composition exposes only unadjusted daily bars."""
         return cls(
             code_version=code_version,
-            adapter_version="xtquant-readonly.v1",
+            adapter_version="akshare-daily-bar.v1",
             rule_version="quality-rules.v1",
             lookback_days=0,
             max_days_per_chunk=31,
-            max_items_per_chunk=500,
+            max_items_per_chunk=1,
             datasets={
-                DatasetKind.EXCHANGE_CALENDAR.value: EodDatasetConfig(scope=("BJ", "SH", "SZ")),
-                **{
-                    dataset.value: EodDatasetConfig(scope=())
-                    for dataset in DatasetKind
-                    if dataset is not DatasetKind.EXCHANGE_CALENDAR
-                },
+                DatasetKind.DAILY_BAR_UNADJUSTED.value: EodDatasetConfig(scope=()),
             },
         )
 

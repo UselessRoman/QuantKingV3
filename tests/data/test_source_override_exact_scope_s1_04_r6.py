@@ -10,7 +10,7 @@ import pytest
 from quantking.common.ids import new_entity_id
 from quantking.common.time import TradingDate, utc_now
 from quantking.data.comparison.verifier import VerifiedDifferenceReport
-from quantking.data.models import DatasetKind, DataSource, SourceOverride
+from quantking.data.models import DatasetKind, DataUpstream, SourceOverride
 from quantking.data.override.service import CreateOverrideRequest, SourceOverrideService
 from quantking.data.quality.models import QualityRequest
 
@@ -20,8 +20,8 @@ def _request(**changes: object) -> CreateOverrideRequest:
         "difference_report_id": new_entity_id("data_diff"),
         "primary_batch_id": new_entity_id("data_batch"),
         "fallback_batch_id": new_entity_id("data_batch"),
-        "primary_source": "XTQUANT",
-        "fallback_source": "BAOSTOCK",
+        "primary_source": "EASTMONEY",
+        "fallback_source": "TENCENT",
         "scope_codes": ("000001.SZ",),
         "scope_dates": (TradingDate(date(2026, 7, 15)),),
         "fields": ("close",),
@@ -47,8 +47,8 @@ def test_direct_domain_rejects_dataset_incorrect_exact_key_shape() -> None:
             difference_report_id=new_entity_id("data_diff"),
             primary_batch_id=new_entity_id("data_batch"),
             fallback_batch_id=new_entity_id("data_batch"),
-            primary_source=DataSource.XTQUANT,
-            fallback_source=DataSource.BAOSTOCK,
+            primary_source=DataUpstream.EASTMONEY,
+            fallback_source=DataUpstream.TENCENT,
             scope_codes=("000001.SZ",),
             scope_dates=(TradingDate(date(2026, 7, 15)),),
             fields=("listing_status",),
@@ -67,8 +67,8 @@ def test_dataset_local_non_primary_field_is_accepted() -> None:
         difference_report_id=new_entity_id("data_diff"),
         primary_batch_id=new_entity_id("data_batch"),
         fallback_batch_id=new_entity_id("data_batch"),
-        primary_source=DataSource.XTQUANT,
-        fallback_source=DataSource.BAOSTOCK,
+        primary_source=DataUpstream.EASTMONEY,
+        fallback_source=DataUpstream.TENCENT,
         scope_codes=("000001.SZ",),
         scope_dates=(TradingDate(date(2026, 7, 15)),),
         fields=("exchange",),
@@ -88,8 +88,8 @@ def test_application_fingerprint_changes_with_exact_scope() -> None:
         difference_report_id=new_entity_id("data_diff"),
         primary_batch_id=new_entity_id("data_batch"),
         fallback_batch_id=new_entity_id("data_batch"),
-        primary_source=DataSource.XTQUANT,
-        fallback_source=DataSource.BAOSTOCK,
+        primary_source=DataUpstream.EASTMONEY,
+        fallback_source=DataUpstream.TENCENT,
         scope_codes=("000001.SZ",),
         scope_dates=(TradingDate(date(2026, 7, 15)),),
         fields=("close",),

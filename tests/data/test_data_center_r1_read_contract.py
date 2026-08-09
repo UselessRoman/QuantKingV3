@@ -12,11 +12,6 @@ import pytest
 
 from quantking.common.ids import new_entity_id
 from quantking.common.time import UtcTimestamp
-from quantking.data.assessment.models import (
-    AssessmentStatus,
-    EvidenceKind,
-    SourceCandidateAssessment,
-)
 from quantking.data.center import (
     DataCenterQueryService,
     DataCenterReadIntegrityError,
@@ -26,9 +21,10 @@ from quantking.data.center import (
 from quantking.data.models import (
     BatchFailureInfo,
     BatchFailureKind,
+    DataProvider,
     DatasetKind,
     DatasetVersionStatus,
-    DataSource,
+    DataUpstream,
     IngestionBatch,
     QualityRunStatus,
     SourceOverrideStatus,
@@ -113,10 +109,19 @@ def _service(repository: object, *, verifier: object | None = None) -> DataCente
 def _batch(index: int) -> IngestionBatch:
     return IngestionBatch.running(
         batch_id=new_entity_id("data_batch"),
-        source=DataSource.XTQUANT,
-        dataset=DatasetKind.EXCHANGE_CALENDAR,
+        provider=DataProvider.AKSHARE,
+        upstream=DataUpstream.EASTMONEY,
+        endpoint="stock_zh_a_hist",
+        library_version="test",
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         adapter_version="s1-06-r1-test",
-        request_params={"index": str(index)},
+        request_params={
+            "provider": "AKSHARE",
+            "upstream": "EASTMONEY",
+            "endpoint": "stock_zh_a_hist",
+            "akshare_version": "test",
+            "index": str(index),
+        },
         started_at=UtcTimestamp(datetime(2026, 7, index, tzinfo=UTC)),
     )
 
@@ -205,19 +210,6 @@ def test_difference_rows_non_numeric_offset_is_a_stable_cursor_error() -> None:
         service.difference_rows(report_id=report_id, cursor=cursor, limit=50)
 
 
-def test_source_matrix_does_not_invent_real_evidence_without_assessment() -> None:
-    repository = SimpleNamespace(find_latest_source_candidate_assessment=lambda **filters: None)
-    exchange_calendar = next(
-        item
-        for item in _service(repository).sources()
-        if item["source"] == "XTQUANT" and item["dataset"] == "exchange_calendar"
-    )
-
-    assert exchange_calendar["status"] == "PRODUCTION_READY"
-    assert exchange_calendar["evidence_kind"] is None
-    assert exchange_calendar["assessment_status"] is None
-
-
 def test_summary_uses_aggregate_counts_without_loading_failure_pages() -> None:
     class _Repository:
         def count_failed_entities(self) -> int:
@@ -226,10 +218,6 @@ def test_summary_uses_aggregate_counts_without_loading_failure_pages() -> None:
         def list_versions_page(self, **filters: object) -> list[object]:
             del filters
             return []
-
-        def find_latest_source_candidate_assessment(self, **filters: object) -> None:
-            del filters
-            return None
 
         def list_batches_page(self, **filters: object) -> list[object]:
             raise AssertionError(f"summary loaded failed batches: {filters}")
@@ -247,48 +235,6 @@ def test_summary_uses_aggregate_counts_without_loading_failure_pages() -> None:
     assert service.summary()["failures"] == 9
 
 
-def test_synthetic_assessment_is_reported_without_promoting_matrix_status() -> None:
-    assessment = SourceCandidateAssessment(
-        assessment_id=new_entity_id("data_assessment"),
-        source="BAOSTOCK",
-        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        evidence_kind=EvidenceKind.SYNTHETIC,
-        semantic_contract_verified=True,
-        schema_unit_verified=True,
-        coverage_adequate=True,
-        quality_passed=True,
-        fixed_sample_differences_adequate=True,
-        stability_runs=10,
-        status=AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
-        blocking_reason="real external validation is still required",
-        assessment_config_version="assessment.v1",
-        sample_spec_version="sample.v1",
-        rule_version="rules.v1",
-        evidence_relative_path="assessments/synthetic.json",
-        evidence_sha256="a" * 64,
-        created_at=UtcTimestamp(datetime(2026, 7, 1, tzinfo=UTC)),
-    )
-    repository = SimpleNamespace(
-        find_latest_source_candidate_assessment=lambda **filters: (
-            assessment
-            if filters["source"] == "BAOSTOCK"
-            and filters["dataset"] is DatasetKind.DAILY_BAR_UNADJUSTED
-            else None
-        )
-    )
-
-    row = next(
-        item
-        for item in _service(repository).sources()
-        if item["source"] == "BAOSTOCK" and item["dataset"] == "daily_bar_unadjusted"
-    )
-
-    assert row["matrix_status"] == "BLOCKED_EXTERNAL_VALIDATION"
-    assert row["assessment_status"] == "BLOCKED_EXTERNAL_VALIDATION"
-    assert row["evidence_kind"] == "SYNTHETIC"
-    assert row["auto_switch"] is False
-
-
 def test_same_report_sha_cannot_mask_different_artifact_lineage() -> None:
     report_id = new_entity_id("data_diff")
     primary_version_id = new_entity_id("data_version")
@@ -301,8 +247,8 @@ def test_same_report_sha_cannot_mask_different_artifact_lineage() -> None:
     report = SimpleNamespace(
         report_id=report_id,
         version_id=primary_version_id,
-        primary_source=DataSource.XTQUANT,
-        fallback_source=DataSource.BAOSTOCK,
+        primary_source=DataUpstream.EASTMONEY,
+        fallback_source=DataUpstream.TENCENT,
         created_at=created_at,
         field_differences={"close": "1"},
         total_compared=1,
@@ -323,8 +269,8 @@ def test_same_report_sha_cannot_mask_different_artifact_lineage() -> None:
     verified = SimpleNamespace(
         report_id=report_id,
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED.value,
-        primary_source=DataSource.XTQUANT.value,
-        fallback_source=DataSource.BAOSTOCK.value,
+        primary_source=DataUpstream.EASTMONEY.value,
+        fallback_source=DataUpstream.TENCENT.value,
         created_at=created_at,
         field_differences={"close": "1"},
         total_compared=1,
@@ -363,8 +309,8 @@ def _override_fixture() -> tuple[object, object, object]:
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         status=SourceOverrideStatus.APPROVED,
         difference_report_id=report_id,
-        primary_source=DataSource.XTQUANT,
-        fallback_source=DataSource.BAOSTOCK,
+        primary_source=DataUpstream.EASTMONEY,
+        fallback_source=DataUpstream.TENCENT,
         primary_batch_id=primary_batch_id,
         fallback_batch_id=fallback_batch_id,
         field_replacements=({"code": "000001.SZ", "trade_date": "2026-07-01", "field": "close"},),
@@ -380,8 +326,8 @@ def _override_fixture() -> tuple[object, object, object]:
     )
     report = SimpleNamespace(
         report_id=report_id,
-        primary_source=DataSource.XTQUANT,
-        fallback_source=DataSource.BAOSTOCK,
+        primary_source=DataUpstream.EASTMONEY,
+        fallback_source=DataUpstream.TENCENT,
         primary_batch_id=primary_batch_id,
         fallback_batch_id=fallback_batch_id,
         primary_version_id=primary_version_id,

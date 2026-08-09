@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
-import subprocess
-import sys
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -31,14 +28,14 @@ from quantking.data.adapters.persistence.sqlite import (
 )
 from quantking.data.adapters.sources.contracts import (
     AmountUnit,
-    CodeFormat,
-    DateFormat,
+    SourceLineage,
     SupplierResponse,
     SupplierResponseContract,
     VolumeUnit,
 )
-from quantking.data.adapters.sources.ingestion import XtQuantIngestionService
+from quantking.data.adapters.sources.ingestion import AkshareIngestionService
 from quantking.data.adapters.sources.normalization import required_fields_for
+from quantking.data.adapters.sources.request_window import fixed_akshare_request_window
 from quantking.data.adapters.warehouse.canonical_warehouse import CanonicalWarehouse
 from quantking.data.adapters.warehouse.publish_coordinator import CanonicalPublishCoordinator
 from quantking.data.adapters.warehouse.query import CanonicalQueryAdapter
@@ -56,6 +53,7 @@ from quantking.data.eod.contracts import (
     EodBaseVersion,
     EodDatasetConfig,
     EodPublishIntent,
+    EodReferenceVersion,
     EodRunRequest,
 )
 from quantking.data.eod.service import EodCommandService, EodExecutionConfig
@@ -63,15 +61,17 @@ from quantking.data.incremental import FetchChunk
 from quantking.data.models import (
     BatchFailureInfo,
     BatchFailureKind,
+    DataProvider,
     DatasetKind,
+    DataUpstream,
     QualityRunStatus,
 )
 from quantking.data.quality.artifacts import QualityArtifactWriter
-from quantking.data.quality.engine import QualityEngine
-from quantking.data.quality.models import QualityRunArtifact
-from quantking.data.quality.references import PublishedReferenceLoader
-from quantking.data.quality.rules import default_rule_set
-from quantking.data.quality.runner import QualityRunner
+from quantking.data.quality.models import (
+    QualityOutcomeResult,
+    QualityRunArtifact,
+    RuleOutcomeStatus,
+)
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     create_sqlite_engine,
@@ -83,6 +83,13 @@ from quantking.jobs.worker import Worker, WorkerRegistry
 from quantking.runtime import build_eod_runtime
 
 _NOW = UtcTimestamp(datetime(2026, 7, 15, 18, 0, tzinfo=UTC))
+_REFERENCE_INPUTS = {
+    "exchange_calendar": EodReferenceVersion(
+        dataset=DatasetKind.EXCHANGE_CALENDAR.value,
+        version_id="data_version:99999999-9999-4999-8999-999999999999",
+        content_sha256="9" * 64,
+    )
+}
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -143,7 +150,6 @@ def _settings(tmp_path: Path) -> AppSettings:
             data_root=tmp_path / "runtime-data",
             offsite_backup_root=tmp_path / "offsite",
         ),
-        xtquant_site_packages_root=tmp_path / "missing-sdk",
         web_host="127.0.0.1",
         web_port=8765,
         sqlite_busy_timeout_ms=250,
@@ -162,46 +168,81 @@ def _data_uow(tmp_path: Path) -> DataSqliteUnitOfWorkFactory:
     )
 
 
-class CalendarGateway:
+def _execution_config() -> EodExecutionConfig:
+    return EodExecutionConfig(
+        code_version="test-code",
+        adapter_version="akshare-synthetic.v1",
+        rule_version="quality-rules.v1",
+        lookback_days=0,
+        max_days_per_chunk=31,
+        max_items_per_chunk=1,
+        datasets={
+            DatasetKind.DAILY_BAR_UNADJUSTED.value: EodDatasetConfig(
+                scope=("000001.SZ",),
+                references=_REFERENCE_INPUTS,
+            )
+        },
+    )
+
+
+class DailyBarGateway:
     def __init__(self, *, complete: bool = True) -> None:
         self.calls = 0
         self.complete = complete
+
+    @property
+    def upstream(self) -> DataUpstream:
+        return DataUpstream.EASTMONEY
+
+    @property
+    def endpoint(self) -> str:
+        return "stock_zh_a_hist"
+
+    def library_version(self) -> str:
+        return "9.9.9-test"
 
     def fetch(self, chunk: object) -> SupplierResponse:
         self.calls += 1
         start = chunk.start.value  # type: ignore[attr-defined]
         end = chunk.end.value  # type: ignore[attr-defined]
+        symbol = chunk.scope[0]  # type: ignore[attr-defined]
         records = tuple(
             {
-                "market": exchange,
-                "calendar_date": day.isoformat(),
-                "open_flag": True,
+                "stock_code": symbol,
+                "date": day.isoformat(),
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.8,
+                "close": 10.2,
+                "pre_close": 9.9,
+                "volume": 10_000,
+                "amount": 102_000.0,
             }
-            for exchange in ("BJ", "SH", "SZ")
             for day in (start + timedelta(days=offset) for offset in range((end - start).days + 1))
         )
         contract = SupplierResponseContract(
-            dataset=DatasetKind.EXCHANGE_CALENDAR,
-            contract_version="xtquant-synthetic.v1",
-            required_fields=("market", "calendar_date", "open_flag"),
-            code_format=CodeFormat.CANONICAL,
-            date_format=DateFormat.ISO_YYYY_MM_DD,
-            exchange_map={"SZ": "SZ", "SH": "SH", "BJ": "BJ"},
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            contract_version="akshare-synthetic.v1",
+            required_fields=required_fields_for(DatasetKind.DAILY_BAR_UNADJUSTED),
             volume_unit=VolumeUnit.SHARE,
             amount_unit=AmountUnit.CNY_YUAN,
-            point_in_time=False,
-            unadjusted=False,
-            official_status=False,
-            adjustment_formula=None,
-            semantics_verified=True,
+            unadjusted=True,
+            lineage=SourceLineage(
+                provider=DataProvider.AKSHARE,
+                upstream=self.upstream,
+                endpoint=self.endpoint,
+                library_version=self.library_version(),
+                fetched_at=_NOW.to_iso(),
+            ),
         )
         return SupplierResponse.create_bound(
             chunk=chunk,  # type: ignore[arg-type]
             records=records,
             contract=contract,
             complete=self.complete,
-            partial_reason=None if self.complete else "synthetic partial",
+            partial_reason=None if self.complete else "AKSHARE_PARTIAL_RESPONSE",
             provider_payload={"synthetic": True},
+            request_window=fixed_akshare_request_window(start, end),
         )
 
 
@@ -220,6 +261,19 @@ class TerminalQualityRunner:
             if self.status is QualityRunStatus.FAILED
             else None
         )
+        results = (
+            (
+                QualityOutcomeResult(
+                    rule_code="synthetic_pass",
+                    status=RuleOutcomeStatus.PASSED,
+                    affected_count=0,
+                    summary="synthetic quality passed",
+                    row_evidence_relative_path=None,
+                ),
+            )
+            if self.status is QualityRunStatus.PASSED
+            else ()
+        )
         return QualityRunArtifact(
             run_id=new_entity_id("data_quality"),
             version_id=request.version_id,  # type: ignore[attr-defined]
@@ -229,7 +283,7 @@ class TerminalQualityRunner:
             started_at=_NOW,
             ended_at=_NOW,
             status=self.status,
-            results=(),
+            results=results,
             failure=failure,
         )
 
@@ -252,106 +306,6 @@ class ExactBaseResolver:
         return base
 
 
-class SixDatasetGateway:
-    def __init__(self) -> None:
-        self.calls: list[DatasetKind] = []
-
-    def fetch(self, chunk: object) -> SupplierResponse:
-        dataset = chunk.dataset  # type: ignore[attr-defined]
-        self.calls.append(dataset)
-        chunk_date = chunk.start.value.isoformat()  # type: ignore[attr-defined]
-        common_bar = {
-            "stock_code": "000001.SZ",
-            "date": chunk_date,
-            "open": 10.0,
-            "high": 10.5,
-            "low": 9.8,
-            "close": 10.2,
-            "pre_close": 9.9,
-            "volume": 10_000,
-            "amount": 102_000.0,
-        }
-        records = {
-            DatasetKind.EXCHANGE_CALENDAR: (
-                {
-                    "market": "SZ",
-                    "calendar_date": chunk_date,
-                    "open_flag": True,
-                },
-            ),
-            DatasetKind.SECURITY_MASTER: (
-                {
-                    "stock_code": "000001.SZ",
-                    "exchange_id": "SZ",
-                    "instrument_name": "Synthetic",
-                    "board": "MAIN",
-                    "open_date": "1991-04-03",
-                    "expire_date": None,
-                    "effective_from": chunk_date,
-                    "effective_to": None,
-                    "listing_status": "LISTED",
-                },
-            ),
-            DatasetKind.DAILY_BAR_UNADJUSTED: (common_bar,),
-            DatasetKind.ADJUSTMENT_FACTOR: (
-                {
-                    "stock_code": "000001.SZ",
-                    "date": chunk_date,
-                    "price_multiplier": 1.0,
-                    "volume_multiplier": 1.0,
-                    "normalization_date": chunk_date,
-                    "algorithm_version": "synthetic.v1",
-                },
-            ),
-            DatasetKind.TRADING_STATUS: (
-                {
-                    "stock_code": "000001.SZ",
-                    "date": chunk_date,
-                    "is_trading": True,
-                    "is_suspended": False,
-                    "is_st": False,
-                    "is_star_st": False,
-                    "is_delisting_period": False,
-                    "limit_up_price": 11.0,
-                    "limit_down_price": 9.0,
-                    "status_reason": None,
-                },
-            ),
-            DatasetKind.BENCHMARK_INDEX_DAILY: (common_bar,),
-        }[dataset]
-        contract = SupplierResponseContract(
-            dataset=dataset,
-            contract_version="xtquant-synthetic.v1",
-            required_fields=required_fields_for(dataset),
-            code_format=CodeFormat.CANONICAL,
-            date_format=DateFormat.ISO_YYYY_MM_DD,
-            exchange_map={"SZ": "SZ", "SH": "SH", "BJ": "BJ"},
-            volume_unit=VolumeUnit.SHARE,
-            amount_unit=AmountUnit.CNY_YUAN,
-            point_in_time=dataset is DatasetKind.SECURITY_MASTER,
-            unadjusted=dataset
-            in {
-                DatasetKind.DAILY_BAR_UNADJUSTED,
-                DatasetKind.BENCHMARK_INDEX_DAILY,
-            },
-            official_status=dataset is DatasetKind.TRADING_STATUS,
-            adjustment_formula=(
-                "p_adj=p_raw*price_multiplier;v_adj=v_raw*volume_multiplier"
-                if dataset is DatasetKind.ADJUSTMENT_FACTOR
-                else None
-            ),
-            semantics_verified=True,
-        )
-        return SupplierResponse.create_bound(
-            chunk=chunk,  # type: ignore[arg-type]
-            records=records,
-            contract=contract,
-            complete=True,
-            partial_reason=None,
-            provider_payload={"synthetic": True},
-        )
-
-
 def _runtime(
     tmp_path: Path,
     gateway: object,
@@ -368,20 +322,14 @@ def _runtime(
     data_engine = create_data_engine(database, busy_timeout_ms=250)
     jobs = JobService(SqliteUnitOfWorkFactory(jobs_engine), clock=lambda: _NOW.value)
     data_uow = DataSqliteUnitOfWorkFactory(data_engine)
-    ingestion = XtQuantIngestionService(
+    ingestion = AkshareIngestionService(
         gateway=gateway,  # type: ignore[arg-type]
         raw_publisher=RawBatchPublisher(data_root=tmp_path),
         data_root=tmp_path,
         uow_factory=data_uow,
         clock=lambda: _NOW,
     )
-    quality_runner = quality_runner_override or QualityRunner(
-        engine=QualityEngine(rule_set=default_rule_set()),
-        reference_loader=PublishedReferenceLoader(
-            data_root=tmp_path,
-            uow_factory=data_uow,
-        ),
-    )
+    quality_runner = quality_runner_override or TerminalQualityRunner(QualityRunStatus.PASSED)
     handler = EodWorkerHandler(
         ingestion=ingestion,
         quality_runner=quality_runner,
@@ -402,10 +350,19 @@ def _runtime(
     register_eod_handler(registry, handler)
     command = EodCommandService(
         jobs,
-        config=execution_config or EodExecutionConfig.production(code_version="test-code"),
+        config=execution_config or _execution_config(),
         base_resolver=base_resolver,
     )
     return jobs, command, Worker(jobs, registry, worker_id="worker-1")
+
+
+def _formal_runtime(tmp_path: Path, gateway: DailyBarGateway):
+    return build_eod_runtime(
+        _settings(tmp_path),
+        gateway=gateway,
+        execution_config=_execution_config(),
+        quality_runner=TerminalQualityRunner(QualityRunStatus.PASSED),  # type: ignore[arg-type]
+    )
 
 
 def _base_from_job(
@@ -413,7 +370,7 @@ def _base_from_job(
     jobs: JobService,
     job_id: str,
     *,
-    scopes: tuple[str, ...] = ("BJ", "SH", "SZ"),
+    scopes: tuple[str, ...] = ("000001.SZ",),
     coverage_start: str = "2026-07-15",
     coverage_end: str = "2026-07-15",
 ) -> EodBaseVersion:
@@ -424,8 +381,8 @@ def _base_from_job(
     result = evidence.result["datasets"][0]  # type: ignore[index]
     return EodBaseVersion(
         version_id=result["version_id"],
-        dataset=DatasetKind.EXCHANGE_CALENDAR.value,
-        schema_version="exchange_calendar.v1",
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED.value,
+        schema_version="daily_bar_unadjusted.v1",
         content_sha256=result["content_sha256"],
         manifest_sha256=result["manifest_sha256"],
         coverage=tuple((scope, coverage_start, coverage_end) for scope in scopes),
@@ -435,7 +392,7 @@ def _base_from_job(
 def _enqueue(
     command: EodCommandService,
     *,
-    datasets=("exchange_calendar",),
+    datasets=("daily_bar_unadjusted",),
     key: str = "eod-worker-test",
     base_versions: dict[str, str] | None = None,
 ) -> str:
@@ -455,7 +412,7 @@ def _enqueue(
 def test_complete_fake_gateway_flow_publishes_and_writes_strict_evidence(
     tmp_path: Path,
 ) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(tmp_path, gateway)
     job_id = _enqueue(command)
 
@@ -489,50 +446,10 @@ def test_complete_fake_gateway_flow_publishes_and_writes_strict_evidence(
     assert result["quality_run_id"].startswith("data_quality:")
 
 
-def test_fake_gateway_can_exercise_all_six_datasets_without_changing_production_matrix(
-    tmp_path: Path,
-) -> None:
-    gateway = SixDatasetGateway()
-    datasets = tuple(item.value for item in DatasetKind)
-    config = EodExecutionConfig(
-        code_version="test-code",
-        adapter_version="xtquant-synthetic.v1",
-        rule_version="quality-rules.v1",
-        lookback_days=0,
-        max_days_per_chunk=1,
-        max_items_per_chunk=10,
-        datasets={
-            item.value: EodDatasetConfig(
-                scope=("SZ",) if item is DatasetKind.EXCHANGE_CALENDAR else ("000001.SZ",)
-            )
-            for item in DatasetKind
-        },
-    )
-    jobs, command, worker = _runtime(
-        tmp_path,
-        gateway,
-        capability_check=lambda dataset: True,
-        execution_config=config,
-    )
-    job_id = _enqueue(command, datasets=datasets)
-
-    worker.run(job_id)
-
-    assert jobs.get_job(job_id).status is JobStatus.SUCCEEDED
-    assert gateway.calls == [
-        DatasetKind.EXCHANGE_CALENDAR,
-        DatasetKind.SECURITY_MASTER,
-        DatasetKind.DAILY_BAR_UNADJUSTED,
-        DatasetKind.ADJUSTMENT_FACTOR,
-        DatasetKind.TRADING_STATUS,
-        DatasetKind.BENCHMARK_INDEX_DAILY,
-    ]
-
-
 def test_unverified_capability_fails_before_gateway_and_retains_failure_evidence(
     tmp_path: Path,
 ) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(
         tmp_path,
         gateway,
@@ -556,29 +473,27 @@ def test_unverified_capability_fails_before_gateway_and_retains_failure_evidence
     "dataset",
     [
         "security_master",
-        "daily_bar_unadjusted",
+        "exchange_calendar",
         "adjustment_factor",
         "trading_status",
         "benchmark_index_daily",
     ],
 )
-def test_each_unverified_production_capability_fails_before_gateway(
+def test_production_rejects_each_static_dataset_before_gateway(
     tmp_path: Path,
     dataset: str,
 ) -> None:
-    gateway = CalendarGateway()
-    jobs, command, worker = _runtime(tmp_path, gateway)
-    job_id = _enqueue(command, datasets=(dataset,))
+    gateway = DailyBarGateway()
+    _jobs, command, _worker = _runtime(tmp_path, gateway)
 
-    with pytest.raises(Exception, match="capability"):
-        worker.run(job_id)
+    with pytest.raises(ValueError, match="frozen execution config"):
+        _enqueue(command, datasets=(dataset,))
 
-    assert jobs.get_job(job_id).status is JobStatus.FAILED
     assert gateway.calls == 0
 
 
 def test_partial_ingestion_never_publishes_and_job_is_terminal_failed(tmp_path: Path) -> None:
-    gateway = CalendarGateway(complete=False)
+    gateway = DailyBarGateway(complete=False)
     jobs, command, worker = _runtime(tmp_path, gateway)
     job_id = _enqueue(command)
 
@@ -599,7 +514,7 @@ def test_failed_or_skipped_quality_never_publishes(
     tmp_path: Path,
     status: QualityRunStatus,
 ) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(
         tmp_path,
         gateway,
@@ -615,7 +530,7 @@ def test_failed_or_skipped_quality_never_publishes(
 
 
 def test_quality_exception_is_sanitized_and_never_leaves_running(tmp_path: Path) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(
         tmp_path,
         gateway,
@@ -636,7 +551,7 @@ def test_quality_exception_is_sanitized_and_never_leaves_running(tmp_path: Path)
 
 
 def test_worker_rejects_tampered_persisted_manifest_before_gateway(tmp_path: Path) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(tmp_path, gateway)
     job_id = _enqueue(command)
     with sqlite3.connect(tmp_path / "metadata.db") as connection:
@@ -673,7 +588,7 @@ def test_worker_rejects_tampered_persisted_manifest_before_gateway(tmp_path: Pat
 def test_failed_retry_requires_new_job_key_and_creates_new_batch_and_version(
     tmp_path: Path,
 ) -> None:
-    gateway = CalendarGateway(complete=False)
+    gateway = DailyBarGateway(complete=False)
     jobs, command, worker = _runtime(tmp_path, gateway)
     failed_job_id = _enqueue(command, key="first-attempt")
     with pytest.raises(EodExecutionError):
@@ -698,7 +613,7 @@ def test_failed_retry_requires_new_job_key_and_creates_new_batch_and_version(
 
 
 def test_second_incremental_publish_preserves_base_history(tmp_path: Path) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, first_command, worker = _runtime(tmp_path, gateway)
     first_job_id = _enqueue(first_command, key="history-first")
     worker.run(first_job_id)
@@ -708,14 +623,15 @@ def test_second_incremental_publish_preserves_base_history(tmp_path: Path) -> No
         jobs,
         config=EodExecutionConfig(
             code_version="test-code",
-            adapter_version="xtquant-readonly.v1",
+            adapter_version="akshare-readonly.v1",
             rule_version="quality-rules.v1",
             lookback_days=0,
             max_days_per_chunk=31,
             max_items_per_chunk=500,
             datasets={
-                DatasetKind.EXCHANGE_CALENDAR.value: EodDatasetConfig(
-                    scope=("BJ", "SH", "SZ"),
+                DatasetKind.DAILY_BAR_UNADJUSTED.value: EodDatasetConfig(
+                    scope=("000001.SZ",),
+                    references=_REFERENCE_INPUTS,
                 )
             },
         ),
@@ -725,9 +641,9 @@ def test_second_incremental_publish_preserves_base_history(tmp_path: Path) -> No
         EodRunRequest(
             start_date=_NOW.value.date(),
             end_date=_NOW.value.date() + timedelta(days=1),
-            datasets=("exchange_calendar",),
+            datasets=("daily_bar_unadjusted",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
-            base_versions={"exchange_calendar": base.version_id},
+            base_versions={"daily_bar_unadjusted": base.version_id},
         ),
         idempotency_key="history-second",
         requester="pytest",
@@ -747,7 +663,7 @@ def test_second_incremental_publish_preserves_base_history(tmp_path: Path) -> No
     )
     table = query.query_by_id(
         version_id=version_id,
-        dataset=DatasetKind.EXCHANGE_CALENDAR.value,
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED.value,
     )
 
     assert sorted({item.isoformat() for item in table.column("trade_date").to_pylist()}) == [
@@ -757,13 +673,13 @@ def test_second_incremental_publish_preserves_base_history(tmp_path: Path) -> No
 
 
 def test_formal_runtime_resolves_exact_base_and_reuses_no_change(tmp_path: Path) -> None:
-    gateway = CalendarGateway()
-    runtime = build_eod_runtime(_settings(tmp_path), gateway=gateway)
+    gateway = DailyBarGateway()
+    runtime = _formal_runtime(tmp_path, gateway)
     first = runtime.eod_commands.enqueue(
         EodRunRequest(
             start_date=date(2026, 7, 15),
             end_date=date(2026, 7, 15),
-            datasets=("exchange_calendar",),
+            datasets=("daily_bar_unadjusted",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
             base_versions={},
         ),
@@ -776,44 +692,18 @@ def test_formal_runtime_resolves_exact_base_and_reuses_no_change(tmp_path: Path)
         artifacts_root=runtime.settings.paths.data_root / "artifacts" / "eod",
     ).parsed_result.datasets[0]
 
-    environment = {
-        key: value for key, value in os.environ.items() if not key.startswith("QUANTKING_")
-    }
-    environment.update(
-        {
-            "QUANTKING_CODE_ROOT": str(Path.cwd()),
-            "QUANTKING_DATA_ROOT": str(runtime.settings.paths.data_root),
-            "QUANTKING_OFFSITE_BACKUP_ROOT": str(tmp_path / "offsite"),
-            "QUANTKING_XTQUANT_SITE_PACKAGES_ROOT": str(tmp_path / "missing-sdk"),
-        }
-    )
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "quantking.cli.eod",
-            "eod-enqueue",
-            "--trade-date",
-            "2026-07-16",
-            "--datasets",
-            "exchange_calendar",
-            "--base-version",
-            f"exchange_calendar={first_result.version_id}",
-            "--idempotency-key",
-            "formal-child",
-            "--publish-intent",
-            "PUBLISH_AFTER_QUALITY",
-        ],
-        cwd=Path.cwd(),
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    second_job_id = json.loads(completed.stdout)["job_id"]
-    second_runtime = build_eod_runtime(_settings(tmp_path), gateway=gateway)
+    second_job_id = runtime.eod_commands.enqueue(
+        EodRunRequest(
+            start_date=date(2026, 7, 16),
+            end_date=date(2026, 7, 16),
+            datasets=("daily_bar_unadjusted",),
+            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+            base_versions={"daily_bar_unadjusted": first_result.version_id},
+        ),
+        idempotency_key="formal-child",
+        requester="pytest",
+    ).job_id
+    second_runtime = _formal_runtime(tmp_path, gateway)
     second_runtime.worker.run(second_job_id)
     second_result = verify_eod_success_evidence(
         second_runtime.settings.paths.data_root
@@ -826,9 +716,9 @@ def test_formal_runtime_resolves_exact_base_and_reuses_no_change(tmp_path: Path)
         EodRunRequest(
             start_date=date(2026, 7, 16),
             end_date=date(2026, 7, 16),
-            datasets=("exchange_calendar",),
+            datasets=("daily_bar_unadjusted",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
-            base_versions={"exchange_calendar": second_result.version_id},
+            base_versions={"daily_bar_unadjusted": second_result.version_id},
         ),
         idempotency_key="formal-no-change",
         requester="pytest",
@@ -849,12 +739,12 @@ def test_formal_runtime_resolves_exact_base_and_reuses_no_change(tmp_path: Path)
 
 
 def test_web_cli_runtime_never_recovers_fresh_worker_lease(tmp_path: Path) -> None:
-    runtime = build_eod_runtime(_settings(tmp_path), gateway=CalendarGateway())
+    runtime = _formal_runtime(tmp_path, DailyBarGateway())
     outcome = runtime.eod_commands.enqueue(
         EodRunRequest(
             start_date=date(2026, 7, 15),
             end_date=date(2026, 7, 15),
-            datasets=("exchange_calendar",),
+            datasets=("daily_bar_unadjusted",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
             base_versions={},
         ),
@@ -871,7 +761,7 @@ def test_web_cli_runtime_never_recovers_fresh_worker_lease(tmp_path: Path) -> No
     heartbeat = UtcTimestamp(started.value + timedelta(seconds=30))
     runtime.jobs.heartbeat(outcome.job_id, at=heartbeat)
 
-    web_cli_runtime = build_eod_runtime(_settings(tmp_path), gateway=CalendarGateway())
+    web_cli_runtime = _formal_runtime(tmp_path, DailyBarGateway())
     assert web_cli_runtime.jobs.get_job(outcome.job_id).status is JobStatus.RUNNING
     assert (
         web_cli_runtime.jobs.recover_stale_running_jobs(
@@ -894,21 +784,21 @@ def test_web_cli_runtime_never_recovers_fresh_worker_lease(tmp_path: Path) -> No
 
 
 def test_formal_runtime_rejects_existing_database_at_wrong_revision(tmp_path: Path) -> None:
-    runtime = build_eod_runtime(_settings(tmp_path), gateway=CalendarGateway())
+    runtime = build_eod_runtime(_settings(tmp_path), gateway=DailyBarGateway())
     database = runtime.settings.paths.data_root / "metadata" / "quantking.db"
     with sqlite3.connect(database) as connection:
         connection.execute("UPDATE alembic_version SET version_num = 'forged_revision'")
         connection.commit()
 
     with pytest.raises(Exception, match="revision"):
-        build_eod_runtime(_settings(tmp_path), gateway=CalendarGateway())
+        build_eod_runtime(_settings(tmp_path), gateway=DailyBarGateway())
 
 
 def test_post_publish_failure_discovers_version_in_failure_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(tmp_path, gateway)
     original = CanonicalPublishCoordinator.coordinate
 
@@ -937,7 +827,7 @@ def test_post_publish_failure_discovers_version_in_failure_evidence(
 def test_fully_covered_request_reuses_base_without_empty_batch_or_version(
     tmp_path: Path,
 ) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, first_command, worker = _runtime(tmp_path, gateway)
     first_job_id = _enqueue(first_command, key="no-change-first")
     worker.run(first_job_id)
@@ -946,14 +836,15 @@ def test_fully_covered_request_reuses_base_without_empty_batch_or_version(
         jobs,
         config=EodExecutionConfig(
             code_version="test-code",
-            adapter_version="xtquant-readonly.v1",
+            adapter_version="akshare-readonly.v1",
             rule_version="quality-rules.v1",
             lookback_days=0,
             max_days_per_chunk=31,
             max_items_per_chunk=500,
             datasets={
-                DatasetKind.EXCHANGE_CALENDAR.value: EodDatasetConfig(
-                    scope=("BJ", "SH", "SZ"),
+                DatasetKind.DAILY_BAR_UNADJUSTED.value: EodDatasetConfig(
+                    scope=("000001.SZ",),
+                    references=_REFERENCE_INPUTS,
                 )
             },
         ),
@@ -962,7 +853,7 @@ def test_fully_covered_request_reuses_base_without_empty_batch_or_version(
     job_id = _enqueue(
         command,
         key="no-change-second",
-        base_versions={"exchange_calendar": base.version_id},
+        base_versions={"daily_bar_unadjusted": base.version_id},
     )
     worker.run(job_id)
 
@@ -984,7 +875,7 @@ def test_fully_covered_request_reuses_base_without_empty_batch_or_version(
 
 
 def test_tampered_base_credentials_fail_before_gateway(tmp_path: Path) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, first_command, worker = _runtime(tmp_path, gateway)
     first_job_id = _enqueue(first_command, key="base-valid")
     worker.run(first_job_id)
@@ -1001,14 +892,15 @@ def test_tampered_base_credentials_fail_before_gateway(tmp_path: Path) -> None:
         jobs,
         config=EodExecutionConfig(
             code_version="test-code",
-            adapter_version="xtquant-readonly.v1",
+            adapter_version="akshare-readonly.v1",
             rule_version="quality-rules.v1",
             lookback_days=0,
             max_days_per_chunk=31,
             max_items_per_chunk=500,
             datasets={
-                DatasetKind.EXCHANGE_CALENDAR.value: EodDatasetConfig(
-                    scope=("BJ", "SH", "SZ"),
+                DatasetKind.DAILY_BAR_UNADJUSTED.value: EodDatasetConfig(
+                    scope=("000001.SZ",),
+                    references=_REFERENCE_INPUTS,
                 )
             },
         ),
@@ -1017,7 +909,7 @@ def test_tampered_base_credentials_fail_before_gateway(tmp_path: Path) -> None:
     job_id = _enqueue(
         command,
         key="base-invalid",
-        base_versions={"exchange_calendar": invalid.version_id},
+        base_versions={"daily_bar_unadjusted": invalid.version_id},
     )
 
     with pytest.raises(EodExecutionError, match="base version"):
@@ -1046,7 +938,7 @@ def test_each_post_publish_fault_retains_completed_failure_evidence(
         if point == fault_point:
             raise RuntimeError(f"fault:{point}")
 
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(
         tmp_path,
         gateway,
@@ -1081,38 +973,52 @@ def test_each_post_publish_fault_retains_completed_failure_evidence(
             )
 
 
+def _daily_row(symbol: str, trade_date: date, close: float) -> dict[str, object]:
+    return {
+        "code": symbol,
+        "trade_date": trade_date,
+        "open": close - 0.1,
+        "high": close + 0.2,
+        "low": close - 0.2,
+        "close": close,
+        "pre_close": close - 0.3,
+        "volume": 10_000,
+        "amount": close * 10_000,
+    }
+
+
 def test_lookback_authoritative_slice_removes_missing_base_row() -> None:
     base = pa.Table.from_pylist(
         [
-            {"exchange": "SZ", "trade_date": date(2026, 7, 13), "is_open": True},
-            {"exchange": "SZ", "trade_date": date(2026, 7, 14), "is_open": True},
-            {"exchange": "SZ", "trade_date": date(2026, 7, 15), "is_open": True},
+            _daily_row("000001.SZ", date(2026, 7, 13), 10.0),
+            _daily_row("000001.SZ", date(2026, 7, 14), 10.1),
+            _daily_row("000001.SZ", date(2026, 7, 15), 10.2),
         ],
-        schema=canonical_schema("exchange_calendar"),
+        schema=canonical_schema("daily_bar_unadjusted"),
     )
     candidate = pa.Table.from_pylist(
-        [{"exchange": "SZ", "trade_date": date(2026, 7, 15), "is_open": False}],
-        schema=canonical_schema("exchange_calendar"),
+        [_daily_row("000001.SZ", date(2026, 7, 15), 10.3)],
+        schema=canonical_schema("daily_bar_unadjusted"),
     )
     chunk = FetchChunk(
         sequence=0,
-        dataset=DatasetKind.EXCHANGE_CALENDAR,
-        scope=("SZ",),
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        scope=("000001.SZ",),
         start=TradingDate(date(2026, 7, 14)),
         end=TradingDate(date(2026, 7, 15)),
         request_sha256="a" * 64,
     )
 
     merged = EodWorkerHandler._merge_snapshot(
-        DatasetKind.EXCHANGE_CALENDAR,
+        DatasetKind.DAILY_BAR_UNADJUSTED,
         base=base,
         candidate=candidate,
         chunks=(chunk,),
     )
 
     assert merged.to_pylist() == [
-        {"exchange": "SZ", "trade_date": date(2026, 7, 13), "is_open": True},
-        {"exchange": "SZ", "trade_date": date(2026, 7, 15), "is_open": False},
+        _daily_row("000001.SZ", date(2026, 7, 13), 10.0),
+        _daily_row("000001.SZ", date(2026, 7, 15), 10.3),
     ]
 
 
@@ -1120,26 +1026,26 @@ def test_lookback_authoritative_slice_removes_missing_base_row() -> None:
 def test_lookback_merge_rejects_unsafe_candidate_inventory(case: str) -> None:
     base = pa.Table.from_pylist(
         [
-            {"exchange": exchange, "trade_date": date(2026, 7, 15), "is_open": True}
-            for exchange in ("SH", "SZ")
+            _daily_row("000001.SZ", date(2026, 7, 15), 10.2),
+            _daily_row("600000.SH", date(2026, 7, 15), 20.2),
         ],
-        schema=canonical_schema("exchange_calendar"),
+        schema=canonical_schema("daily_bar_unadjusted"),
     )
-    records = [{"exchange": "SZ", "trade_date": date(2026, 7, 15), "is_open": False}]
-    scope = ("SH", "SZ")
+    records = [_daily_row("000001.SZ", date(2026, 7, 15), 10.3)]
+    scope = ("000001.SZ", "600000.SH")
     if case == "duplicate_pk":
         records.append(dict(records[0]))
-        scope = ("SZ",)
+        scope = ("000001.SZ",)
     elif case == "out_of_range":
         records[0]["trade_date"] = date(2026, 7, 16)
-        scope = ("SZ",)
+        scope = ("000001.SZ",)
     candidate = pa.Table.from_pylist(
         records,
-        schema=canonical_schema("exchange_calendar"),
+        schema=canonical_schema("daily_bar_unadjusted"),
     )
     chunk = FetchChunk(
         sequence=0,
-        dataset=DatasetKind.EXCHANGE_CALENDAR,
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         scope=scope,
         start=TradingDate(date(2026, 7, 15)),
         end=TradingDate(date(2026, 7, 15)),
@@ -1148,7 +1054,7 @@ def test_lookback_merge_rejects_unsafe_candidate_inventory(case: str) -> None:
 
     with pytest.raises(EodExecutionError, match="candidate"):
         EodWorkerHandler._merge_snapshot(
-            DatasetKind.EXCHANGE_CALENDAR,
+            DatasetKind.DAILY_BAR_UNADJUSTED,
             base=base,
             candidate=candidate,
             chunks=(chunk,),
@@ -1164,7 +1070,7 @@ def test_retry_reuses_strictly_verified_post_publish_result(tmp_path: Path) -> N
             armed = False
             raise RuntimeError("one-shot post-publish fault")
 
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(
         tmp_path,
         gateway,
@@ -1197,7 +1103,7 @@ def test_retry_reuses_strictly_verified_post_publish_result(tmp_path: Path) -> N
 def test_deep_success_verifier_rejects_resigned_repository_mismatch(
     tmp_path: Path,
 ) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(tmp_path, gateway)
     job_id = _enqueue(command, key="deep-verifier")
     worker.run(job_id)
@@ -1261,7 +1167,7 @@ def test_deep_success_verifier_rejects_resigned_frozen_command_attack(
     tmp_path: Path,
     attack: str,
 ) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(tmp_path, gateway)
     job_id = _enqueue(command, key="deep-request-binding")
     worker.run(job_id)
@@ -1272,30 +1178,30 @@ def test_deep_success_verifier_rejects_resigned_frozen_command_attack(
         request["request"]["start_date"] = "2026-07-14"
         request["request"]["end_date"] = "2026-07-14"
     elif attack == "scope":
-        request["config"]["datasets"]["exchange_calendar"]["scope"] = ["SZ"]
+        request["config"]["datasets"]["daily_bar_unadjusted"]["scope"] = ["600000.SH"]
     elif attack == "base":
         dataset_result = result["datasets"][0]
         version_id = dataset_result["version_id"]
-        request["request"]["base_versions"] = {"exchange_calendar": version_id}
+        request["request"]["base_versions"] = {"daily_bar_unadjusted": version_id}
         base = {
             "version_id": version_id,
-            "dataset": "exchange_calendar",
-            "schema_version": "exchange_calendar.v1",
+            "dataset": "daily_bar_unadjusted",
+            "schema_version": "daily_bar_unadjusted.v1",
             "content_sha256": dataset_result["content_sha256"],
             "manifest_sha256": dataset_result["manifest_sha256"],
             "coverage": [
                 {"scope": item, "start": "2026-07-15", "end": "2026-07-15"}
-                for item in ("BJ", "SH", "SZ")
+                for item in ("000001.SZ",)
             ],
         }
-        request["config"]["datasets"]["exchange_calendar"]["base_version"] = base
-        request["config"]["datasets"]["exchange_calendar"]["known_coverage"] = base["coverage"]
+        request["config"]["datasets"]["daily_bar_unadjusted"]["base_version"] = base
+        request["config"]["datasets"]["daily_bar_unadjusted"]["known_coverage"] = base["coverage"]
     elif attack == "chunk":
         request["config"]["max_days_per_chunk"] = 1
     elif attack == "batch":
         result["datasets"][0]["batch_id"] = "data_batch:99999999-9999-4999-8999-999999999999"
     else:
-        request["config"]["schema_versions"]["exchange_calendar"] = "forged.v1"
+        request["config"]["schema_versions"]["daily_bar_unadjusted"] = "forged.v1"
         request["version_manifest"]["schema_versions_sha256"] = hashlib.sha256(
             json.dumps(
                 request["config"]["schema_versions"],
@@ -1361,7 +1267,7 @@ def test_terminal_success_rejects_self_signed_command_not_matching_job(
     tmp_path: Path,
     field: str,
 ) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(tmp_path, gateway)
     job_id = _enqueue(command, key=f"terminal-binding-{field}")
     worker.run(job_id)
@@ -1369,9 +1275,9 @@ def test_terminal_success_rejects_self_signed_command_not_matching_job(
     directory = tmp_path / job.artifacts[0]
     request = json.loads((directory / "request.json").read_bytes())
     if field == "references":
-        request["config"]["datasets"]["exchange_calendar"]["references"] = {
+        request["config"]["datasets"]["daily_bar_unadjusted"]["references"] = {
             "forged": {
-                "dataset": "exchange_calendar",
+                "dataset": "daily_bar_unadjusted",
                 "version_id": "data_version:99999999-9999-4999-8999-999999999999",
                 "content_sha256": "9" * 64,
             }
@@ -1410,7 +1316,7 @@ def test_terminal_failure_rejects_self_signed_command_not_matching_job(
     tmp_path: Path,
     field: str,
 ) -> None:
-    gateway = CalendarGateway(complete=False)
+    gateway = DailyBarGateway(complete=False)
     jobs, command, worker = _runtime(tmp_path, gateway)
     job_id = _enqueue(command, key=f"terminal-failure-binding-{field}")
     with pytest.raises(EodExecutionError):
@@ -1419,9 +1325,9 @@ def test_terminal_failure_rejects_self_signed_command_not_matching_job(
     directory = tmp_path / job.artifacts[0]
     request = json.loads((directory / "request.json").read_bytes())
     if field == "references":
-        request["config"]["datasets"]["exchange_calendar"]["references"] = {
+        request["config"]["datasets"]["daily_bar_unadjusted"]["references"] = {
             "forged": {
-                "dataset": "exchange_calendar",
+                "dataset": "daily_bar_unadjusted",
                 "version_id": "data_version:99999999-9999-4999-8999-999999999999",
                 "content_sha256": "9" * 64,
             }
@@ -1450,7 +1356,7 @@ def test_final_succeeded_commit_failure_is_recovered_without_republish(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(tmp_path, gateway)
     job_id = _enqueue(command, key="final-commit-first")
     original_transition = jobs.transition
@@ -1506,13 +1412,13 @@ def test_no_change_final_commit_failure_recovers_without_rewriting_base_lineage(
     capsys: pytest.CaptureFixture[str],
     base_kind: str,
 ) -> None:
-    gateway = CalendarGateway()
-    runtime = build_eod_runtime(_settings(tmp_path), gateway=gateway)
+    gateway = DailyBarGateway()
+    runtime = _formal_runtime(tmp_path, gateway)
     root_id = runtime.eod_commands.enqueue(
         EodRunRequest(
             start_date=date(2026, 7, 15),
             end_date=date(2026, 7, 15),
-            datasets=("exchange_calendar",),
+            datasets=("daily_bar_unadjusted",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
             base_versions={},
         ),
@@ -1531,9 +1437,9 @@ def test_no_change_final_commit_failure_recovers_without_rewriting_base_lineage(
             EodRunRequest(
                 start_date=date(2026, 7, 15),
                 end_date=date(2026, 7, 16),
-                datasets=("exchange_calendar",),
+                datasets=("daily_bar_unadjusted",),
                 publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
-                base_versions={"exchange_calendar": root_result.version_id},
+                base_versions={"daily_bar_unadjusted": root_result.version_id},
             ),
             idempotency_key="no-change-child-base",
             requester="pytest",
@@ -1548,9 +1454,9 @@ def test_no_change_final_commit_failure_recovers_without_rewriting_base_lineage(
     no_change_request = EodRunRequest(
         start_date=request_date,
         end_date=request_date,
-        datasets=("exchange_calendar",),
+        datasets=("daily_bar_unadjusted",),
         publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
-        base_versions={"exchange_calendar": base_result.version_id},
+        base_versions={"daily_bar_unadjusted": base_result.version_id},
     )
     failed_id = runtime.eod_commands.enqueue(
         no_change_request,
@@ -1631,13 +1537,13 @@ def test_no_change_failure_rejects_parent_attack(
     monkeypatch: pytest.MonkeyPatch,
     attack: str,
 ) -> None:
-    gateway = CalendarGateway()
-    runtime = build_eod_runtime(_settings(tmp_path), gateway=gateway)
+    gateway = DailyBarGateway()
+    runtime = _formal_runtime(tmp_path, gateway)
     root_id = runtime.eod_commands.enqueue(
         EodRunRequest(
             start_date=date(2026, 7, 15),
             end_date=date(2026, 7, 15),
-            datasets=("exchange_calendar",),
+            datasets=("daily_bar_unadjusted",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
             base_versions={},
         ),
@@ -1653,9 +1559,9 @@ def test_no_change_failure_rejects_parent_attack(
         EodRunRequest(
             start_date=date(2026, 7, 15),
             end_date=date(2026, 7, 16),
-            datasets=("exchange_calendar",),
+            datasets=("daily_bar_unadjusted",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
-            base_versions={"exchange_calendar": root.version_id},
+            base_versions={"daily_bar_unadjusted": root.version_id},
         ),
         idempotency_key=f"parent-attack-child-{attack}",
         requester="pytest",
@@ -1669,9 +1575,9 @@ def test_no_change_failure_rejects_parent_attack(
         EodRunRequest(
             start_date=date(2026, 7, 16),
             end_date=date(2026, 7, 16),
-            datasets=("exchange_calendar",),
+            datasets=("daily_bar_unadjusted",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
-            base_versions={"exchange_calendar": child.version_id},
+            base_versions={"daily_bar_unadjusted": child.version_id},
         ),
         idempotency_key=f"parent-attack-failed-{attack}",
         requester="pytest",
@@ -1715,162 +1621,18 @@ def test_no_change_failure_rejects_parent_attack(
         )
 
 
-def test_mixed_reused_and_published_completed_set_recovers_without_duplicates(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    gateway = SixDatasetGateway()
-    config = EodExecutionConfig(
-        code_version="test-code",
-        adapter_version="xtquant-synthetic.v1",
-        rule_version="quality-rules.v1",
-        lookback_days=0,
-        max_days_per_chunk=1,
-        max_items_per_chunk=10,
-        datasets={
-            "exchange_calendar": EodDatasetConfig(scope=("SZ",)),
-            "security_master": EodDatasetConfig(scope=("000001.SZ",)),
-        },
-    )
-    jobs, root_command, worker = _runtime(
-        tmp_path,
-        gateway,
-        capability_check=lambda dataset: True,
-        execution_config=config,
-    )
-    calendar_root_id = root_command.enqueue(
-        EodRunRequest(
-            start_date=date(2026, 7, 14),
-            end_date=date(2026, 7, 14),
-            datasets=("exchange_calendar",),
-            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
-            base_versions={},
-        ),
-        idempotency_key="mixed-calendar-root",
-        requester="pytest",
-    ).job_id
-    worker.run(calendar_root_id)
-    calendar_base = _base_from_job(
-        tmp_path,
-        jobs,
-        calendar_root_id,
-        scopes=("SZ",),
-        coverage_start="2026-07-14",
-        coverage_end="2026-07-14",
-    )
-    security_root_id = root_command.enqueue(
-        EodRunRequest(
-            start_date=date(2026, 7, 15),
-            end_date=date(2026, 7, 15),
-            datasets=("security_master",),
-            publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
-            base_versions={},
-        ),
-        idempotency_key="mixed-security-root",
-        requester="pytest",
-    ).job_id
-    worker.run(security_root_id)
-    security_evidence = verify_eod_success_evidence(
-        tmp_path / jobs.get_job(security_root_id).artifacts[0],
-        artifacts_root=tmp_path / "artifacts" / "eod",
-    )
-    security_result = security_evidence.parsed_result.datasets[0]
-    security_base = EodBaseVersion(
-        version_id=security_result.version_id,
-        dataset=DatasetKind.SECURITY_MASTER.value,
-        schema_version="security_master.v1",
-        content_sha256=security_result.content_sha256,
-        manifest_sha256=security_result.manifest_sha256,
-        coverage=(("000001.SZ", "2026-07-15", "2026-07-15"),),
-    )
-    mixed_command = EodCommandService(
-        jobs,
-        config=config,
-        base_resolver=ExactBaseResolver(
-            {
-                calendar_base.version_id: calendar_base,
-                security_base.version_id: security_base,
-            }
-        ),
-    )
-    mixed_request = EodRunRequest(
-        start_date=date(2026, 7, 15),
-        end_date=date(2026, 7, 15),
-        datasets=("exchange_calendar", "security_master"),
-        publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
-        base_versions={
-            "exchange_calendar": calendar_base.version_id,
-            "security_master": security_base.version_id,
-        },
-    )
-    failed_id = mixed_command.enqueue(
-        mixed_request,
-        idempotency_key="mixed-failed",
-        requester="pytest",
-    ).job_id
-    original_transition = jobs.transition
-
-    def fail_final_transition(job_id_value, target, **kwargs):
-        if target is JobStatus.SUCCEEDED:
-            raise RuntimeError("synthetic mixed final commit failure")
-        return original_transition(job_id_value, target, **kwargs)
-
-    monkeypatch.setattr(jobs, "transition", fail_final_transition)
-    with pytest.raises(RuntimeError, match="mixed final commit"):
-        worker.run(failed_id)
-    monkeypatch.setattr(jobs, "transition", original_transition)
-    recovered_ids = jobs.recover_stale_running_job_ids(
-        reason="expired mixed final commit",
-        stale_before=UtcTimestamp(_NOW.value + timedelta(minutes=2)),
-        at=UtcTimestamp(_NOW.value + timedelta(minutes=3)),
-    )
-    assert recovered_ids == (failed_id,)
-    handler = worker._registry.resolve("data.eod.v1")  # type: ignore[attr-defined]
-    assert isinstance(handler, EodWorkerHandler)
-    handler.recover_interrupted(jobs, failed_id)
-    handler.recover_interrupted(jobs, failed_id)
-    evidence_root = tmp_path / "artifacts" / "eod"
-    failure = verify_eod_terminal_failure(
-        evidence_root / f"{failed_id.replace(':', '_')}.incomplete",
-        artifacts_root=evidence_root,
-        data_root=tmp_path,
-        uow_factory=_data_uow(tmp_path),
-        job=jobs.get_job(failed_id),
-    )
-    assert tuple(item.status for item in failure.completed_datasets) == (
-        "PUBLISHED_NEW",
-        "REUSED_UNCHANGED",
-    )
-
-    retry_id = mixed_command.enqueue(
-        mixed_request,
-        idempotency_key="mixed-retry",
-        requester="pytest",
-    ).job_id
-    worker.run(retry_id)
-    with sqlite3.connect(tmp_path / "metadata.db") as connection:
-        assert connection.execute("SELECT COUNT(*) FROM ingestion_batches").fetchone() == (3,)
-        assert connection.execute("SELECT COUNT(*) FROM dataset_versions").fetchone() == (3,)
-        assert connection.execute("SELECT COUNT(*) FROM quality_runs").fetchone() == (3,)
-    assert gateway.calls == [
-        DatasetKind.EXCHANGE_CALENDAR,
-        DatasetKind.SECURITY_MASTER,
-        DatasetKind.EXCHANGE_CALENDAR,
-    ]
-
-
 def test_formal_worker_run_recovers_existing_failure_then_runs_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    gateway = CalendarGateway()
-    runtime = build_eod_runtime(_settings(tmp_path), gateway=gateway)
+    gateway = DailyBarGateway()
+    runtime = _formal_runtime(tmp_path, gateway)
     failed_id = runtime.eod_commands.enqueue(
         EodRunRequest(
             start_date=date(2026, 7, 15),
             end_date=date(2026, 7, 15),
-            datasets=("exchange_calendar",),
+            datasets=("daily_bar_unadjusted",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
             base_versions={},
         ),
@@ -1895,7 +1657,7 @@ def test_formal_worker_run_recovers_existing_failure_then_runs_target(
         EodRunRequest(
             start_date=date(2026, 7, 15),
             end_date=date(2026, 7, 15),
-            datasets=("exchange_calendar",),
+            datasets=("daily_bar_unadjusted",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
             base_versions={},
         ),
@@ -1940,7 +1702,7 @@ def test_terminal_failure_rejects_forged_completed_lineage(
     monkeypatch: pytest.MonkeyPatch,
     field: str,
 ) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(tmp_path, gateway)
     job_id = _enqueue(command, key=f"completed-forgery-{field}")
     original_transition = jobs.transition
@@ -1990,7 +1752,7 @@ def test_terminal_failure_rejects_checkpoint_inventory_attack(
     monkeypatch: pytest.MonkeyPatch,
     attack: str,
 ) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(tmp_path, gateway)
     job_id = _enqueue(command, key=f"checkpoint-attack-{attack}")
     original_transition = jobs.transition
@@ -2012,7 +1774,7 @@ def test_terminal_failure_rejects_checkpoint_inventory_attack(
     job = jobs.get_job(job_id)
     directory = tmp_path / "artifacts" / "eod" / f"{job_id.replace(':', '_')}.incomplete"
     checkpoint_root = tmp_path / "artifacts" / "eod" / ".checkpoints" / job_id.replace(":", "_")
-    checkpoint = checkpoint_root / "exchange_calendar.json"
+    checkpoint = checkpoint_root / "daily_bar_unadjusted.json"
     if attack == "missing":
         checkpoint.unlink()
     elif attack == "extra":
@@ -2036,7 +1798,7 @@ def test_recovered_provisional_success_without_failure_is_strictly_reused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(tmp_path, gateway)
     job_id = _enqueue(command, key="hard-exit-first")
     handler = worker._registry.resolve("data.eod.v1")  # type: ignore[attr-defined]
@@ -2081,7 +1843,7 @@ def test_recovered_provisional_success_without_failure_is_strictly_reused(
 
 
 def test_cancelled_eod_records_cancelled_failure_evidence(tmp_path: Path) -> None:
-    gateway = CalendarGateway()
+    gateway = DailyBarGateway()
     jobs, command, worker = _runtime(tmp_path, gateway)
     job_id = _enqueue(command, key="cancelled-evidence")
     original_fetch = gateway.fetch

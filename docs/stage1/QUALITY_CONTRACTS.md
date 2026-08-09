@@ -35,9 +35,9 @@ QualityRun 终态为 `PASSED`、`FAILED` 或 `SKIPPED`。只有 `PASSED` 可进�
 
 优先级不能替代一致性门。C 不能在未记录原因时静默接管。
 
-## 显式选源
+## ResolutionDecision
 
-每个 resolved 行记录：
+每个证券/交易日的 resolution 必须可重建以下信息：
 
 - 选择来源；
 - 参与判断的来源；
@@ -45,7 +45,7 @@ QualityRun 终态为 `PASSED`、`FAILED` 或 `SKIPPED`。只有 `PASSED` 可进�
 - 阈值/规则版本；
 - DifferenceReport 标识。
 
-若现有 `SourceOverride` 用于人工修正，必须产生新 DatasetVersion，不得修改旧版本。
+允许用版本级默认摘要加行级例外减少重复数据。该决定属于正常解析链，不需要申请、批准或人工 override。K2 删除 active `SourceOverride` 工作流；未来人工改判必须另立任务并产生新 DatasetVersion。
 
 ## 失败纪律
 

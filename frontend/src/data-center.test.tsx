@@ -50,23 +50,15 @@ const api = (overrides: Partial<WebApi> = {}): WebApi => ({
 });
 
 describe("Stage 1 data center", () => {
-  it("renders source blocking text without claiming synthetic production readiness", async () => {
-    const getData = vi.fn(async (path: string) => path.endsWith("/sources")
-      ? [{
-          source: "BAOSTOCK",
-          dataset: "daily_bar_unadjusted",
-          role: "FALLBACK",
-          status: "BLOCKED_EXTERNAL_VALIDATION",
-          evidence_kind: null,
-          blocking_reason: "requires authorized external validation",
-          auto_switch: false,
-        }]
-      : { datasets: [], failures: 0, blocked_sources: 23 });
+  it("offers only the three fixed AKShare upstreams", async () => {
+    const getData = vi.fn(async () => ({ items: [], next_cursor: null }));
     render(<App api={api({ getData })} eventSourceFactory={() => new SilentEventSource()} />);
-    fireEvent.click(screen.getByRole("button", { name: "数据源" }));
-    expect(await screen.findByText("BLOCKED_EXTERNAL_VALIDATION")).toBeInTheDocument();
-    expect(screen.getByText("requires authorized external validation")).toBeInTheDocument();
-    expect(screen.queryByText("SYNTHETIC PRODUCTION_READY")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "批次" }));
+    const selector = await screen.findByLabelText("batches upstream");
+    expect(selector).toHaveTextContent("EASTMONEY");
+    expect(selector).toHaveTextContent("TENCENT");
+    expect(selector).toHaveTextContent("SINA");
+    expect(screen.queryByRole("button", { name: "数据源" })).not.toBeInTheDocument();
   });
 
   it("shows loading, empty and error states", async () => {
@@ -118,14 +110,7 @@ describe("Stage 1 data center", () => {
     fireEvent.click(await screen.findByLabelText("完整精确 version mapping"));
     fireEvent.click(screen.getByRole("button", { name: "入队 EOD" }));
     expect(await screen.findByRole("status")).toHaveTextContent("完整映射模式要求");
-    for (const dataset of [
-      "security_master",
-      "exchange_calendar",
-      "daily_bar_unadjusted",
-      "adjustment_factor",
-      "trading_status",
-      "benchmark_index_daily",
-    ]) {
+    for (const dataset of ["daily_bar_unadjusted"]) {
       fireEvent.change(screen.getByLabelText(`${dataset} version`), {
         target: { value: `data_version:${dataset}` },
       });
@@ -139,7 +124,7 @@ describe("Stage 1 data center", () => {
     fireEvent.click(screen.getByRole("button", { name: "入队 EOD" }));
     await waitFor(() => expect(calls).toHaveLength(3));
     expect(calls[2].key).not.toBe(calls[1].key);
-    expect(Object.keys(calls[0].request.base_versions)).toHaveLength(6);
+    expect(Object.keys(calls[0].request.base_versions)).toHaveLength(1);
   });
 
   it("reports stale cancel conflicts and sends the current row_version", async () => {
@@ -168,17 +153,17 @@ describe("Stage 1 data center", () => {
 
   it("applies allowlisted filters and clears cursor history when filters change", async () => {
     const getData = vi.fn(async (path: string) => path.includes("/batches")
-      ? { items: [{ batch_id: "data_batch:1", dataset: "exchange_calendar" }], next_cursor: "cursor-2" }
+      ? { items: [{ batch_id: "data_batch:1", dataset: "daily_bar_unadjusted" }], next_cursor: "cursor-2" }
       : { datasets: [] });
     render(<App api={api({ getData })} eventSourceFactory={() => new SilentEventSource()} />);
     fireEvent.click(screen.getByRole("button", { name: "批次" }));
     fireEvent.click(await screen.findByRole("button", { name: "下一页" }));
     await waitFor(() => expect(getData).toHaveBeenCalledWith(expect.stringContaining("cursor=cursor-2")));
     fireEvent.change(screen.getByLabelText("batches dataset"), {
-      target: { value: "exchange_calendar" },
+      target: { value: "daily_bar_unadjusted" },
     });
     await waitFor(() => expect(getData).toHaveBeenCalledWith(
-      "/api/data/batches?dataset=exchange_calendar",
+      "/api/data/batches?dataset=daily_bar_unadjusted",
     ));
     expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
   });
@@ -274,7 +259,7 @@ describe("Stage 1 data center", () => {
     fireEvent.click(screen.getByRole("button", { name: "EOD" }));
     fireEvent.click(await screen.findByRole("button", { name: "入队 EOD" }));
     await waitFor(() => expect(calls).toHaveLength(1));
-    const checkbox = screen.getByLabelText("exchange_calendar");
+    const checkbox = screen.getByLabelText("daily_bar_unadjusted");
     fireEvent.click(checkbox);
     fireEvent.click(checkbox);
     fireEvent.click(screen.getByRole("button", { name: "入队 EOD" }));

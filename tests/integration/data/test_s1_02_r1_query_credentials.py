@@ -430,7 +430,7 @@ class TestCredentialBindingMismatches:
             warehouse,
             uow_factory,
             version,
-            schema_version="daily_bar_unadjusted.v2",
+            schema_version="daily_bar_unadjusted.v999",
         )
         adapter = CanonicalQueryAdapter(data_root=tmp_path, uow_factory=uow_factory)
         with pytest.raises(DatasetVersionNotQueryableError):
@@ -605,7 +605,8 @@ class TestCredentialBindingMismatches:
             DatasetVersionBatchRow,
         )
         from quantking.data.models import (
-            DataSource,
+            DataProvider,
+            DataUpstream,
             IngestionBatch,
             IngestionBatchStatus,
             transition_batch,
@@ -624,10 +625,19 @@ class TestCredentialBindingMismatches:
         # DatasetVersionBatchRow is satisfied.
         batch = IngestionBatch.running(
             batch_id=fake_batch_id,
-            source=DataSource.XTQUANT,
+            provider=DataProvider.AKSHARE,
+            upstream=DataUpstream.EASTMONEY,
+            endpoint="stock_zh_a_hist",
+            library_version="test",
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-            adapter_version="xtquant-probe-1",
-            request_params={"code": "000001.SZ"},
+            adapter_version="eastmoney-probe-1",
+            request_params={
+                "provider": "AKSHARE",
+                "upstream": "EASTMONEY",
+                "endpoint": "stock_zh_a_hist",
+                "akshare_version": "test",
+                "code": "000001.SZ",
+            },
             started_at=utc_now(),
         )
         batch = transition_batch(

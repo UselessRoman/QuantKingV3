@@ -32,13 +32,15 @@ Parquet 保存批量数据，DuckDB 用于查询，SQLite 保存元数据、任�
 
 Stage 1 统一使用 AKShare 作为接入库，并把实际 upstream 作为独立来源：东财为 A 主来源、腾讯为 B 常态互验来源、新浪为 C 异常第三源。A/B 每次比较；任一失败、缺行、质量失败或分歧时调用 C。至少两个 upstream 在冻结阈值内一致才可形成发布候选。
 
-结果：三个 upstream 独立进入 Raw；Canonical 可以按证券/交易日显式选源，但必须记录选择来源、参与比较来源、规则版本和原因。无两源一致则隔离。XTQuant、BaoStock、Tushare 和 JQData 不再是 Stage 1 生产依赖。
+结果：三个 upstream 独立进入 Raw；K2 通过 `ResolutionDecision` 按证券/交易日记录选择来源、参与比较来源、规则版本和原因。该决定属于正常解析链，不使用人工备用源审批语义。无两源一致则隔离。XTQuant、BaoStock、Tushare 和 JQData 不再是 Stage 1 生产依赖。
 
 ## ADR-005：数据范围与分期
 
 **状态：已接受（2026-08-08 简化）**
 
 Stage 1 首先发布明确范围的沪深 A 股未复权日线 OHLCV/成交额版本。北交所、退市证券、复权信息和历史交易状态必须作为显式缺口报告，不冒充已覆盖；在 Stage 2 用于研究前必须补足并验收 point-in-time 与复权语义。
+
+Stage 1 生产 EOD 运行时只编排 `daily_bar_unadjusted`。其他数据集可以保留框架无关 schema 作为后续合同，但不得进入默认 EOD 枚举、来源矩阵、能力状态机或发布流程。
 
 财务报表、估值、行业和历史指数成分位于 Stage 7。指数成分延后不影响首期保存基准指数行情。
 
@@ -139,3 +141,17 @@ Qlib 用于快速研究回测，Backtrader 用于正式事件驱动验收。两�
 **状态：已接受**
 
 旧项目 `E:\QuantKing` 不整体搬迁。候选内容按 `REUSE / ADAPT / REWRITE / DISCARD / DATA_ONLY` 审计，并只在目标模块所属阶段迁移。任何代码复用都必须重新验证依赖、数据口径、前视风险、测试和新模块边界。
+
+## ADR-018：Stage 1 控制面简化
+
+**状态：已接受（2026-08-08）**
+
+Stage 1 以尽快交付真实、明确范围的未复权日线版本为复杂度边界，不建设通用数据平台或机构级证据系统：
+
+- K1 删除 XTQuant/QMT 生产路线、旧 `DataSource` 候选集合、`SourceCandidateAssessment` 和 24 单元 source×dataset 矩阵；来源只建模为 `provider=AKSHARE` 与三个明确 upstream。
+- K1 的生产运行时只支持 `daily_bar_unadjusted`；其他五类历史 schema 不得驱动 EOD 分支。
+- K2 使用 `ResolutionDecision` 表达 A/B/C 正常仲裁，并退役 `SourceOverride` 的申请、批准、claim、attempt 和 child-version 状态机。人工改判如未来确有需求，必须另立任务和新 DatasetVersion。
+- K2 在改造生产 EOD 时把恢复事实收敛为冻结 `JobRun`、Raw manifest、已发布 DatasetVersion manifest 和 JSON Lines 日志。中断任务标记 `INTERRUPTED`；重试创建新 Job，并以输入指纹复用已经完整发布的版本。不得新增独立的 success/failure evidence、forensic success、authoritative failure 或多层 checkpoint 合同。
+- 已验收的 S1-01～S1-06 代码在 K1/K2 替换前可作为过渡实现存在，但历史验收只证明当时范围，不得覆盖本 ADR 的目标边界。
+
+DataCenter 日常读侧是否从深层复验收敛为“发布时完整验证 + 显式完整性检查”，在 K2 完成后单独评审；当前不作为 K1/K2 阻断项。ADR-009 双回测和 ADR-012 模型生命周期分别留到 Stage 4、Stage 3 开始时复核，本次不提前修改。

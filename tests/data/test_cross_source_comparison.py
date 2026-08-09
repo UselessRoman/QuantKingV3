@@ -111,8 +111,8 @@ class TestCrossSourceComparator:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="XTQUANT",
-            fallback_source="BAOSTOCK",
+            primary_source="EASTMONEY",
+            fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
@@ -136,8 +136,8 @@ class TestCrossSourceComparator:
         assert outcome.report_id.namespace == "data_diff"
         assert outcome.total_compared == 2
         assert outcome.total_differences == 0
-        assert outcome.primary_source.value == "XTQUANT"
-        assert outcome.fallback_source.value == "BAOSTOCK"
+        assert outcome.primary_source.value == "EASTMONEY"
+        assert outcome.fallback_source.value == "TENCENT"
 
     def test_primary_only_row_appears_in_difference_summary(self) -> None:
         from quantking.data.comparison.comparator import (
@@ -154,8 +154,8 @@ class TestCrossSourceComparator:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="XTQUANT",
-            fallback_source="BAOSTOCK",
+            primary_source="EASTMONEY",
+            fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
@@ -195,8 +195,8 @@ class TestCrossSourceComparator:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="XTQUANT",
-            fallback_source="BAOSTOCK",
+            primary_source="EASTMONEY",
+            fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
@@ -236,8 +236,8 @@ class TestCrossSourceComparator:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="XTQUANT",
-            fallback_source="BAOSTOCK",
+            primary_source="EASTMONEY",
+            fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
@@ -280,8 +280,8 @@ class TestCrossSourceComparator:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="XTQUANT",
-            fallback_source="BAOSTOCK",
+            primary_source="EASTMONEY",
+            fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
@@ -321,8 +321,8 @@ class TestCrossSourceComparator:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="XTQUANT",
-            fallback_source="BAOSTOCK",
+            primary_source="EASTMONEY",
+            fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
@@ -365,8 +365,8 @@ class TestCrossSourceComparator:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="XTQUANT",
-            fallback_source="BAOSTOCK",
+            primary_source="EASTMONEY",
+            fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
@@ -410,8 +410,8 @@ class TestCrossSourceComparator:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="XTQUANT",
-            fallback_source="BAOSTOCK",
+            primary_source="EASTMONEY",
+            fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
@@ -455,8 +455,8 @@ class TestCrossSourceComparator:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="XTQUANT",
-            fallback_source="BAOSTOCK",
+            primary_source="EASTMONEY",
+            fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
@@ -501,8 +501,8 @@ class TestCrossSourceComparator:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="XTQUANT",
-            fallback_source="BAOSTOCK",
+            primary_source="EASTMONEY",
+            fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
             primary_batch_id=new_entity_id("data_batch"),
@@ -542,8 +542,8 @@ class TestCrossSourceComparator:
             return CrossSourceComparisonRequest(
                 dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
                 schema_version="daily_bar_unadjusted.v1",
-                primary_source="XTQUANT",
-                fallback_source="BAOSTOCK",
+                primary_source="EASTMONEY",
+                fallback_source="TENCENT",
                 primary_version_id=new_entity_id("data_version"),
                 fallback_version_id=new_entity_id("data_version"),
                 primary_batch_id=new_entity_id("data_batch"),

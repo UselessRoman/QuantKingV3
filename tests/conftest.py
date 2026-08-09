@@ -21,14 +21,10 @@ _FORMAL_ROOTS = (
 
 def pytest_configure(config: pytest.Config) -> None:
     """Register every test class that requires explicit external authorization."""
-    config.addinivalue_line("markers", "real_xtquant: accesses the real XTQuant/QMT runtime")
     config.addinivalue_line("markers", "real_external: accesses an authorized external target")
-    config.addinivalue_line("markers", "real_baostock: accesses the real BaoStock service")
     config.addinivalue_line("markers", "real_akshare: accesses real AKShare upstream services")
-    config.addinivalue_line("markers", "real_tushare: accesses the real Tushare service")
     config.addinivalue_line("markers", "real_legacy_data: reads the authorized legacy-data root")
     config.addinivalue_line("markers", "real_backup: writes a real data or backup root")
-    config.addinivalue_line("markers", "simulation_account: reads a real QMT simulation account")
 
 
 def _formal_path(path: object) -> bool:
@@ -75,11 +71,7 @@ def block_external_access(
         request.node.get_closest_marker(marker) is not None
         for marker in (
             "real_external",
-            "real_xtquant",
-            "real_baostock",
             "real_akshare",
-            "real_tushare",
-            "simulation_account",
         )
     )
     if not network_authorized:
@@ -92,10 +84,7 @@ def block_external_access(
         request.node.get_closest_marker(marker) is not None
         for marker in (
             "real_external",
-            "real_xtquant",
-            "real_baostock",
             "real_akshare",
-            "real_tushare",
             "real_legacy_data",
             "real_backup",
         )

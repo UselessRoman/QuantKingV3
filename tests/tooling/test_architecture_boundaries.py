@@ -24,8 +24,7 @@ def _run(root: Path) -> subprocess.CompletedProcess[str]:
 
 def test_checker_accepts_every_explicit_adapter_and_entry_boundary(tmp_path: Path) -> None:
     allowed = {
-        "data/adapters/xt.py": "import xtquant.xtdata\nfrom akshare.stock import history\n",
-        "trading/adapters/qmt.py": "from xtquant import xttrader\n",
+        "data/adapters/ak.py": "from akshare.stock import history\n",
         "research/adapters/qlib_engine.py": "from qlib.data import D\nimport lightgbm.basic\n",
         "backtest/adapters/engines.py": "import qlib\nfrom backtrader import Cerebro\n",
         "jobs/adapters/persistence/sqlite.py": (
@@ -47,7 +46,7 @@ def test_checker_accepts_every_explicit_adapter_and_entry_boundary(tmp_path: Pat
 
 def test_checker_rejects_import_and_from_import_with_stable_sorted_output(tmp_path: Path) -> None:
     violations = {
-        "portfolio/z_last.py": "import xtquant.xtdata\nfrom fastapi import Request\n",
+        "portfolio/z_last.py": "import akshare\nfrom fastapi import Request\n",
         "research/service.py": "from qlib.contrib import model\nimport backtrader\n",
         "web/services.py": "from fastapi.requests import Request\nimport sqlalchemy.orm\n",
         "data/service.py": "import duckdb.sqltypes\nfrom lightgbm import Booster\n",
@@ -62,8 +61,28 @@ def test_checker_rejects_import_and_from_import_with_stable_sorted_output(tmp_pa
     assert len(lines) == 8
     assert lines == sorted(lines, key=str.casefold)
     assert any("data/service.py:1: forbidden import duckdb" in line for line in lines)
-    assert any("portfolio/z_last.py:1: forbidden import xtquant" in line for line in lines)
+    assert any("portfolio/z_last.py:1: forbidden import akshare" in line for line in lines)
     assert any("web/services.py:1: forbidden import fastapi.Request" in line for line in lines)
+
+
+def test_checker_rejects_retired_vendors_everywhere_in_active_source(tmp_path: Path) -> None:
+    violations = {
+        "data/adapters/retired.py": (
+            "import xtquant.xtdata\nfrom baostock import query_history_k_data_plus\n"
+        ),
+        "research/retired.py": "import tushare\nfrom qmt import Client\nimport miniqmt\n",
+    }
+    for relative, source in violations.items():
+        _write(tmp_path, relative, source)
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 1
+    lines = [line for line in result.stdout.splitlines() if ": forbidden import " in line]
+    assert len(lines) == 5
+    assert all("nowhere in active src (retired vendor)" in line for line in lines)
+    for vendor in ("baostock", "miniqmt", "qmt", "tushare", "xtquant"):
+        assert any(f"forbidden import {vendor} " in line for line in lines)
 
 
 def test_fastapi_request_is_not_allowed_in_schema_or_web_business_module(tmp_path: Path) -> None:

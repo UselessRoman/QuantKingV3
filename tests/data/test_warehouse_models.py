@@ -80,7 +80,7 @@ class TestCanonicalManifestFile:
 class TestRawManifestSerialization:
     def test_deterministic_json_ordering(self) -> None:
         manifest = RawManifest(
-            source="xtquant",
+            source="eastmoney",
             dataset="daily_bar_unadjusted",
             batch_id="b-1",
             adapter_version="v1",

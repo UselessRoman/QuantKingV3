@@ -38,7 +38,7 @@ def _request(**changes: object) -> IncrementalPlanRequest:
         "lookback_days": 2,
         "max_days_per_chunk": 2,
         "max_items_per_chunk": 1,
-        "adapter_version": "xtquant-s1-03.v1",
+        "adapter_version": "akshare-daily-bar.v1",
     }
     values.update(changes)
     return IncrementalPlanRequest(**values)  # type: ignore[arg-type]

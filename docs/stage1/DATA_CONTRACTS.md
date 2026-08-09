@@ -15,6 +15,8 @@
 
 数据集：`daily_bar_unadjusted`
 
+这是 Stage 1 生产 EOD 唯一允许的数据集。其他历史 schema 不进入默认采集、比较或发布分支。
+
 主键：`(symbol, trade_date)`
 
 | 字段 | 语义 |
@@ -31,13 +33,15 @@
 | `fetched_at` | 采集时间 |
 | `batch_id` | 原始批次 |
 
-最终 resolved 行还必须包含：
+最终 resolution artifact 还必须包含：
 
 - `selected_upstream`；
 - `compared_upstreams`；
 - `resolution_rule_version`；
 - `resolution_reason`；
 - 对应 DifferenceReport 或比较摘要标识。
+
+允许在 resolution run 摘要记录全版本默认决定，只为例外行保存完整字段；DatasetVersion manifest 必须绑定摘要、例外 artifact 和 SHA。
 
 ## AKShare endpoint 合同
 
@@ -47,7 +51,9 @@
 | TENCENT | `stock_zh_a_hist_tx` | 日线、未复权、显式起止日期 |
 | SINA | `stock_zh_a_daily` | 日线、未复权、显式起止日期 |
 
-证券代码格式转换属于适配器内部。上游返回列名、类型和量额单位不得直接泄漏到领域层，也不得在真实探针前凭猜测固定。
+证券代码格式转换属于适配器内部。上游返回列名、类型和量额单位不得直接泄漏到领域层。K1 单位策略只依据唯一真实探针、官方文档和锁定的 AKShare 1.18.83 源码冻结；未知包版本和非白名单代码段保持 `UNIT_UNVERIFIED` 或稳定拒绝。
+
+R1 中 `DailyBarRequest` 仍只表达目标窗口；上游窗口固定为目标开始日前推 15 个自然日、结束日不变。Raw response 和 manifest 必须同时绑定 target/upstream 起止日期与 `lookback_days=15`；完整上游 context 原样进入 Raw，Canonical 仅包含裁回目标窗口的行。
 
 ## Raw manifest
 
@@ -80,7 +86,7 @@ Web 和 CLI 只负责创建同一个持久 EOD Job；Worker 执行采集、标�
 - Worker 使用冻结命令和显式数据范围。
 - 质量失败或无两源一致时不发布。
 - 候选完整写入临时目录并验证 manifest/`COMPLETE` 后原子切换。
-- 重复同一输入幂等；发布后故障可通过 checkpoint 恢复。
+- 重复同一输入幂等；中断 Job 关闭后由新 Job 重试。相同输入指纹已有完整发布时复验 manifest 后复用，不维护独立 evidence/checkpoint 恢复层。
 
 S1-05 的详细历史合同和证据见 [验收记录](S1-05_ACCEPTANCE.md)。
 
@@ -92,6 +98,8 @@ S1-05 的详细历史合同和证据见 [验收记录](S1-05_ACCEPTANCE.md)。
 - API 不返回正式绝对路径、供应商原始 payload、异常栈或机密。
 
 S1-06 的详细历史合同和证据见 [验收记录](S1-06_ACCEPTANCE.md)。
+
+日常读取是否在 K2 后改为轻量检查属于独立 P1 评审；发布时完整验证在任何情况下都不能省略。
 
 ## 历史 S1-03
 

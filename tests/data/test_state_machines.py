@@ -18,10 +18,11 @@ from quantking.common.time import TradingDate, UtcTimestamp
 from quantking.data.models import (
     BatchFailureInfo,
     BatchFailureKind,
+    DataProvider,
     DatasetKind,
     DatasetVersion,
     DatasetVersionStatus,
-    DataSource,
+    DataUpstream,
     EmptyResultInfo,
     IngestionBatch,
     IngestionBatchStatus,
@@ -42,10 +43,20 @@ _TRADE_DATE = TradingDate(date(2026, 7, 16))
 def _running_batch() -> IngestionBatch:
     return IngestionBatch.running(
         batch_id=new_entity_id("data_batch"),
-        source=DataSource.XTQUANT,
+        provider=DataProvider.AKSHARE,
+        upstream=DataUpstream.EASTMONEY,
+        endpoint="stock_zh_a_hist",
+        library_version="test",
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        adapter_version="xtquant-probe-1",
-        request_params={"code": "000001.SZ", "start": "2026-01-01"},
+        adapter_version="eastmoney-probe-1",
+        request_params={
+            "provider": "AKSHARE",
+            "upstream": "EASTMONEY",
+            "endpoint": "stock_zh_a_hist",
+            "akshare_version": "test",
+            "code": "000001.SZ",
+            "start": "2026-01-01",
+        },
         started_at=_NOW,
     )
 
@@ -69,8 +80,8 @@ def _pending_override() -> SourceOverride:
         difference_report_id=new_entity_id("data_diff"),
         primary_batch_id=new_entity_id("data_batch"),
         fallback_batch_id=new_entity_id("data_batch"),
-        primary_source=DataSource.XTQUANT,
-        fallback_source=DataSource.BAOSTOCK,
+        primary_source=DataUpstream.EASTMONEY,
+        fallback_source=DataUpstream.TENCENT,
         scope_codes=("000001.SZ",),
         scope_dates=(_TRADE_DATE,),
         fields=("close",),
@@ -92,7 +103,9 @@ class TestIngestionBatchStateMachine:
             security_count=1,
             manifest_files=(
                 ManifestFileEntry(
-                    relative_path="raw/xtquant/daily/000001.SZ.parquet", size=1024, sha256="a" * 64
+                    relative_path="raw/eastmoney/daily/000001.SZ.parquet",
+                    size=1024,
+                    sha256="a" * 64,
                 ),
             ),
         )
@@ -388,9 +401,12 @@ class TestDirectConstructionConsistency:
             "UNEXPECTED_EMPTY",
         }
 
-    def test_legacy_data_only_has_an_explicit_non_xtquant_source(self) -> None:
-        assert DataSource.LEGACY_DATA_ONLY is not DataSource.XTQUANT
-        assert DataSource.LEGACY_DATA_ONLY.value == "LEGACY_DATA_ONLY"
+    def test_k1_upstreams_are_fixed_and_distinct(self) -> None:
+        assert tuple(DataUpstream) == (
+            DataUpstream.EASTMONEY,
+            DataUpstream.TENCENT,
+            DataUpstream.SINA,
+        )
 
 
 class TestManagedRelativePathsOnly:
@@ -409,7 +425,10 @@ class TestManagedRelativePathsOnly:
     def test_request_params_canonical_json_is_deterministic(self) -> None:
         batch_a = IngestionBatch.running(
             batch_id=new_entity_id("data_batch"),
-            source=DataSource.XTQUANT,
+            provider=DataProvider.AKSHARE,
+            upstream=DataUpstream.EASTMONEY,
+            endpoint="stock_zh_a_hist",
+            library_version="test",
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             adapter_version="v1",
             request_params={"b": "2", "a": "1"},
@@ -417,7 +436,10 @@ class TestManagedRelativePathsOnly:
         )
         batch_b = IngestionBatch.running(
             batch_id=new_entity_id("data_batch"),
-            source=DataSource.XTQUANT,
+            provider=DataProvider.AKSHARE,
+            upstream=DataUpstream.EASTMONEY,
+            endpoint="stock_zh_a_hist",
+            library_version="test",
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             adapter_version="v1",
             request_params={"a": "1", "b": "2"},

@@ -61,8 +61,8 @@ def _write_report(tmp_path: Path, *, fallback_rows: list[dict[str, object]] | No
     request = CrossSourceComparisonRequest(
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         schema_version="daily_bar_unadjusted.v1",
-        primary_source="XTQUANT",
-        fallback_source="BAOSTOCK",
+        primary_source="EASTMONEY",
+        fallback_source="TENCENT",
         primary_version_id=new_entity_id("data_version"),
         fallback_version_id=new_entity_id("data_version"),
         primary_batch_id=new_entity_id("data_batch"),

@@ -25,7 +25,7 @@ def _body(*, day: str = "2026-07-15") -> dict[str, object]:
     return {
         "start_date": day,
         "end_date": day,
-        "datasets": ["exchange_calendar"],
+        "datasets": ["daily_bar_unadjusted"],
         "base_versions": {},
         "publish_intent": "PUBLISH_AFTER_QUALITY",
     }
@@ -109,7 +109,7 @@ def test_post_maps_domain_validation_to_stable_sanitized_400(
         )
         duplicate = client.post(
             "/api/data/eod-runs",
-            json={**_body(), "datasets": ["exchange_calendar", "exchange_calendar"]},
+            json={**_body(), "datasets": ["daily_bar_unadjusted", "daily_bar_unadjusted"]},
             headers={"Idempotency-Key": "duplicate"},
         )
         unsafe_key = client.post(
@@ -138,10 +138,10 @@ def test_cancel_requires_and_checks_row_version(job_service: JobService) -> None
                 "schema_version": "eod-request.v1",
                 "start_date": "2026-07-15",
                 "end_date": "2026-07-15",
-                "datasets": ["exchange_calendar"],
+                "datasets": ["daily_bar_unadjusted"],
                 "base_versions": {},
                 "publish_intent": "PUBLISH_AFTER_QUALITY",
-                "source": "XTQUANT",
+                "source": "AKSHARE",
             }
         ),
         idempotency_key="cancel-api",
@@ -194,10 +194,10 @@ def test_cancel_returns_conflict_inside_non_cancellable_phase(
                 "schema_version": "eod-request.v1",
                 "start_date": "2026-07-15",
                 "end_date": "2026-07-15",
-                "datasets": ["exchange_calendar"],
+                "datasets": ["daily_bar_unadjusted"],
                 "base_versions": {},
                 "publish_intent": "PUBLISH_AFTER_QUALITY",
-                "source": "XTQUANT",
+                "source": "AKSHARE",
             }
         ),
         idempotency_key="non-cancellable-api",
@@ -234,7 +234,7 @@ def test_cli_and_api_freeze_identical_request_manifests(
                 "--trade-date",
                 "2026-07-15",
                 "--datasets",
-                "exchange_calendar",
+                "daily_bar_unadjusted",
                 "--idempotency-key",
                 "cli-manifest",
                 "--publish-intent",

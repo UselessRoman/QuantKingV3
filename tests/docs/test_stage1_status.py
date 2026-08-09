@@ -24,6 +24,8 @@ def _read(relative: str) -> str:
         "STAGE1_COMPLETION_HANDOFF.md",
         "SOURCE_MATRIX.md",
         "S1-07K1_TASK.md",
+        "S1-07K1_IMPLEMENTATION_HANDOFF.md",
+        "S1-07K2_TASK.md",
     ),
 )
 def test_simplified_stage1_documents_exist(name: str) -> None:
@@ -83,6 +85,44 @@ def test_next_task_is_bounded_and_rejects_old_evidence_chain() -> None:
         assert retired in text
 
 
+def test_k1_retires_the_complete_old_source_control_plane() -> None:
+    text = _read("docs/stage1/S1-07K1_TASK.md")
+    for phrase in (
+        "src/quantking/runtime.py",
+        "configs/default.toml",
+        "data/models.py",
+        "SourceCandidateAssessment",
+        "24 单元矩阵",
+        "daily_bar_unadjusted",
+        "K1 不实现 `ResolutionDecision`",
+    ):
+        assert phrase in text
+
+
+def test_k2_uses_resolution_decisions_and_simplified_recovery() -> None:
+    text = _read("docs/stage1/S1-07K2_TASK.md")
+    for phrase in (
+        "ResolutionDecision",
+        "退役 SourceOverride",
+        "中断后旧 Job 终态为 `INTERRUPTED`",
+        "输入指纹",
+        "EodEvidenceWriter",
+        "DataCenter 日常读取与完整 SHA 深验的 P1 重构",
+    ):
+        assert phrase in text
+
+
+def test_architecture_simplification_is_authoritative_and_later_decisions_are_deferred() -> None:
+    decisions = _read("docs/DECISIONS.md")
+    roadmap = _read("docs/ROADMAP.md")
+    assert "ADR-018" in decisions
+    assert "Stage 1 控制面简化" in decisions
+    assert "生产运行时只支持 `daily_bar_unadjusted`" in decisions
+    assert "K2 使用 `ResolutionDecision`" in decisions
+    assert "Stage 3 开始时复核模型生命周期" in roadmap
+    assert "Stage 4 开始时复核双回测成本" in roadmap
+
+
 def test_retired_s1_07_current_documents_and_modules_are_absent() -> None:
     assert not list((_ROOT / "src" / "quantking" / "data" / "validation").glob("*.py"))
     assert not list((_ROOT / "tests" / "data" / "validation").glob("*.py"))
@@ -91,7 +131,7 @@ def test_retired_s1_07_current_documents_and_modules_are_absent() -> None:
     assert "44d268b3db8bd9c690225f62e60fa12bf56a289d" in handoff
 
 
-def test_stage1_does_not_claim_real_akshare_or_completion() -> None:
+def test_stage1_records_k1_functional_acceptance_without_claiming_stage_completion() -> None:
     combined = "\n".join(
         _read(relative)
         for relative in (
@@ -101,6 +141,20 @@ def test_stage1_does_not_claim_real_akshare_or_completion() -> None:
             "docs/stage1/HANDOFF.md",
         )
     )
-    assert "S1-07K1 | 未开始" in combined
+    assert "R1" in combined
+    assert "R2" in combined
+    assert "D1" in combined
+    assert "各尝试一次" in combined
+    assert "AKSHARE_NETWORK" in combined
+    assert "没有 Raw/Canonical" in combined
+    assert "授权均已消耗" in combined
+    assert "4 个阻断" in combined
+    assert "R1 后完整" in combined
+    assert "52 upstream/41 Canonical" in combined
+    assert "complete=True" in combined
+    assert "K1 功能验收通过" in combined
+    assert "935 passed" in combined
+    assert "当前变更未提交" in combined
+    assert "K2 未开始" in combined
     assert "Stage 1 尚未完成" in combined
     assert "Stage 1 已完成验收" not in combined

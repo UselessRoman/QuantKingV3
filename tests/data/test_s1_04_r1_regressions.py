@@ -1,11 +1,10 @@
-"""S1-04-R1 regression tests for content, rules, and source readiness."""
+"""S1-04-R1 regression tests for content and quality rules."""
 
 from __future__ import annotations
 
 from datetime import date
 
 import pyarrow as pa
-import pytest
 
 from quantking.common.ids import new_entity_id
 from quantking.common.time import TradingDate
@@ -213,52 +212,3 @@ def test_security_master_rejects_overlapping_effective_ranges() -> None:
         result for result in outcome.results if result.rule_code == "listing_effective_range"
     )
     assert rule.status.value == "FAILED"
-
-
-def test_production_ready_requires_every_gate_and_stability() -> None:
-    from quantking.data.assessment.models import (
-        AssessmentStatus,
-        EvidenceKind,
-        SourceCandidateAssessment,
-    )
-
-    with pytest.raises(ValueError, match="production readiness"):
-        SourceCandidateAssessment(
-            assessment_id=new_entity_id("data_assessment"),
-            source="BAOSTOCK",
-            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-            evidence_kind=EvidenceKind.REAL,
-            semantic_contract_verified=True,
-            schema_unit_verified=True,
-            coverage_adequate=True,
-            quality_passed=False,
-            fixed_sample_differences_adequate=True,
-            stability_runs=3,
-            status=AssessmentStatus.PRODUCTION_READY,
-            blocking_reason=None,
-            assessment_config_version="assessment.v1:min_stability_runs=3",
-            sample_spec_version="sample.v1",
-            rule_version="comparison-thresholds.v1",
-            evidence_relative_path="assessments/baostock/daily.json",
-            evidence_sha256="a" * 64,
-            created_at=__import__("quantking.common.time", fromlist=["utc_now"]).utc_now(),
-        )
-
-
-def test_default_matrix_is_source_by_dataset_and_blocks_xtquant_five() -> None:
-    from quantking.data.assessment.matrix import default_source_matrix
-    from quantking.data.assessment.models import AssessmentStatus
-
-    matrix = default_source_matrix()
-    entries = {(entry.source, entry.dataset): entry for entry in matrix.entries}
-    assert len(entries) == 24
-    assert (
-        entries[("XTQUANT", DatasetKind.EXCHANGE_CALENDAR)].status
-        is not AssessmentStatus.UNVERIFIED
-    )
-    for dataset in DatasetKind:
-        if dataset is not DatasetKind.EXCHANGE_CALENDAR:
-            assert entries[("XTQUANT", dataset)].status in {
-                AssessmentStatus.UNVERIFIED,
-                AssessmentStatus.BLOCKED_EXTERNAL_VALIDATION,
-            }
