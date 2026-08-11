@@ -1,61 +1,34 @@
 # Stage 1：A 股日线数据仓
 
-状态：S1-01～S1-06 已完成独立主验收，S1-07K1 功能验收通过并已提交；S1-07K2
-纯离线实现已完成并通过独立主验收。Stage 1 尚未完成，S1-08 与 Stage 2 均未开始。
+状态：S1-01～S1-06 已主验收；K1 已提交 `f98f1d9`，K2 已提交 `0ebf84b`，两者均通过
+独立主验收。S1-08 任务已设计但未授权执行，因此 Stage 1 尚未完成，Stage 2 未开始。
 
-## 当前技术路线
-
-Stage 1 只解决个人量化项目真正需要的问题：取得日线、保留原始数据、核对多个上游、隔离冲突并发布可复现版本。
-
-- 统一接入库：AKShare。
-- A 源：东财，默认主来源。
-- B 源：腾讯，常态交叉校验来源。
-- C 源：新浪，仅在 A/B 缺失、失败或分歧时参与第三方判定。
-- 首期数据：沪深 A 股未复权日线 OHLCV 和成交额；北交所、退市证券和复权信息按缺口报告管理，不冒充已覆盖。
-- Stage 1 生产 EOD 只编排 `daily_bar_unadjusted`；其他历史 schema 不进入默认运行时。
-- 每个 Raw 批次同时记录 `provider=AKSHARE` 和真实 `upstream=EASTMONEY|TENCENT|SINA`。
-- 不连接 QMT，不需要券商客户端、账号或密码，不调用任何交易接口。
-- 不使用 Ed25519、signer allowlist、claim nonce、授权信封、sealed evidence 或多版本证据合同。
-- 不保留 `SourceCandidateAssessment` 或 24 单元 source×dataset 矩阵；K2 用 `ResolutionDecision` 表达正常仲裁，不沿用 `SourceOverride` 审批状态机。
-
-## 简化主链
+## 当前主链
 
 ```text
-AKShare/东财(A) ─┐
-                 ├─ 独立 Raw → 统一日线 schema → A/B 比较
-AKShare/腾讯(B) ─┘                            │
-                                              ├─ 一致：按优先级选源并发布候选
-AKShare/新浪(C) ── 仅在 A/B 异常时采集 ────────┤
-                                              └─ 无两源一致：隔离，不发布
+东财 A + 腾讯 B → 独立 Raw/质量 → 零容差比较
+                           ├─ 一致：选择 A
+                           └─ 异常：仅受影响范围调用新浪 C
+                                      ├─ 任意两源一致：显式 ResolutionDecision
+                                      └─ 无两源一致：隔离，不发布
 ```
 
-允许按证券和交易日选择来源，但必须显式记录 `selected_upstream`、比较结果和原因；禁止无血缘的静默替换。
+唯一生产数据集是沪深 A 股未复权日线 `daily_bar_unadjusted.v1`。系统不连接 QMT、券商或
+交易 SDK，不保留 source assessment、`SourceOverride` 或平行 EOD evidence 控制面。
 
-## 已保留成果
+## 当前文档
 
-- [S1-01](S1-01_ACCEPTANCE.md)：数据合同、元数据与迁移基础。
-- [S1-02](S1-02_ACCEPTANCE.md)：Raw/Canonical/Warehouse、原子发布和显式版本查询。
-- [S1-03](S1-03_ACCEPTANCE.md)：历史 XTQuant 离线适配经验；生产代码已在 K1 离线实现中退役，不再代表目标路线。
-- [S1-04](S1-04_ACCEPTANCE.md)：质量规则、跨源差异和显式 override。
-- [S1-05](S1-05_ACCEPTANCE.md)：EOD、Worker、CLI/API、失败隔离和恢复。
-- [S1-06](S1-06_ACCEPTANCE.md)：数据中心 Web。
+1. [当前合同](CONTRACTS.md)：数据、来源、质量、仲裁、发布和查询的唯一现行合同。
+2. [S1-08 任务卡](S1-08_TASK.md)：下一步固定范围、网络预算、正式写入和验收指令。
+3. [验收记录](ACCEPTANCE.md)：S1-01～K2 的结论与 Stage 1 最终完成条件。
+4. `S1-01_ACCEPTANCE.md`～`S1-06_ACCEPTANCE.md`：已完成任务的详细历史证据。
 
-旧 S1-07 的验收与实现文档仍可从 Git 历史审计，但不再放在当前文档树中，也不得作为后续任务的前置条件。
+已验收 K1/K2 的任务卡、实现交接以及重复的数据/质量/来源/收口说明已从当前文档树移除；
+其内容由提交、验收记录和 Git 历史保留。历史验收中与 ADR-018 冲突的 XTQuant、override
+或 evidence 措辞不再是现行合同。
 
-S1-01～S1-06 的验收文档是历史证据；其中出现的 XTQuant、备用源、`SourceOverride`、旧 EOD evidence 或深层恢复措辞只证明当时验收范围。与 [ADR-018](../DECISIONS.md#adr-018stage-1-控制面简化) 冲突时一律以当前决策和 K1/K2 任务卡为准。
+## 下一步
 
-## 接下来
-
-当前停在 [S1-07K2](S1-07K2_TASK.md) 独立主验收通过的交付点；精确实现和门禁见
-[K2 实现交接](S1-07K2_IMPLEMENTATION_HANDOFF.md)。所有 K1 真实授权均已消耗，禁止重跑
-marker；下一入口 S1-08 未获授权。
-
-状态和交接入口：
-
-- [任务卡](TASKS.md)
-- [验收矩阵](ACCEPTANCE.md)
-- [简明交接](HANDOFF.md)
-- [Stage 1 收口基线](STAGE1_COMPLETION_HANDOFF.md)
-- [数据源矩阵](SOURCE_MATRIX.md)
-- [数据合同](DATA_CONTRACTS.md)
-- [质量合同](QUALITY_CONTRACTS.md)
+必须先由用户按 [S1-08 任务卡](S1-08_TASK.md) 明确授权网络范围和
+`E:\QuantKingV3Data` 写入。不得重跑 K1 探针、清理既有验收证据、扩大范围或自动开始
+Stage 2。

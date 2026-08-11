@@ -101,9 +101,7 @@ Stage 1 的生产主链只处理 `daily_bar_unadjusted`。其他历史 schema �
 
 ## 状态
 
-Stage 0 已完成。Stage 1 的 S1-01～S1-06 已主验收，S1-07K1 功能验收通过并已提交；旧 S1-07
-证据链已退役。S1-07K2 纯离线实现已完成并通过独立主验收，active `SourceOverride` 与
-平行 EOD evidence 已由 `ResolutionDecision` 和简化 EOD 替换。任务与实现证据见
-[S1-07K2](stage1/S1-07K2_TASK.md) 和
-[K2 实现交接](stage1/S1-07K2_IMPLEMENTATION_HANDOFF.md)。Stage 1 尚未完成，S1-08 与
-Stage 2 未开始。
+Stage 0 已完成。Stage 1 的 S1-01～S1-06、K1 和 K2 已主验收；旧 S1-07 证据链、active
+`SourceOverride` 与平行 EOD evidence 已由 AKShare 三源、`ResolutionDecision` 和简化 EOD
+替换。当前合同见 [Stage 1 合同](stage1/CONTRACTS.md)，下一任务见
+[S1-08](stage1/S1-08_TASK.md)。Stage 1 尚未完成，Stage 2 未开始。

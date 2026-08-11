@@ -5,7 +5,7 @@
 | 阶段 | 状态 | 当前结论 |
 |---|---|---|
 | Stage 0 | 已完成 | 工程、任务、日志、Web、备份恢复和质量门 |
-| Stage 1 | 进行中 | S1-01～S1-06 已验收；数据源改为 AKShare 三上游 |
+| Stage 1 | 进行中 | S1-01～K2 已验收；S1-08 已设计、未授权执行 |
 | Stage 2 | 未开始 | 动态股票池、复权、因子和标签 |
 | Stage 3 | 未开始 | Ridge/LightGBM、实验和模型审批 |
 | Stage 4 | 未开始 | 组合、风险、Qlib/Backtrader 回测 |
@@ -16,9 +16,9 @@
 ## 近期路径
 
 ```text
-S1-07K1 AKShare 三适配 + 旧来源/assessment 退役 + 日线单数据集运行时
-    → S1-07K2 ResolutionDecision + override/evidence 退役 + 生产 EOD
-    → S1-08 明确范围日线版本 + Stage 1 最终验收
+S1-07K1 AKShare 三适配（已完成）
+    → S1-07K2 ResolutionDecision + 生产 EOD（已完成）
+    → S1-08 明确范围日线版本 + Stage 1 最终验收（待授权）
     → Stage 2 因子与标签
 ```
 

@@ -32,13 +32,13 @@ AKShare(Eastmoney/Tencent/Sina)
 
 ## 状态
 
-Stage 0 已完成。Stage 1 的 S1-01～S1-06 已完成主验收，S1-07K1 功能验收通过并已提交；
-S1-07K2 纯离线实现已完成并通过独立主验收。Stage 1 尚未完成，S1-08 与 Stage 2 均未开始。
+Stage 0 已完成。Stage 1 的 S1-01～S1-06、K1 和 K2 已完成主验收；S1-08 任务已设计但
+尚未授权执行。Stage 1 尚未完成，Stage 2 未开始。
 
 - [总体架构](docs/ARCHITECTURE.md)
 - [架构决策](docs/DECISIONS.md)
 - [实施计划](docs/IMPLEMENTATION_PLAN.md)
-- [Stage 1 交接](docs/stage1/HANDOFF.md)
+- [Stage 1 当前入口](docs/stage1/README.md)
 - [路线图](docs/ROADMAP.md)
 
 默认质量门：

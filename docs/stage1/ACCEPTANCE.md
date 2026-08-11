@@ -42,8 +42,8 @@ Stage 1 尚未完成。S1-01～S1-06 的历史主验收继续有效；旧 S1-07 
 
 ## S1-07K2 验收
 
-状态：纯离线实现完成并通过独立主验收。实现证据见
-[K2 实现交接](S1-07K2_IMPLEMENTATION_HANDOFF.md)。
+状态：纯离线实现完成并通过独立主验收；已提交为
+`0ebf84b feat(data): complete S1-07K2 tri-source resolution`。
 
 - A/B 正常一致时不需要 C。
 - A 或 B 失败/缺行/分歧时才调用 C。
@@ -62,9 +62,11 @@ Stage 1 尚未完成。S1-01～S1-06 的历史主验收继续有效；旧 S1-07 
 - Ruff、194 files format check、mypy 111 source files、架构边界、23 个文档状态测试、Markdown 链接和 `git diff --check` 全部通过。
 - 前端 typecheck、17 unit、production build 和 Playwright 1 passed（6.4s，Web server 正常关闭）全部通过。
 - 固化 `scripts/quality.ps1` 在共享 `E:\Apps` UV cache 的 Windows ACL 处被环境阻断；上述独立验收使用仓库忽略的 `.uv-cache` 逐项执行了同等门禁。该环境限制不掩盖测试失败。
-- K2 未运行真实网络、未写正式数据根；K2 工作树保持未提交。Stage 1 仍须完成 S1-08 才能最终验收。
+- K2 未运行真实网络、未写正式数据根。Stage 1 仍须完成 S1-08 才能最终验收。
 
 ## Stage 1 最终完成条件
+
+执行边界见 [S1-08 任务卡](S1-08_TASK.md)。
 
 - 产生至少一个明确证券范围、日期范围的已发布未复权日线 DatasetVersion。
 - 重跑幂等；失败批次不污染已发布版本。

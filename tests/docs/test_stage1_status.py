@@ -1,4 +1,4 @@
-"""The simplified Stage 1 route must stay explicit and internally consistent."""
+"""The compact Stage 1 documentation must stay bounded and internally consistent."""
 
 from __future__ import annotations
 
@@ -18,147 +18,110 @@ def _read(relative: str) -> str:
     "name",
     (
         "README.md",
-        "TASKS.md",
+        "CONTRACTS.md",
         "ACCEPTANCE.md",
+        "S1-08_TASK.md",
+        "S1-01_ACCEPTANCE.md",
+        "S1-02_ACCEPTANCE.md",
+        "S1-03_ACCEPTANCE.md",
+        "S1-04_ACCEPTANCE.md",
+        "S1-05_ACCEPTANCE.md",
+        "S1-06_ACCEPTANCE.md",
+    ),
+)
+def test_compact_stage1_documents_exist(name: str) -> None:
+    assert (_STAGE1 / name).is_file()
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "DATA_CONTRACTS.md",
+        "QUALITY_CONTRACTS.md",
+        "SOURCE_MATRIX.md",
         "HANDOFF.md",
         "STAGE1_COMPLETION_HANDOFF.md",
-        "SOURCE_MATRIX.md",
+        "TASKS.md",
         "S1-07K1_TASK.md",
         "S1-07K1_IMPLEMENTATION_HANDOFF.md",
         "S1-07K2_TASK.md",
         "S1-07K2_IMPLEMENTATION_HANDOFF.md",
     ),
 )
-def test_simplified_stage1_documents_exist(name: str) -> None:
-    assert (_STAGE1 / name).is_file()
+def test_superseded_current_documents_are_removed(name: str) -> None:
+    assert not (_STAGE1 / name).exists()
 
 
-def test_s1_01_through_s1_06_evidence_is_preserved() -> None:
-    tasks = _read("docs/stage1/TASKS.md")
-    for task in ("S1-01", "S1-02", "S1-03", "S1-04", "S1-05", "S1-06"):
-        assert task in tasks
-        assert (_STAGE1 / f"{task}_ACCEPTANCE.md").is_file()
-    assert "Stage 1 尚未完成" in _read("docs/stage1/ACCEPTANCE.md")
-
-
-@pytest.mark.parametrize(
-    "relative",
-    (
-        "docs/stage1/README.md",
-        "docs/stage1/TASKS.md",
-        "docs/stage1/STAGE1_COMPLETION_HANDOFF.md",
-        "docs/stage1/SOURCE_MATRIX.md",
-    ),
-)
-def test_akshare_three_upstream_route_is_consistent(relative: str) -> None:
-    text = _read(relative)
-    for value in ("AKShare", "东财", "腾讯", "新浪"):
-        assert value in text
-
-
-def test_later_stage_has_not_started() -> None:
-    for relative in ("docs/stage1/README.md", "docs/stage1/TASKS.md"):
-        assert "Stage 2" in _read(relative)
-
-
-def test_source_matrix_keeps_provider_and_upstream_separate() -> None:
-    text = _read("docs/stage1/SOURCE_MATRIX.md")
-    for source_id in ("AKSHARE_EASTMONEY", "AKSHARE_TENCENT", "AKSHARE_SINA"):
-        assert source_id in text
-    for endpoint in ("stock_zh_a_hist", "stock_zh_a_hist_tx", "stock_zh_a_daily"):
-        assert endpoint in text
-    assert "最少两源一致" in text
-
-
-def test_next_task_is_bounded_and_rejects_old_evidence_chain() -> None:
-    text = _read("docs/stage1/S1-07K1_TASK.md")
-    for phrase in (
-        "600000.SH",
-        "000001.SZ",
-        "最近 60 个自然日",
-        "每个 upstream、每只证券最多一次调用",
-        "不写 E:\\QuantKingV3Data",
-        "不开始 K2、S1-08 或 Stage 2",
-        "不恢复任何旧 S1-07",
-    ):
-        assert phrase in text
-    for retired in ("Ed25519", "nonce", "claim", "seal"):
-        assert retired in text
-
-
-def test_k1_retires_the_complete_old_source_control_plane() -> None:
-    text = _read("docs/stage1/S1-07K1_TASK.md")
-    for phrase in (
-        "src/quantking/runtime.py",
-        "configs/default.toml",
-        "data/models.py",
-        "SourceCandidateAssessment",
-        "24 单元矩阵",
-        "daily_bar_unadjusted",
-        "K1 不实现 `ResolutionDecision`",
-    ):
-        assert phrase in text
-
-
-def test_k2_uses_resolution_decisions_and_simplified_recovery() -> None:
-    text = _read("docs/stage1/S1-07K2_TASK.md")
-    for phrase in (
-        "ResolutionDecision",
-        "退役 SourceOverride",
-        "中断后旧 Job 终态为 `INTERRUPTED`",
-        "输入指纹",
-        "EodEvidenceWriter",
-        "DataCenter 日常读取与完整 SHA 深验的 P1 重构",
-    ):
-        assert phrase in text
-
-
-def test_architecture_simplification_is_authoritative_and_later_decisions_are_deferred() -> None:
-    decisions = _read("docs/DECISIONS.md")
-    roadmap = _read("docs/ROADMAP.md")
-    assert "ADR-018" in decisions
-    assert "Stage 1 控制面简化" in decisions
-    assert "生产运行时只支持 `daily_bar_unadjusted`" in decisions
-    assert "K2 使用 `ResolutionDecision`" in decisions
-    assert "Stage 3 开始时复核模型生命周期" in roadmap
-    assert "Stage 4 开始时复核双回测成本" in roadmap
-
-
-def test_retired_s1_07_current_documents_and_modules_are_absent() -> None:
-    assert not list((_ROOT / "src" / "quantking" / "data" / "validation").glob("*.py"))
-    assert not list((_ROOT / "tests" / "data" / "validation").glob("*.py"))
-    assert not (_STAGE1 / "S1-07C1C1_RUNBOOK.md").exists()
-    handoff = _read("docs/stage1/HANDOFF.md")
-    assert "44d268b3db8bd9c690225f62e60fa12bf56a289d" in handoff
-
-
-def test_stage1_records_k2_acceptance_without_claiming_stage_completion() -> None:
+def test_current_status_records_commits_without_claiming_stage_completion() -> None:
     combined = "\n".join(
         _read(relative)
         for relative in (
+            "README.md",
+            "docs/ARCHITECTURE.md",
+            "docs/ROADMAP.md",
             "docs/stage1/README.md",
-            "docs/stage1/TASKS.md",
             "docs/stage1/ACCEPTANCE.md",
-            "docs/stage1/HANDOFF.md",
         )
     )
-    assert "R1" in combined
-    assert "R2" in combined
-    assert "D1" in combined
-    assert "各尝试一次" in combined
-    assert "AKSHARE_NETWORK" in combined
-    assert "没有 Raw/Canonical" in combined
-    assert "授权均已消耗" in combined
-    assert "4 个阻断" in combined
-    assert "R1 后完整" in combined
-    assert "52 upstream/41 Canonical" in combined
-    assert "complete=True" in combined
-    assert "K1 功能验收通过" in combined
-    assert "935 passed" in combined
     assert "f98f1d9" in combined
-    assert "当前 K2 变更未提交" in combined
-    assert "S1-07K2 纯离线实现" in combined
-    assert "通过独立主验收" in combined
+    assert "0ebf84b" in combined
     assert "S1-08" in combined
+    assert "未授权执行" in combined
     assert "Stage 1 尚未完成" in combined
+    assert "Stage 2 未开始" in combined
     assert "Stage 1 已完成验收" not in combined
+
+
+def test_single_contract_keeps_the_accepted_k1_k2_route() -> None:
+    text = _read("docs/stage1/CONTRACTS.md")
+    for phrase in (
+        "daily_bar_unadjusted.v1",
+        "stock_zh_a_hist",
+        "stock_zh_a_hist_tx",
+        "stock_zh_a_daily",
+        "EASTMONEY",
+        "TENCENT",
+        "SINA",
+        "lookback_days=15",
+        "comparison-thresholds.daily-bar-unadjusted.k1.v1",
+        "ResolutionDecision",
+        "SourceOverride",
+        "无两源一致",
+    ):
+        assert phrase in text
+
+
+def test_s1_08_is_fixed_bounded_and_not_yet_authorized() -> None:
+    text = _read("docs/stage1/S1-08_TASK.md")
+    for phrase in (
+        "任务设计完成",
+        "未授权执行",
+        "000001.SZ",
+        "600000.SH",
+        "2026-06-11..2026-08-09",
+        "2026-05-27..2026-08-09",
+        "总 AKShare endpoint invocation 最多 12 次",
+        "HTTP 上限为 24",
+        "应用层零自动重试",
+        "E:\\QuantKingV3Data",
+        "不访问旧项目或 F 盘",
+        "不开始 Stage 2",
+        "86 files",
+        "231 files",
+    ):
+        assert phrase in text
+
+
+def test_stage1_history_and_architecture_decisions_remain_auditable() -> None:
+    for task in ("S1-01", "S1-02", "S1-03", "S1-04", "S1-05", "S1-06"):
+        assert (_STAGE1 / f"{task}_ACCEPTANCE.md").is_file()
+    decisions = _read("docs/DECISIONS.md")
+    assert "ADR-018" in decisions
+    assert "Stage 1 控制面简化" in decisions
+    assert "生产运行时只支持 `daily_bar_unadjusted`" in decisions
+
+
+def test_retired_s1_07_modules_and_current_documents_are_absent() -> None:
+    assert not list((_ROOT / "src" / "quantking" / "data" / "validation").glob("*.py"))
+    assert not list((_ROOT / "tests" / "data" / "validation").glob("*.py"))
+    assert not (_STAGE1 / "S1-07C1C1_RUNBOOK.md").exists()
