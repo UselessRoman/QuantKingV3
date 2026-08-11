@@ -26,6 +26,7 @@ def _read(relative: str) -> str:
         "S1-07K1_TASK.md",
         "S1-07K1_IMPLEMENTATION_HANDOFF.md",
         "S1-07K2_TASK.md",
+        "S1-07K2_IMPLEMENTATION_HANDOFF.md",
     ),
 )
 def test_simplified_stage1_documents_exist(name: str) -> None:
@@ -131,7 +132,7 @@ def test_retired_s1_07_current_documents_and_modules_are_absent() -> None:
     assert "44d268b3db8bd9c690225f62e60fa12bf56a289d" in handoff
 
 
-def test_stage1_records_k1_functional_acceptance_without_claiming_stage_completion() -> None:
+def test_stage1_records_k2_acceptance_without_claiming_stage_completion() -> None:
     combined = "\n".join(
         _read(relative)
         for relative in (
@@ -154,7 +155,10 @@ def test_stage1_records_k1_functional_acceptance_without_claiming_stage_completi
     assert "complete=True" in combined
     assert "K1 功能验收通过" in combined
     assert "935 passed" in combined
-    assert "当前变更未提交" in combined
-    assert "K2 未开始" in combined
+    assert "f98f1d9" in combined
+    assert "当前 K2 变更未提交" in combined
+    assert "S1-07K2 纯离线实现" in combined
+    assert "通过独立主验收" in combined
+    assert "S1-08" in combined
     assert "Stage 1 尚未完成" in combined
     assert "Stage 1 已完成验收" not in combined

@@ -8,7 +8,7 @@ from quantking.data.adapters.persistence.models import (
     IngestionBatchRow,
     QualityResultRow,
     QualityRunRow,
-    SourceOverrideRow,
+    ResolutionRunRow,
 )
 
 __all__ = [
@@ -19,5 +19,5 @@ __all__ = [
     "IngestionBatchRow",
     "QualityResultRow",
     "QualityRunRow",
-    "SourceOverrideRow",
+    "ResolutionRunRow",
 ]

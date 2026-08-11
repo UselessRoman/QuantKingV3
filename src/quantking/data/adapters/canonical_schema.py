@@ -12,7 +12,7 @@ invariants, and canonical code form.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import pyarrow as pa
@@ -27,6 +27,7 @@ from quantking.data.schemas import (
 )
 
 CANONICAL_SCHEMA_VERSION = "stage1-canonical-v1"
+type CanonicalTable = pa.Table
 
 _PYARROW_TYPE: dict[FieldType, pa.DataType] = {
     FieldType.CODE: pa.string(),
@@ -68,6 +69,17 @@ def canonical_schema(dataset: str) -> pa.Schema:
             pa.field(field.name, _PYARROW_TYPE[field.field_type], nullable=field.nullable)
         )
     return pa.schema(fields)
+
+
+def canonical_table_from_rows(
+    dataset: str,
+    rows: Sequence[Mapping[str, object]],
+) -> CanonicalTable:
+    """Construct and deterministically sort one canonical table inside the adapter layer."""
+    return ensure_sorted(
+        dataset,
+        pa.Table.from_pylist(list(rows), schema=canonical_schema(dataset)),
+    )
 
 
 def sort_key(dataset: str) -> tuple[str, ...]:

@@ -112,7 +112,7 @@ class CanonicalPublishRequest:
     coverage_start: object | None = None
     coverage_end: object | None = None
     coverage_summary: dict[str, str] = field(default_factory=dict)
-    source_override: Mapping[str, object] | None = None
+    resolution: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.version, DatasetVersion):
@@ -127,8 +127,8 @@ class CanonicalPublishRequest:
             raise TypeError("empty_result must be an EmptyResultInfo or None")
         if self.coverage_summary and not isinstance(self.coverage_summary, dict):
             object.__setattr__(self, "coverage_summary", dict(self.coverage_summary))
-        if self.source_override is not None and not isinstance(self.source_override, Mapping):
-            raise TypeError("source_override must be a mapping or None")
+        if self.resolution is not None and not isinstance(self.resolution, Mapping):
+            raise TypeError("resolution must be a mapping or None")
 
 
 def _coerce_partition_to_int(partition: Mapping[str, object]) -> dict[str, int]:
@@ -630,7 +630,7 @@ class CanonicalWarehouse:
                 "partition_keys": list(scheme.partition_keys),
                 "date_field": scheme.date_field,
             },
-            source_override=request.source_override,
+            resolution=request.resolution,
         )
 
     @staticmethod
@@ -763,7 +763,7 @@ class CanonicalWarehouse:
                     "reason": request.empty_result.reason,
                 }
             ),
-            "source_override": request.source_override,
+            "resolution": request.resolution,
             "captured_at": _now_iso(),
         }
         target = directory / WAREHOUSE_INPUT_LISTING_FILENAME

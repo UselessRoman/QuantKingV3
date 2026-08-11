@@ -15,7 +15,7 @@ from types import MappingProxyType
 
 from quantking.data.models import DatasetKind
 
-THRESHOLD_RULE_VERSION = "comparison-thresholds.v1"
+THRESHOLD_RULE_VERSION = "comparison-thresholds.daily-bar-unadjusted.k1.v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,36 +90,25 @@ class ThresholdSet:
         object.__setattr__(self, "thresholds", MappingProxyType(dict(sorted(normalized.items()))))
 
     def for_dataset(self, dataset: DatasetKind) -> Mapping[str, ThresholdSpec]:
-        """Return the per-field thresholds for ``dataset`` (empty if none)."""
-        return self.thresholds.get(dataset, MappingProxyType({}))
+        """Return the only K2 production threshold map."""
+        if dataset is not DatasetKind.DAILY_BAR_UNADJUSTED:
+            raise ValueError("K2 thresholds support daily_bar_unadjusted only")
+        return self.thresholds[dataset]
 
 
 def default_thresholds() -> ThresholdSet:
-    """Return the canonical default threshold set (version ``comparison-thresholds.v1``)."""
+    """Return the K1-evidence-backed exact daily-bar thresholds."""
     return ThresholdSet(
         rule_version=THRESHOLD_RULE_VERSION,
         thresholds={
             DatasetKind.DAILY_BAR_UNADJUSTED: {
-                "open": ThresholdSpec(absolute=0.01, relative=0.0001),
-                "high": ThresholdSpec(absolute=0.01, relative=0.0001),
-                "low": ThresholdSpec(absolute=0.01, relative=0.0001),
-                "close": ThresholdSpec(absolute=0.01, relative=0.0001),
-                "pre_close": ThresholdSpec(absolute=0.01, relative=0.0001),
-                "volume": ThresholdSpec(absolute=100.0, relative=0.001),
-                "amount": ThresholdSpec(absolute=1000.0, relative=0.001),
-            },
-            DatasetKind.ADJUSTMENT_FACTOR: {
-                "price_multiplier": ThresholdSpec(absolute=1e-9, relative=0.0),
-                "volume_multiplier": ThresholdSpec(absolute=1e-9, relative=0.0),
-            },
-            DatasetKind.BENCHMARK_INDEX_DAILY: {
-                "open": ThresholdSpec(absolute=0.01, relative=0.0001),
-                "high": ThresholdSpec(absolute=0.01, relative=0.0001),
-                "low": ThresholdSpec(absolute=0.01, relative=0.0001),
-                "close": ThresholdSpec(absolute=0.01, relative=0.0001),
-                "pre_close": ThresholdSpec(absolute=0.01, relative=0.0001),
-                "volume": ThresholdSpec(absolute=100.0, relative=0.001),
-                "amount": ThresholdSpec(absolute=1000.0, relative=0.001),
+                "open": ThresholdSpec(absolute=0.0, relative=0.0),
+                "high": ThresholdSpec(absolute=0.0, relative=0.0),
+                "low": ThresholdSpec(absolute=0.0, relative=0.0),
+                "close": ThresholdSpec(absolute=0.0, relative=0.0),
+                "pre_close": ThresholdSpec(absolute=0.0, relative=0.0),
+                "volume": ThresholdSpec(absolute=0.0, relative=0.0),
+                "amount": ThresholdSpec(absolute=0.0, relative=0.0),
             },
         },
     )

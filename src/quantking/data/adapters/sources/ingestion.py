@@ -108,8 +108,12 @@ class AkshareIngestionService:
         *,
         empty_result: EmptyResultInfo | None = None,
         checkpoint: Callable[[], None] | None = None,
+        job_run_id: str | None = None,
+        code_version: str = "s1-07k1",
     ) -> IngestionOutcome:
         validate_incremental_plan(plan)
+        if not isinstance(code_version, str) or not code_version.strip():
+            raise ValueError("code_version must be non-empty text")
         if plan.dataset is not DatasetKind.DAILY_BAR_UNADJUSTED:
             raise SourceAdapterError(SourceErrorCode.REQUEST_REJECTED)
         started_at = self._now()
@@ -133,10 +137,16 @@ class AkshareIngestionService:
                 "akshare_version": library_version,
             },
             started_at=started_at,
+            job_run_id=job_run_id,
         )
         self._insert_running_once(running)
         if not plan.chunks:
-            return self._empty_request(running, plan, empty_result=empty_result)
+            return self._empty_request(
+                running,
+                plan,
+                empty_result=empty_result,
+                code_version=code_version,
+            )
         responses: list[SupplierResponse] = []
         try:
             for chunk in plan.chunks:
@@ -152,6 +162,7 @@ class AkshareIngestionService:
                 plan,
                 SourceAdapterError(SourceErrorCode.INTERNAL_PROVIDER),
                 responses=tuple(responses),
+                code_version=code_version,
             )
             raise
         except Exception as error:
@@ -162,8 +173,20 @@ class AkshareIngestionService:
                         plan.chunks[len(responses)], responses[0].contract, mapped
                     )
                 )
-            return self._finish_failed(running, plan, mapped, responses=tuple(responses))
-        return self._land_success(running, plan, tuple(responses), empty_result=empty_result)
+            return self._finish_failed(
+                running,
+                plan,
+                mapped,
+                responses=tuple(responses),
+                code_version=code_version,
+            )
+        return self._land_success(
+            running,
+            plan,
+            tuple(responses),
+            empty_result=empty_result,
+            code_version=code_version,
+        )
 
     def _land_success(
         self,
@@ -172,11 +195,17 @@ class AkshareIngestionService:
         responses: tuple[SupplierResponse, ...],
         *,
         empty_result: EmptyResultInfo | None,
+        code_version: str,
     ) -> IngestionOutcome:
         raw_directory: Path | None = None
         manifest_files: tuple[ManifestFileEntry, ...] = ()
         try:
-            raw_directory, verified = self._publish_responses(running, plan, responses)
+            raw_directory, verified = self._publish_responses(
+                running,
+                plan,
+                responses,
+                code_version=code_version,
+            )
             manifest_files = self._manifest_entries(raw_directory, verified.files)
             rebuilt = self._rebuild_responses(verified, plan)
             if rebuilt != responses:
@@ -223,6 +252,7 @@ class AkshareIngestionService:
         plan: IncrementalFetchPlan,
         *,
         empty_result: EmptyResultInfo | None,
+        code_version: str,
     ) -> IngestionOutcome:
         if (
             empty_result is None
@@ -233,6 +263,7 @@ class AkshareIngestionService:
                 plan,
                 SourceAdapterError(SourceErrorCode.UNEXPECTED_EMPTY),
                 responses=(),
+                code_version=code_version,
             )
         candidate = pa.Table.from_pylist([], schema=canonical_schema(plan.dataset.value))
         payload = json.dumps(
@@ -260,7 +291,7 @@ class AkshareIngestionService:
             ),
             files=(RawManifestFile("responses/empty-request.json", payload, 0),),
             created_at=running.started_at.to_iso(),
-            code_version="s1-07k1",
+            code_version=code_version,
         )
         try:
             raw_directory = self._raw_publisher.publish(request)
@@ -272,6 +303,7 @@ class AkshareIngestionService:
                 plan,
                 classify_source_error(error),
                 responses=(),
+                code_version=code_version,
             )
         succeeded = transition_batch(
             running,
@@ -292,10 +324,16 @@ class AkshareIngestionService:
         error: SourceAdapterError,
         *,
         responses: tuple[SupplierResponse, ...],
+        code_version: str,
     ) -> IngestionOutcome:
         if responses:
             try:
-                raw_directory, verified = self._publish_responses(running, plan, responses)
+                raw_directory, verified = self._publish_responses(
+                    running,
+                    plan,
+                    responses,
+                    code_version=code_version,
+                )
                 manifest_files = self._manifest_entries(raw_directory, verified.files)
                 partial = transition_batch(
                     running,
@@ -325,17 +363,18 @@ class AkshareIngestionService:
                     dataset=plan.dataset.value,
                     batch_id=path_safe_id(str(plan.batch_id)),
                     adapter_version=plan.adapter_version,
-                    request_params=self._lineage_params(
-                        running,
-                        plan,
-                        (),
-                        payload=b"",
-                        upstream_row_count=0,
-                        canonical_row_count=0,
-                    ),
+                    request_params={
+                        "adapter_version": plan.adapter_version,
+                        "dataset": plan.dataset.value,
+                        "request_sha256": plan.request_sha256,
+                        "provider": running.provider.value,
+                        "upstream": running.upstream.value,
+                        "endpoint": running.endpoint,
+                        "akshare_version": running.library_version,
+                    },
                     error_code=error.code.value,
                     failed_at=self._safe_now(running).to_iso(),
-                    code_version="s1-07k1",
+                    code_version=code_version,
                 )
             )
         except Exception:
@@ -354,6 +393,8 @@ class AkshareIngestionService:
         running: IngestionBatch,
         plan: IncrementalFetchPlan,
         responses: tuple[SupplierResponse, ...],
+        *,
+        code_version: str,
     ) -> tuple[Path, VerifiedDirectory]:
         files = tuple(
             RawManifestFile(
@@ -378,7 +419,7 @@ class AkshareIngestionService:
             ),
             files=files,
             created_at=running.started_at.to_iso(),
-            code_version="s1-07k1",
+            code_version=code_version,
         )
         directory = self._raw_publisher.publish(request)
         return directory, verify_raw_directory(directory, data_root=self._data_root)

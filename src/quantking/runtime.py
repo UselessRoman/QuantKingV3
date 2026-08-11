@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -12,8 +13,8 @@ from typing import cast
 from quantking.common.config import AppSettings, load_settings
 from quantking.common.errors import ConfigurationError
 from quantking.common.time import utc_now
-from quantking.data.adapters.eod import EodWorkerHandler, register_eod_handler
 from quantking.data.adapters.eod_base import PublishedEodBaseResolver
+from quantking.data.adapters.eod_k2 import EodWorkerHandler, register_eod_handler
 from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
@@ -37,9 +38,9 @@ from quantking.data.center import (
     DataCenterQueryService,
     DataUnitOfWorkFactory,
     DifferenceVerifierPort,
+    ResolutionVerifierPort,
 )
 from quantking.data.comparison.verifier import DifferenceReportVerifier
-from quantking.data.eod.artifacts import EodEvidenceWriter
 from quantking.data.eod.service import EodCommandService, EodExecutionConfig
 from quantking.data.models import DataUpstream
 from quantking.data.quality.artifacts import QualityArtifactWriter
@@ -47,6 +48,7 @@ from quantking.data.quality.engine import QualityEngine
 from quantking.data.quality.references import PublishedReferenceLoader
 from quantking.data.quality.rules import default_rule_set
 from quantking.data.quality.runner import QualityRunner
+from quantking.data.resolution.artifacts import ResolutionArtifactVerifier
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     create_sqlite_engine,
@@ -59,8 +61,8 @@ from quantking.web.app import create_app
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = _REPOSITORY_ROOT / "configs" / "default.toml"
-EOD_CODE_VERSION = "s1-07k1"
-EXPECTED_DATABASE_REVISION = "20260808_0013"
+EOD_CODE_VERSION = "s1-07k2"
+EXPECTED_DATABASE_REVISION = "20260810_0014"
 WORKER_LEASE_TIMEOUT = timedelta(minutes=2)
 
 
@@ -83,14 +85,18 @@ def load_runtime_settings(config_path: Path = DEFAULT_CONFIG_PATH) -> AppSetting
     return load_settings(config_path)
 
 
-def _gateway() -> MarketDataGateway:
-    return AkshareMarketDataGateway(AkshareDailyBarAdapter(DataUpstream.EASTMONEY))
+def _gateways() -> Mapping[DataUpstream, MarketDataGateway]:
+    return {
+        upstream: AkshareMarketDataGateway(AkshareDailyBarAdapter(upstream))
+        for upstream in DataUpstream
+    }
 
 
 def build_eod_runtime(
     settings: AppSettings,
     *,
     gateway: MarketDataGateway | None = None,
+    gateways: Mapping[DataUpstream, MarketDataGateway] | None = None,
     execution_config: EodExecutionConfig | None = None,
     quality_runner: QualityRunner | None = None,
 ) -> EodRuntime:
@@ -134,13 +140,21 @@ def build_eod_runtime(
     )
     jobs = JobService(SqliteUnitOfWorkFactory(jobs_engine), retry_policy=retry)
     data_uow = DataSqliteUnitOfWorkFactory(data_engine)
-    ingestion = AkshareIngestionService(
-        gateway=gateway or _gateway(),
-        raw_publisher=RawBatchPublisher(data_root=data_root),
-        data_root=data_root,
-        uow_factory=data_uow,
-        clock=utc_now,
-    )
+    if gateway is not None:
+        raise ConfigurationError("K2 runtime requires an explicit tri-source gateways mapping")
+    selected_gateways = dict(gateways or _gateways())
+    if set(selected_gateways) != set(DataUpstream):
+        raise ConfigurationError("K2 runtime requires EASTMONEY, TENCENT and SINA gateways")
+    ingestions = {
+        upstream: AkshareIngestionService(
+            gateway=selected_gateways[upstream],
+            raw_publisher=RawBatchPublisher(data_root=data_root),
+            data_root=data_root,
+            uow_factory=data_uow,
+            clock=utc_now,
+        )
+        for upstream in DataUpstream
+    }
     selected_quality_runner = quality_runner or QualityRunner(
         engine=QualityEngine(rule_set=default_rule_set()),
         reference_loader=PublishedReferenceLoader(
@@ -149,7 +163,7 @@ def build_eod_runtime(
         ),
     )
     handler = EodWorkerHandler(
-        ingestion=ingestion,
+        ingestions=ingestions,
         quality_runner=selected_quality_runner,
         quality_writer=QualityArtifactWriter(artifacts_root=data_root / "artifacts" / "quality"),
         publish_coordinator=CanonicalPublishCoordinator(
@@ -157,7 +171,6 @@ def build_eod_runtime(
             uow_factory=data_uow,
         ),
         data_uow_factory=data_uow,
-        evidence_writer=EodEvidenceWriter(artifacts_root=data_root / "artifacts" / "eod"),
         data_root=data_root,
         clock=utc_now,
         log_root=data_root,
@@ -186,6 +199,10 @@ def build_eod_runtime(
             difference_verifier=cast(
                 DifferenceVerifierPort,
                 DifferenceReportVerifier(artifacts_root=data_root / "artifacts"),
+            ),
+            resolution_verifier=cast(
+                ResolutionVerifierPort,
+                ResolutionArtifactVerifier(artifacts_root=data_root / "artifacts"),
             ),
             jobs=jobs,
         ),

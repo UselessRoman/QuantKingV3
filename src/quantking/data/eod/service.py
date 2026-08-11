@@ -21,6 +21,7 @@ from quantking.data.eod.contracts import (
     request_sha256,
     sha256_text,
 )
+from quantking.data.eod.frozen import FrozenEodCommandError, parse_frozen_eod_command
 from quantking.data.models import DatasetKind
 from quantking.data.schemas import descriptor_for
 from quantking.jobs.models import JobStatus
@@ -153,6 +154,7 @@ class EodCommandService:
         *,
         idempotency_key: str,
         requester: str,
+        retry_of_job_id: str | None = None,
     ) -> EodEnqueueResult:
         if not isinstance(request, EodRunRequest):
             raise TypeError("request must be an EodRunRequest")
@@ -164,6 +166,14 @@ class EodCommandService:
             raise ValueError("idempotency_key must be a safe opaque identifier")
         if not isinstance(requester, str) or not requester.strip():
             raise ValueError("requester must be non-empty text")
+        previous = None
+        if retry_of_job_id is not None:
+            previous = self._jobs.get_job(retry_of_job_id)
+            if previous.job_type != EOD_JOB_TYPE or previous.status not in {
+                JobStatus.FAILED,
+                JobStatus.INTERRUPTED,
+            }:
+                raise ValueError("retry_of_job_id must reference a failed or interrupted EOD Job")
         request_json = canonical_request_json(request)
         request_sha = request_sha256(request)
         resolved_bases: dict[str, EodBaseVersion] = {}
@@ -180,31 +190,51 @@ class EodCommandService:
             self._config.to_dict(selected=request.datasets, bases=resolved_bases)
         )
         config_sha = sha256_text(config_json)
+        version_manifest = {
+            "adapter_version": self._config.adapter_version,
+            "code_version": self._config.code_version,
+            "rule_version": self._config.rule_version,
+            "schema_versions_sha256": sha256_text(
+                canonical_json(
+                    {key: descriptor_for(key).schema_version for key in request.datasets}
+                )
+            ),
+        }
+        if previous is not None:
+            try:
+                frozen_previous = parse_frozen_eod_command(
+                    job_type=previous.job_type,
+                    input_manifest=previous.input_manifest,
+                    config_manifest=previous.config_manifest,
+                    version_manifest=previous.version_manifest,
+                )
+            except FrozenEodCommandError as error:
+                raise ValueError("retry source EOD Job has invalid frozen inputs") from error
+            if (
+                frozen_previous.request_sha256 != request_sha
+                or frozen_previous.config_sha256 != config_sha
+                or dict(previous.version_manifest) != version_manifest
+            ):
+                raise ValueError("retry inputs must exactly match the source EOD Job")
         log_key = hashlib.sha256(f"{EOD_JOB_TYPE}\0{idempotency_key}".encode()).hexdigest()
+        input_manifest = {
+            "schema_version": EOD_REQUEST_MANIFEST_SCHEMA,
+            "request_json": request_json,
+            "request_sha256": request_sha,
+        }
+        if retry_of_job_id is not None:
+            input_manifest["retry_of_job_id"] = retry_of_job_id
         outcome = self._jobs.create_job_result(
             CreateJob(
                 job_type=EOD_JOB_TYPE,
                 idempotency_key=idempotency_key,
-                input_manifest={
-                    "schema_version": EOD_REQUEST_MANIFEST_SCHEMA,
-                    "request_json": request_json,
-                    "request_sha256": request_sha,
-                },
+                input_manifest=input_manifest,
                 config_manifest={
                     "schema_version": EOD_CONFIG_SCHEMA,
                     "config_json": config_json,
                     "config_sha256": config_sha,
                 },
-                version_manifest={
-                    "adapter_version": self._config.adapter_version,
-                    "code_version": self._config.code_version,
-                    "rule_version": self._config.rule_version,
-                    "schema_versions_sha256": sha256_text(
-                        canonical_json(
-                            {key: descriptor_for(key).schema_version for key in request.datasets}
-                        )
-                    ),
-                },
+                version_manifest=version_manifest,
                 requester=requester,
                 log_id=f"logs/jobs/eod-{log_key}.jsonl",
             )

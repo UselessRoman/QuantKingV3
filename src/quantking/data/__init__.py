@@ -9,7 +9,6 @@ third-party framework.
 from quantking.data.models import (
     BATCH_TRANSITIONS,
     DATASET_VERSION_TRANSITIONS,
-    OVERRIDE_TRANSITIONS,
     BatchFailureInfo,
     DataProvider,
     DatasetKind,
@@ -23,11 +22,8 @@ from quantking.data.models import (
     QualityResult,
     QualityRun,
     QualityRunStatus,
-    SourceOverride,
-    SourceOverrideStatus,
     transition_batch,
     transition_dataset_version,
-    transition_override,
 )
 from quantking.data.schemas import (
     DatasetSchemaDescriptor,
@@ -40,7 +36,6 @@ from quantking.data.schemas import (
 __all__ = [
     "BATCH_TRANSITIONS",
     "DATASET_VERSION_TRANSITIONS",
-    "OVERRIDE_TRANSITIONS",
     "BatchFailureInfo",
     "DataProvider",
     "DataUpstream",
@@ -57,11 +52,8 @@ __all__ = [
     "QualityResult",
     "QualityRun",
     "QualityRunStatus",
-    "SourceOverride",
-    "SourceOverrideStatus",
     "canonical_code_pattern",
     "descriptor_for",
     "transition_batch",
     "transition_dataset_version",
-    "transition_override",
 ]

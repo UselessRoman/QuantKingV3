@@ -89,14 +89,6 @@ class JobRepository(Protocol):
 
     def add_artifact(self, job_id: str, *, relative_path: str, at: UtcTimestamp) -> JobRun: ...
 
-    def add_recovery_artifact(
-        self,
-        job_id: str,
-        *,
-        relative_path: str,
-        at: UtcTimestamp,
-    ) -> JobRun: ...
-
     def set_non_cancellable_phase(
         self,
         job_id: str,

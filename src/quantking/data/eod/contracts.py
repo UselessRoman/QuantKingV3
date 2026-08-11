@@ -18,7 +18,6 @@ EOD_JOB_TYPE = "data.eod.v1"
 EOD_REQUEST_SCHEMA = "eod-request.v1"
 EOD_REQUEST_MANIFEST_SCHEMA = "eod-request-manifest.v1"
 EOD_CONFIG_SCHEMA = "eod-execution-config.v1"
-EOD_RESULT_SCHEMA = "eod-result.v1"
 
 _DATASET_ORDER = (
     DatasetKind.EXCHANGE_CALENDAR,
@@ -353,173 +352,6 @@ class EodBaseVersion:
 
 
 @dataclass(frozen=True, slots=True)
-class EodDatasetResult:
-    dataset: str
-    status: str
-    batch_id: str | None
-    version_id: str
-    quality_run_id: str
-    content_sha256: str
-    manifest_sha256: str
-    parent_version_id: str | None
-
-    def __post_init__(self) -> None:
-        if self.dataset not in _DATASET_RANK:
-            raise ValueError("result dataset is unknown")
-        if self.status not in {"PUBLISHED_NEW", "REUSED_UNCHANGED"}:
-            raise ValueError("result status is invalid")
-        if self.status == "PUBLISHED_NEW":
-            _entity_id(self.batch_id, field="batch_id", namespace="data_batch")
-        elif self.batch_id is not None:
-            raise ValueError("REUSED_UNCHANGED must not carry a batch_id")
-        _entity_id(self.version_id, field="version_id", namespace="data_version")
-        _entity_id(self.quality_run_id, field="quality_run_id", namespace="data_quality")
-        if self.parent_version_id is not None:
-            _entity_id(
-                self.parent_version_id,
-                field="parent_version_id",
-                namespace="data_version",
-            )
-        _sha256(self.content_sha256, field="content_sha256")
-        _sha256(self.manifest_sha256, field="manifest_sha256")
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "dataset": self.dataset,
-            "status": self.status,
-            "batch_id": self.batch_id,
-            "version_id": self.version_id,
-            "quality_run_id": self.quality_run_id,
-            "content_sha256": self.content_sha256,
-            "manifest_sha256": self.manifest_sha256,
-            "parent_version_id": self.parent_version_id,
-        }
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, object]) -> EodDatasetResult:
-        expected = {
-            "dataset",
-            "status",
-            "batch_id",
-            "version_id",
-            "quality_run_id",
-            "content_sha256",
-            "manifest_sha256",
-            "parent_version_id",
-        }
-        if set(value) != expected:
-            raise ValueError("EOD dataset result fields are invalid")
-        for field in (
-            "dataset",
-            "status",
-            "version_id",
-            "quality_run_id",
-            "content_sha256",
-            "manifest_sha256",
-        ):
-            if not isinstance(value[field], str):
-                raise TypeError(f"{field} must be a string")
-        if value["batch_id"] is not None and not isinstance(value["batch_id"], str):
-            raise TypeError("batch_id must be a string or null")
-        if value["parent_version_id"] is not None and not isinstance(
-            value["parent_version_id"], str
-        ):
-            raise TypeError("parent_version_id must be a string or null")
-        dataset = value["dataset"]
-        status = value["status"]
-        batch_id = value["batch_id"]
-        version_id = value["version_id"]
-        quality_run_id = value["quality_run_id"]
-        content_sha256 = value["content_sha256"]
-        manifest_sha256 = value["manifest_sha256"]
-        parent_version_id = value["parent_version_id"]
-        assert isinstance(dataset, str)
-        assert isinstance(status, str)
-        assert batch_id is None or isinstance(batch_id, str)
-        assert isinstance(version_id, str)
-        assert isinstance(quality_run_id, str)
-        assert isinstance(content_sha256, str)
-        assert isinstance(manifest_sha256, str)
-        assert parent_version_id is None or isinstance(parent_version_id, str)
-        return cls(
-            dataset=dataset,
-            status=status,
-            batch_id=batch_id,
-            version_id=version_id,
-            quality_run_id=quality_run_id,
-            content_sha256=content_sha256,
-            manifest_sha256=manifest_sha256,
-            parent_version_id=parent_version_id,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class EodRunResult:
-    job_id: str
-    datasets: tuple[EodDatasetResult, ...]
-    expected_datasets: tuple[str, ...]
-
-    def __post_init__(self) -> None:
-        _entity_id(self.job_id, field="job_id", namespace="job")
-        if not isinstance(self.datasets, tuple):
-            raise TypeError("datasets must be a tuple")
-        if not isinstance(self.expected_datasets, tuple):
-            raise TypeError("expected_datasets must be a tuple")
-        if any(item not in _DATASET_RANK for item in self.expected_datasets):
-            raise ValueError("expected_datasets contains an unknown dataset")
-        object.__setattr__(self, "datasets", tuple(self.datasets))
-        names = tuple(item.dataset for item in self.datasets)
-        expected = tuple(sorted(self.expected_datasets, key=_DATASET_RANK.__getitem__))
-        if self.expected_datasets != expected or len(set(expected)) != len(expected):
-            raise ValueError("expected_datasets must be sorted and unique")
-        if names != expected:
-            raise ValueError("dataset results must exactly match the requested datasets")
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "schema_version": EOD_RESULT_SCHEMA,
-            "job_id": self.job_id,
-            "status": "SUCCEEDED",
-            "datasets": [item.to_dict() for item in self.datasets],
-        }
-
-    @classmethod
-    def from_dict(
-        cls,
-        value: Mapping[str, object],
-        *,
-        expected_datasets: tuple[str, ...],
-    ) -> EodRunResult:
-        if set(value) != {"schema_version", "job_id", "status", "datasets"}:
-            raise ValueError("EOD result fields are invalid")
-        if value["schema_version"] != EOD_RESULT_SCHEMA or value["status"] != "SUCCEEDED":
-            raise ValueError("EOD result schema or status is invalid")
-        if not isinstance(value["job_id"], str):
-            raise TypeError("result job_id must be a string")
-        raw_datasets = value["datasets"]
-        if not isinstance(raw_datasets, list):
-            raise TypeError("result datasets must be an array")
-        results = tuple(
-            EodDatasetResult.from_dict(item)
-            if isinstance(item, Mapping)
-            else (_raise_dataset_result_type())
-            for item in raw_datasets
-        )
-        result = cls(
-            job_id=value["job_id"],
-            datasets=results,
-            expected_datasets=expected_datasets,
-        )
-        if result.to_dict() != dict(value):
-            raise ValueError("EOD result is not canonical")
-        return result
-
-
-def _raise_dataset_result_type() -> EodDatasetResult:
-    raise TypeError("dataset result must be an object")
-
-
-@dataclass(frozen=True, slots=True)
 class EodDatasetConfig:
     """Frozen planning and quality inputs for one allowlisted dataset."""
 
@@ -628,14 +460,11 @@ __all__ = [
     "EOD_JOB_TYPE",
     "EOD_REQUEST_MANIFEST_SCHEMA",
     "EOD_REQUEST_SCHEMA",
-    "EOD_RESULT_SCHEMA",
     "EodBaseVersion",
     "EodDatasetConfig",
-    "EodDatasetResult",
     "EodPublishIntent",
     "EodReferenceVersion",
     "EodRunRequest",
-    "EodRunResult",
     "canonical_json",
     "canonical_request_json",
     "load_canonical_json",

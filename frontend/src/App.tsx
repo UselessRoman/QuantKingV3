@@ -28,7 +28,7 @@ type Tab =
   | "versions"
   | "quality"
   | "differences"
-  | "overrides"
+  | "resolutions"
   | "eod"
   | "failures";
 
@@ -38,7 +38,7 @@ const tabs: Array<{ id: Tab; label: string; path?: string }> = [
   { id: "versions", label: "版本", path: "/api/data/versions" },
   { id: "quality", label: "质量", path: "/api/data/quality-runs" },
   { id: "differences", label: "差异", path: "/api/data/difference-reports" },
-  { id: "overrides", label: "Override", path: "/api/data/source-overrides" },
+  { id: "resolutions", label: "仲裁", path: "/api/data/resolution-runs" },
   { id: "eod", label: "EOD", path: "/api/data/eod-runs" },
   { id: "failures", label: "失败", path: "/api/data/failures" },
 ];
@@ -46,7 +46,7 @@ const actionLabels: Partial<Record<Tab, string>> = {
   versions: "显式预览",
   quality: "规则结果",
   differences: "行级差异",
-  overrides: "审计血缘",
+  resolutions: "仲裁详情",
 };
 
 const datasets = ["daily_bar_unadjusted"] as const;
@@ -57,7 +57,7 @@ const filterDefaults: Record<Tab, Record<string, string>> = {
   versions: { dataset: "", status: "" },
   quality: { version_id: "", status: "" },
   differences: { version_id: "", primary_source: "" },
-  overrides: { dataset: "", status: "" },
+  resolutions: { conflicts_only: "" },
   eod: { status: "" },
   failures: {},
 };
@@ -117,7 +117,6 @@ function DataTable({
     "batch_id",
     "run_id",
     "report_id",
-    "override_id",
     "job_id",
     "status",
     "coverage_start",
@@ -161,8 +160,8 @@ function FilterBar({
   values: Record<string, string>;
   onChange: (name: string, value: string) => void;
 }) {
-  const datasetSelect = ["batches", "versions", "overrides"].includes(tab);
-  if (!datasetSelect && !["quality", "differences", "eod"].includes(tab)) return null;
+  const datasetSelect = ["batches", "versions"].includes(tab);
+  if (!datasetSelect && !["quality", "differences", "resolutions", "eod"].includes(tab)) return null;
   return (
     <div className="filters" aria-label={`${tab} 过滤`}>
       {datasetSelect && (
@@ -195,7 +194,7 @@ function FilterBar({
           <label>主上游<select aria-label="differences source" value={values.primary_source} onChange={(event) => onChange("primary_source", event.target.value)}><option value="">全部</option>{upstreams.map((value) => <option key={value}>{value}</option>)}</select></label>
         </>
       )}
-      {tab === "overrides" && <label>状态<select aria-label="overrides status" value={values.status} onChange={(event) => onChange("status", event.target.value)}><option value="">全部</option>{["PENDING", "APPROVED", "REJECTED", "APPLIED"].map((value) => <option key={value}>{value}</option>)}</select></label>}
+      {tab === "resolutions" && <label>视图<select aria-label="resolutions conflicts" value={values.conflicts_only} onChange={(event) => onChange("conflicts_only", event.target.value)}><option value="">全部仲裁</option><option value="true">仅冲突隔离</option></select></label>}
       {tab === "eod" && <label>状态<select aria-label="eod status" value={values.status} onChange={(event) => onChange("status", event.target.value)}><option value="">全部</option>{["PENDING", "RUNNING", "CANCEL_REQUESTED", "CANCELLED", "SUCCEEDED", "FAILED"].map((value) => <option key={value}>{value}</option>)}</select></label>}
     </div>
   );
@@ -214,13 +213,32 @@ function VersionLineage({ value }: { value: Record<string, unknown> }) {
   );
 }
 
-function OverrideLineage({ value }: { value: Record<string, unknown> }) {
+interface ResolutionDetailState {
+  value: Record<string, unknown>;
+  exceptions: Record<string, unknown>[];
+  conflicts: Record<string, unknown>[];
+  exceptionsNext: string | null;
+  conflictsNext: string | null;
+}
+
+function ResolutionLineage({
+  detail,
+  onMore,
+}: {
+  detail: ResolutionDetailState;
+  onMore: (kind: "exceptions" | "conflicts") => void;
+}) {
+  const { value, exceptions, conflicts } = detail;
   return (
-    <div className="lineage-detail" aria-label="Override 完整血缘">
-      <h3>Override 精确血缘与审计</h3>
-      {["override_id", "difference_report_id", "primary_source", "fallback_source", "primary_batch_id", "fallback_batch_id", "exact_scope_sha256", "field_replacements", "fallback_only_keys", "application", "last_application", "attempt", "child", "approved_by", "approved_at", "applied_at", "audits"].map((key) => (
+    <div className="lineage-detail" aria-label="仲裁完整血缘">
+      <h3>ResolutionRun 仲裁与来源例外</h3>
+      {["run_id", "status", "created_job_id", "candidate_version_id", "rule_version", "threshold_rule_version", "input_fingerprint", "manifest_sha256", "default_decision", "difference_report_ids", "run_blockers"].map((key) => (
         <div className="lineage-row" key={key}><strong>{key}</strong><pre>{displayValue(key, value[key])}</pre></div>
       ))}
+      <h4>来源例外</h4><DataTable rows={exceptions} />
+      {detail.exceptionsNext && <button onClick={() => onMore("exceptions")}>加载更多来源例外</button>}
+      <h4>冲突隔离</h4><DataTable rows={conflicts} />
+      {detail.conflictsNext && <button onClick={() => onMore("conflicts")}>加载更多冲突</button>}
     </div>
   );
 }
@@ -246,7 +264,7 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
     nextCursor: string | null;
     history: string[];
   } | null>(null);
-  const [overrideDetail, setOverrideDetail] = useState<Record<string, unknown> | null>(null);
+  const [resolutionDetail, setResolutionDetail] = useState<ResolutionDetailState | null>(null);
   const [differenceDetail, setDifferenceDetail] = useState<{
     reportId: string;
     rows: Record<string, unknown>[];
@@ -311,7 +329,7 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
     setDetail(null);
     setPreview(null);
     setVersionDetail(null);
-    setOverrideDetail(null);
+    setResolutionDetail(null);
     setDifferenceDetail(null);
     setDifferenceReport(null);
     void load(tab);
@@ -475,17 +493,47 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
           `/api/data/difference-reports/${encodeURIComponent(reportId)}`,
         ) as Record<string, unknown>);
         await loadDifferencePage(reportId);
-      } else if (tab === "overrides") {
-        const overrideId = String(row.override_id);
-        const result = await api.getData(
-          `/api/data/source-overrides/${encodeURIComponent(overrideId)}`,
-        ) as Record<string, unknown>;
-        setOverrideDetail(result);
+      } else if (tab === "resolutions") {
+        const runId = String(row.run_id);
+        const encoded = encodeURIComponent(runId);
+        const [result, exceptions, conflicts] = await Promise.all([
+          api.getData(`/api/data/resolution-runs/${encoded}`),
+          api.getData(`/api/data/resolution-runs/${encoded}/exceptions?limit=50`),
+          api.getData(`/api/data/resolution-runs/${encoded}/conflicts?limit=50`),
+        ]) as [Record<string, unknown>, CursorPage, CursorPage];
+        setResolutionDetail({
+          value: result,
+          exceptions: exceptions.items,
+          conflicts: conflicts.items,
+          exceptionsNext: exceptions.next_cursor,
+          conflictsNext: conflicts.next_cursor,
+        });
       }
       setDataState("ready");
     } catch (error) {
       setDataError(safeMessage(error));
       setDataState("error");
+    }
+  };
+
+  const loadMoreResolution = async (kind: "exceptions" | "conflicts") => {
+    if (!api.getData || !resolutionDetail) return;
+    const cursor = kind === "exceptions"
+      ? resolutionDetail.exceptionsNext
+      : resolutionDetail.conflictsNext;
+    if (!cursor) return;
+    try {
+      const runId = String(resolutionDetail.value.run_id);
+      const result = await api.getData(
+        `/api/data/resolution-runs/${encodeURIComponent(runId)}/${kind}?limit=50&cursor=${encodeURIComponent(cursor)}`,
+      ) as CursorPage;
+      setResolutionDetail((current) => current && ({
+        ...current,
+        [kind]: [...current[kind], ...result.items],
+        [`${kind}Next`]: result.next_cursor,
+      }));
+    } catch (error) {
+      setDataError(safeMessage(error));
     }
   };
 
@@ -576,7 +624,7 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
               onPreview={
                 tab === "versions"
                   ? showPreview
-                  : ["quality", "differences", "overrides"].includes(tab)
+                  : ["quality", "differences", "resolutions"].includes(tab)
                     ? inspectRow
                     : undefined
               }
@@ -646,8 +694,8 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
           </section>
         )}
 
-        {overrideDetail && tab === "overrides" && (
-          <section><OverrideLineage value={overrideDetail} /></section>
+        {resolutionDetail && tab === "resolutions" && (
+          <section><ResolutionLineage detail={resolutionDetail} onMore={(kind) => void loadMoreResolution(kind)} /></section>
         )}
 
         {detail && (

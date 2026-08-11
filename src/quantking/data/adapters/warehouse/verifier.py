@@ -255,8 +255,8 @@ def _verify_manifest_shape(manifest: dict[str, object], *, expected_schema: str)
             "code_version",
             "version_id",
         }
-        if "source_override" in manifest:
-            required.add("source_override")
+        if "resolution" in manifest:
+            required.add("resolution")
         text_fields = (
             "manifest_schema_version",
             "manifest_sha256",
@@ -358,79 +358,60 @@ def _verify_manifest_shape(manifest: dict[str, object], *, expected_schema: str)
         not isinstance(value, str) or not value for value in partition_keys
     ):
         raise ManifestIntegrityError("manifest partition_keys are invalid")
-    if "source_override" in manifest:
-        _verify_source_override_manifest(manifest["source_override"])
+    if "resolution" in manifest:
+        _verify_resolution_manifest(manifest["resolution"], version_id=manifest["version_id"])
 
 
-def _verify_source_override_manifest(value: object) -> None:
-    if not isinstance(value, dict):
-        raise ManifestIntegrityError("source_override manifest entry is invalid")
-    legacy_required = {
-        "override_id",
-        "difference_report_id",
-        "report_sha256",
-        "primary",
-        "fallback",
-        "fallback_contributions",
-        "contribution_scope_sha256",
-    }
-    r5_required = legacy_required | {"contribution_summary"}
-    if frozenset(value) not in {frozenset(legacy_required), frozenset(r5_required)}:
-        raise ManifestIntegrityError("source_override fields do not match schema")
-    for field in ("override_id", "difference_report_id"):
-        if not isinstance(value[field], str) or not value[field].strip():
-            raise ManifestIntegrityError("source_override identifier is invalid")
-    for field in ("report_sha256", "contribution_scope_sha256"):
-        if not isinstance(value[field], str) or not _HEX64_RE.match(value[field]):
-            raise ManifestIntegrityError("source_override SHA is invalid")
-    for side in ("primary", "fallback"):
-        item = value[side]
-        if not isinstance(item, dict) or set(item) != {
-            "source",
-            "batch_id",
-            "version_id",
-            "content_sha256",
-        }:
-            raise ManifestIntegrityError("source_override side lineage is invalid")
-        if not isinstance(item["content_sha256"], str) or not _HEX64_RE.match(
-            item["content_sha256"]
-        ):
-            raise ManifestIntegrityError("source_override side SHA is invalid")
-    contributions = value["fallback_contributions"]
-    summary = value.get("contribution_summary")
-    if not isinstance(contributions, list):
-        raise ManifestIntegrityError("source_override contributions are invalid")
-    if summary is not None and (
-        not isinstance(summary, dict)
-        or set(summary)
-        != {
-            "field_replacement_cells",
-            "row_insert_count",
-            "affected_primary_key_count",
-        }
-        or any(not isinstance(item, str) or not item.isdigit() for item in summary.values())
+def _verify_resolution_manifest(value: object, *, version_id: object) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "artifact_relative_path",
+        "candidate_version_id",
+        "created_job_id",
+        "difference_reports",
+        "input_fingerprint",
+        "manifest_sha256",
+        "rule_version",
+        "run_id",
+        "threshold_rule_version",
+    }:
+        raise ManifestIntegrityError("resolution manifest binding is invalid")
+    for field in (
+        "artifact_relative_path",
+        "candidate_version_id",
+        "created_job_id",
+        "rule_version",
+        "run_id",
+        "threshold_rule_version",
     ):
-        raise ManifestIntegrityError("source_override contribution summary is invalid")
-    for contribution in contributions:
-        if (
-            not isinstance(contribution, dict)
-            or set(contribution) != {"primary_key", "kind", "fields"}
-            or contribution["kind"] not in {"FIELD_OVERRIDE", "FIELD_REPLACEMENT", "ROW_INSERT"}
-            or not isinstance(contribution["primary_key"], dict)
-            or not isinstance(contribution["fields"], list)
-            or any(not isinstance(field, str) or not field for field in contribution["fields"])
-        ):
-            raise ManifestIntegrityError("source_override contribution entry is invalid")
-    digest_payload: object = contributions
-    if summary is not None:
-        digest_payload = {"contributions": contributions, "summary": summary}
-    expected = compute_sha256(
-        json.dumps(
-            digest_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-        ).encode("utf-8")
-    )
-    if expected != value["contribution_scope_sha256"]:
-        raise ManifestIntegrityError("source_override contribution scope SHA mismatch")
+        if not isinstance(value[field], str) or not value[field]:
+            raise ManifestIntegrityError("resolution manifest text binding is invalid")
+    if value["candidate_version_id"] != version_id:
+        raise ManifestIntegrityError("resolution candidate does not match version")
+    for field in ("input_fingerprint", "manifest_sha256"):
+        if not isinstance(value[field], str) or not _HEX64_RE.match(value[field]):
+            raise ManifestIntegrityError("resolution manifest SHA binding is invalid")
+    reports = value["difference_reports"]
+    if (
+        not isinstance(reports, list)
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"report_id", "artifact_relative_path", "manifest_sha256"}
+            or not isinstance(item["report_id"], str)
+            or not item["report_id"]
+            or not isinstance(item["artifact_relative_path"], str)
+            or not item["artifact_relative_path"]
+            or not isinstance(item["manifest_sha256"], str)
+            or not _HEX64_RE.match(item["manifest_sha256"])
+            for item in reports
+        )
+        or reports
+        != sorted(
+            reports,
+            key=lambda item: item["report_id"],
+        )
+        or len({item["report_id"] for item in reports}) != len(reports)
+    ):
+        raise ManifestIntegrityError("resolution DifferenceReport bindings are invalid")
 
 
 def _verify_manifest_self_sha(manifest: dict[str, object]) -> str:

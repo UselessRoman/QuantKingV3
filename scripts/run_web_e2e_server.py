@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from datetime import UTC, date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,6 +11,7 @@ from typing import cast
 from unittest.mock import patch
 
 import pyarrow as pa
+import uvicorn
 
 from quantking.common.ids import EntityId, new_entity_id
 from quantking.common.time import TradingDate, utc_now
@@ -50,7 +52,6 @@ from quantking.data.models import (
     QualityResult,
     QualityRun,
 )
-from quantking.data.override.service import CreateOverrideRequest, SourceOverrideService
 from quantking.data.quality.artifacts import QualityArtifactWriter
 from quantking.data.quality.engine import QualityEngine
 from quantking.data.quality.models import (
@@ -69,7 +70,7 @@ from quantking.jobs.adapters.persistence.sqlite import (
 from quantking.jobs.models import JobStatus
 from quantking.jobs.services import CreateJob, JobService
 from quantking.web.app import create_app
-from quantking.web.main import run_server
+from quantking.web.main import LOOPBACK_HOST
 
 FIXED_JOB_ID = "job:00000000-0000-4000-8000-000000000004"
 
@@ -332,57 +333,6 @@ def _seed_data_center(
         uow.commit()
 
     query_adapter = CanonicalQueryAdapter(data_root=data_root, uow_factory=uow_factory)
-    override_service = SourceOverrideService(
-        uow_factory=uow_factory,
-        query_adapter=query_adapter,
-        quality_engine=QualityEngine(rule_set=default_rule_set()),
-        reference_loader=loader,
-        quality_artifact_writer=QualityArtifactWriter(artifacts_root=artifacts_root),
-        publish_coordinator=coordinator,
-        difference_report_verifier=verifier,
-    )
-    pending = override_service.create_override(
-        CreateOverrideRequest(
-            difference_report_id=comparison.report_id,
-            primary_batch_id=primary_batch.batch_id,
-            fallback_batch_id=fallback_batch.batch_id,
-            primary_source=DataUpstream.EASTMONEY.value,
-            fallback_source=DataUpstream.TENCENT.value,
-            scope_codes=("000001.SZ",),
-            scope_dates=(TradingDate(date(2026, 7, 28)),),
-            fields=("close",),
-            field_replacements=(
-                {
-                    "code": "000001.SZ",
-                    "trade_date": "2026-07-28",
-                    "field": "close",
-                },
-            ),
-            reason="Playwright verified difference",
-        ),
-        created_at=utc_now(),
-    )
-    override_service.approve_override(pending.override_id, actor="playwright", at=utc_now())
-    override_service.apply_override(
-        pending.override_id,
-        utc_now(),
-        actor="playwright",
-        quality_request=QualityRequest(
-            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-            version_id=new_entity_id("data_version"),
-            rule_version="quality-rules.v1",
-            schema_version=primary.schema_version,
-            code_version=primary.code_version,
-            content_sha256="0" * 64,
-            input_batch_ids=(),
-            expected_securities=("000001.SZ",),
-            expected_exchanges=("SZ",),
-            coverage_start=TradingDate(date(2026, 7, 15)),
-            coverage_end=TradingDate(date(2026, 7, 28)),
-            reference_data={"exchange_calendar": calendar_binding},
-            empty_result=None,
-        ),
-    )
     return DataCenterQueryService(
         data_uow_factory=cast(DataUnitOfWorkFactory, uow_factory),
         preview=cast(CanonicalPreviewPort, query_adapter),
@@ -447,8 +397,19 @@ def main() -> int:
             static_root=static_root,
             clock=lambda: fixed_now,
         )
+        server = uvicorn.Server(uvicorn.Config(app, host=LOOPBACK_HOST, port=args.port))
+
+        @app.post("/__playwright__/shutdown", include_in_schema=False)
+        async def _shutdown_fixture() -> dict[str, str]:
+            async def stop_after_response() -> None:
+                await asyncio.sleep(0.25)
+                server.should_exit = True
+
+            app.state.shutdown_task = asyncio.create_task(stop_after_response())
+            return {"status": "scheduled"}
+
         try:
-            run_server(app, port=args.port)
+            server.run()
         finally:
             engine.dispose()
     return 0

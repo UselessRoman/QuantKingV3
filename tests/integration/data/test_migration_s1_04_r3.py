@@ -12,7 +12,7 @@ from sqlalchemy import inspect
 
 from quantking.jobs.adapters.persistence.sqlite import _REPOSITORY_ROOT, create_sqlite_engine
 
-HEAD = "20260808_0013"
+HEAD = "20260810_0014"
 PREVIOUS = "20260721_0007"
 
 

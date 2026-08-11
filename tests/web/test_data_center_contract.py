@@ -28,6 +28,22 @@ class _DataCenter:
         assert filters["limit"] == 50
         return DataCenterPage(items=(), next_cursor=None)
 
+    def list_resolution_runs(self, **filters: object) -> DataCenterPage:
+        assert filters == {"conflicts_only": True, "cursor": None, "limit": 7}
+        return DataCenterPage(
+            items=({"run_id": "data_resolution:run", "status": "BLOCKED"},),
+            next_cursor=None,
+        )
+
+    def get_resolution_run(self, run_id: str) -> dict[str, object]:
+        return {"run_id": run_id, "default_decision": None}
+
+    def resolution_decisions(self, **filters: object) -> DataCenterPage:
+        return DataCenterPage(
+            items=({"kind": "conflict" if filters["conflicts"] else "exception"},),
+            next_cursor=None,
+        )
+
 
 def test_data_center_routes_are_injected_without_source_readiness_api() -> None:
     app = create_app(_Jobs(), data_center_port=_DataCenter())
@@ -53,6 +69,25 @@ def test_list_contract_rejects_invalid_cursor_limit_and_enum() -> None:
     assert bad_cursor.status_code == 400
     assert bad_limit.status_code == 422
     assert bad_dataset.status_code == 422
+
+
+def test_resolution_routes_expose_bounded_list_detail_exceptions_and_conflicts() -> None:
+    run_id = "data_resolution:00000000-0000-4000-8000-000000000006"
+    app = create_app(_Jobs(), data_center_port=_DataCenter())
+    with TestClient(app) as client:
+        listing = client.get("/api/data/resolution-runs?conflicts_only=true&limit=7")
+        detail = client.get(f"/api/data/resolution-runs/{run_id}")
+        exceptions = client.get(f"/api/data/resolution-runs/{run_id}/exceptions?limit=3")
+        conflicts = client.get(f"/api/data/resolution-runs/{run_id}/conflicts?limit=4")
+
+    assert listing.status_code == 200
+    assert listing.json()["items"][0]["status"] == "BLOCKED"
+    assert detail.status_code == 200
+    assert detail.json() == {"run_id": run_id, "default_decision": None}
+    assert exceptions.status_code == 200
+    assert exceptions.json()["items"] == [{"kind": "exception"}]
+    assert conflicts.status_code == 200
+    assert conflicts.json()["items"] == [{"kind": "conflict"}]
 
 
 def test_read_lineage_corruption_maps_to_stable_sanitized_409() -> None:

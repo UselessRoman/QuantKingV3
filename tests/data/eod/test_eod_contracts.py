@@ -8,10 +8,8 @@ from quantking.data.eod.contracts import (
     EOD_JOB_TYPE,
     EodBaseVersion,
     EodDatasetConfig,
-    EodDatasetResult,
     EodPublishIntent,
     EodRunRequest,
-    EodRunResult,
     canonical_request_json,
     request_sha256,
 )
@@ -85,41 +83,6 @@ def test_request_rejects_inverted_or_non_date_range() -> None:
             datasets=("exchange_calendar",),
             publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
             base_versions={},
-        )
-
-
-def _dataset_result(dataset: str) -> EodDatasetResult:
-    return EodDatasetResult(
-        dataset=dataset,
-        status="PUBLISHED_NEW",
-        batch_id="data_batch:11111111-1111-4111-8111-111111111111",
-        version_id="data_version:22222222-2222-4222-8222-222222222222",
-        quality_run_id="data_quality:33333333-3333-4333-8333-333333333333",
-        content_sha256="a" * 64,
-        manifest_sha256="b" * 64,
-        parent_version_id=None,
-    )
-
-
-@pytest.mark.parametrize(
-    "results",
-    [
-        (),
-        (_dataset_result("exchange_calendar"), _dataset_result("exchange_calendar")),
-        (
-            _dataset_result("exchange_calendar"),
-            _dataset_result("security_master"),
-        ),
-    ],
-)
-def test_run_result_rejects_missing_duplicate_or_extra_datasets(
-    results: tuple[EodDatasetResult, ...],
-) -> None:
-    with pytest.raises(ValueError, match="exactly"):
-        EodRunResult(
-            job_id="job:44444444-4444-4444-8444-444444444444",
-            datasets=results,
-            expected_datasets=("exchange_calendar",),
         )
 
 

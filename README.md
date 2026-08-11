@@ -32,8 +32,8 @@ AKShare(Eastmoney/Tencent/Sina)
 
 ## 状态
 
-Stage 0 已完成。Stage 1 的 S1-01～S1-06 已完成主验收；旧 S1-07 机构级证据链已经退役。唯一下一任务是
-[S1-07K1：AKShare 三渠道适配与小样本实测](docs/stage1/S1-07K1_TASK.md)。
+Stage 0 已完成。Stage 1 的 S1-01～S1-06 已完成主验收，S1-07K1 功能验收通过并已提交；
+S1-07K2 纯离线实现已完成并通过独立主验收。Stage 1 尚未完成，S1-08 与 Stage 2 均未开始。
 
 - [总体架构](docs/ARCHITECTURE.md)
 - [架构决策](docs/DECISIONS.md)

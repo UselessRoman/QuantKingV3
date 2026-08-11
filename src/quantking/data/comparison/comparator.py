@@ -36,7 +36,7 @@ from quantking.common.ids import EntityId
 from quantking.common.time import UtcTimestamp
 from quantking.data.adapters.canonical_schema import canonical_schema, validate_table
 from quantking.data.comparison.thresholds import ThresholdSet, ThresholdSpec
-from quantking.data.models import DatasetKind, DataUpstream
+from quantking.data.models import DatasetKind, DataUpstream, EmptyResultInfo
 from quantking.data.schemas import descriptor_for
 
 # ---------------------------------------------------------------------------
@@ -119,6 +119,12 @@ def _json_value(value: Any) -> Any:
     return str(value)
 
 
+def _empty_result_dict(value: EmptyResultInfo | None) -> dict[str, str] | None:
+    if value is None:
+        return None
+    return {"classification": value.classification.value, "reason": value.reason}
+
+
 def _coerce_data_source(value: Any, *, field: str) -> DataUpstream:
     """Accept a DataUpstream enum or its string value."""
     if isinstance(value, DataUpstream):
@@ -165,6 +171,9 @@ class CrossSourceComparisonRequest:
     thresholds: ThresholdSet
     sample_spec: tuple[str, ...]
     created_at: UtcTimestamp
+    comparison_primary_keys: tuple[tuple[Any, ...], ...] | None = None
+    primary_empty_result: EmptyResultInfo | None = None
+    fallback_empty_result: EmptyResultInfo | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.dataset, DatasetKind):
@@ -206,6 +215,27 @@ class CrossSourceComparisonRequest:
             object.__setattr__(self, "sample_spec", tuple(self.sample_spec))
         if not isinstance(self.created_at, UtcTimestamp):
             raise TypeError("created_at must be a UtcTimestamp")
+        if self.comparison_primary_keys is not None:
+            if not isinstance(self.comparison_primary_keys, tuple) or any(
+                not isinstance(item, tuple) for item in self.comparison_primary_keys
+            ):
+                raise TypeError("comparison_primary_keys must be a tuple of tuples or None")
+            stable = tuple(
+                sorted(
+                    self.comparison_primary_keys,
+                    key=lambda item: tuple(_sortable(value) for value in item),
+                )
+            )
+            if stable != self.comparison_primary_keys or len(set(stable)) != len(stable):
+                raise ValueError("comparison_primary_keys must be sorted and unique")
+        for side, table, empty_result in (
+            ("primary", self.primary_table, self.primary_empty_result),
+            ("fallback", self.fallback_table, self.fallback_empty_result),
+        ):
+            if empty_result is not None and not isinstance(empty_result, EmptyResultInfo):
+                raise TypeError(f"{side}_empty_result must be EmptyResultInfo or None")
+            if (table.num_rows == 0) != (empty_result is not None):
+                raise ValueError(f"{side} empty metadata does not match table rows")
 
     def to_deterministic_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable dict that uniquely identifies the request.
@@ -214,13 +244,12 @@ class CrossSourceComparisonRequest:
         ``report_id``. The actual table content is represented by its
         content SHA-256, not by the table bytes, so the dict is small
         and stable. Random metadata IDs (version_id, batch_id,
-        quality_run_id) are deliberately excluded so two comparisons
-        with identical content produce the same ``report_id``;
+        quality_run_id) are deliberately excluded from the content identity;
         ``created_at`` is also excluded for the same reason. The
         random IDs are still persisted on the resulting
         :class:`DifferenceReport` for full lineage binding.
         """
-        return {
+        result: dict[str, Any] = {
             "dataset": self.dataset.value,
             "schema_version": self.schema_version,
             "primary_source": self.primary_source.value,
@@ -230,6 +259,14 @@ class CrossSourceComparisonRequest:
             "threshold_rule_version": self.thresholds.rule_version,
             "sample_spec": list(self.sample_spec),
         }
+        if self.comparison_primary_keys is not None:
+            result["comparison_primary_keys"] = [
+                [_json_value(value) for value in key] for key in self.comparison_primary_keys
+            ]
+        if self.primary_version_id == self.fallback_version_id:
+            result["primary_empty_result"] = _empty_result_dict(self.primary_empty_result)
+            result["fallback_empty_result"] = _empty_result_dict(self.fallback_empty_result)
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +300,9 @@ class CrossSourceComparisonOutcome:
     field_differences: Mapping[str, str]
     row_differences: tuple[RowDifference, ...]
     report_sha256: str
+    comparison_primary_keys: tuple[tuple[Any, ...], ...] | None = None
+    primary_empty_result: EmptyResultInfo | None = None
+    fallback_empty_result: EmptyResultInfo | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.report_id, EntityId) or self.report_id.namespace != "data_diff":
@@ -299,6 +339,12 @@ class CrossSourceComparisonOutcome:
         sorted_field_differences = MappingProxyType(dict(sorted(self.field_differences.items())))
         object.__setattr__(self, "field_differences", sorted_field_differences)
         object.__setattr__(self, "sample_spec", tuple(self.sample_spec))
+        if self.comparison_primary_keys is not None:
+            object.__setattr__(
+                self,
+                "comparison_primary_keys",
+                tuple(tuple(item) for item in self.comparison_primary_keys),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -324,11 +370,15 @@ class CrossSourceComparator:
         # Validate that both tables conform to the canonical schema.
         canonical = canonical_schema(request.dataset.value)
         canonical_tables = (
-            ("primary_table", request.primary_table),
-            ("fallback_table", request.fallback_table),
+            ("primary_table", request.primary_table, request.primary_empty_result),
+            ("fallback_table", request.fallback_table, request.fallback_empty_result),
         )
-        for table_name, table in canonical_tables:
-            validation = validate_table(request.dataset.value, table)
+        for table_name, table, empty_result in canonical_tables:
+            validation = validate_table(
+                request.dataset.value,
+                table,
+                empty_result=empty_result,
+            )
             if not validation.ok:
                 issue = validation.issues[0]
                 raise ValueError(f"{table_name} is not canonical: {issue.rule}: {issue.message}")
@@ -336,14 +386,22 @@ class CrossSourceComparator:
         # Recompute content SHA-256 and verify against request claims.
         from quantking.data.content import canonical_content_sha256
 
-        actual_primary_sha = canonical_content_sha256(request.dataset, [request.primary_table])
+        actual_primary_sha = canonical_content_sha256(
+            request.dataset,
+            [request.primary_table],
+            empty_result=request.primary_empty_result,
+        )
         if actual_primary_sha != request.primary_content_sha256:
             raise ValueError(
                 f"primary_content_sha256 mismatch: "
                 f"claimed {request.primary_content_sha256}, actual {actual_primary_sha}"
             )
 
-        actual_fallback_sha = canonical_content_sha256(request.dataset, [request.fallback_table])
+        actual_fallback_sha = canonical_content_sha256(
+            request.dataset,
+            [request.fallback_table],
+            empty_result=request.fallback_empty_result,
+        )
         if actual_fallback_sha != request.fallback_content_sha256:
             raise ValueError(
                 f"fallback_content_sha256 mismatch: "
@@ -355,7 +413,14 @@ class CrossSourceComparator:
         primary_by_key = _index_rows(primary_rows, descriptor.primary_key, "primary")
         fallback_by_key = _index_rows(fallback_rows, descriptor.primary_key, "fallback")
 
-        all_keys = sorted(primary_by_key.keys() | fallback_by_key.keys())
+        if request.comparison_primary_keys is None:
+            all_keys = sorted(primary_by_key.keys() | fallback_by_key.keys())
+        else:
+            if any(
+                len(key) != len(descriptor.primary_key) for key in request.comparison_primary_keys
+            ):
+                raise ValueError("comparison_primary_keys do not match canonical primary key")
+            all_keys = list(request.comparison_primary_keys)
         thresholds = request.thresholds.for_dataset(request.dataset)
         # Build a set of non-primary-key field names for BOTH-side comparison.
         non_pk_fields = [f.name for f in canonical if f.name not in descriptor.primary_key]
@@ -395,7 +460,7 @@ class CrossSourceComparator:
                         threshold=None,
                     )
                 )
-            else:
+            elif fallback_row is not None:
                 # Fallback-only row.
                 row_differences.append(
                     RowDifference(
@@ -409,6 +474,8 @@ class CrossSourceComparator:
                         threshold=None,
                     )
                 )
+            else:
+                continue
 
         # Stable sort by (primary_key tuple, field).
         row_differences.sort(
@@ -445,6 +512,9 @@ class CrossSourceComparator:
             field_differences=field_differences_str,
             row_differences=tuple(row_differences),
             report_sha256=report_sha,
+            comparison_primary_keys=request.comparison_primary_keys,
+            primary_empty_result=request.primary_empty_result,
+            fallback_empty_result=request.fallback_empty_result,
         )
 
 
@@ -574,6 +644,11 @@ def _compare_field(
 def _derive_report_id(request: CrossSourceComparisonRequest) -> EntityId:
     """Derive a deterministic data_diff EntityId from the request."""
     payload = request.to_deterministic_dict()
+    if request.primary_version_id == request.fallback_version_id:
+        # K2 artifacts are immutable and bind one run-specific shared candidate.
+        # Equal content in another run therefore needs a distinct artifact ID,
+        # while retrying the same candidate remains deterministic.
+        payload["shared_candidate_version_id"] = str(request.primary_version_id)
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     digest = hashlib.sha256(serialized.encode("utf-8")).digest()
     # Convert to a UUID4 (deterministic) by setting version/variant bits.

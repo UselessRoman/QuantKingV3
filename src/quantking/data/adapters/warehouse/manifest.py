@@ -267,7 +267,7 @@ class CanonicalManifest:
     created_at: str = ""
     partition_scheme: Mapping[str, object] = field(default_factory=dict)
     content_sha256: str = ""
-    source_override: Mapping[str, object] | None = None
+    resolution: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         for attr in ("dataset", "version_id", "schema_version", "code_version", "rule_version"):
@@ -301,11 +301,11 @@ class CanonicalManifest:
             "partition_scheme",
             MappingProxyType(dict(sorted(partition.items()))),
         )
-        if self.source_override is not None:
+        if self.resolution is not None:
             object.__setattr__(
                 self,
-                "source_override",
-                MappingProxyType(dict(sorted(self.source_override.items()))),
+                "resolution",
+                MappingProxyType(dict(sorted(self.resolution.items()))),
             )
 
     def to_canonical_json(self) -> str:
@@ -326,8 +326,8 @@ class CanonicalManifest:
             "code_version": self.code_version,
             "version_id": self.version_id,
         }
-        if self.source_override is not None:
-            payload["source_override"] = dict(self.source_override)
+        if self.resolution is not None:
+            payload["resolution"] = dict(self.resolution)
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
     def manifest_sha256(self) -> str:

@@ -2,7 +2,7 @@
 
 ## 状态
 
-S1-07K1-D1 唯一东财直连复验已执行：相同窗口的两只证券各尝试一次、零重试，均为 52 upstream/41 Canonical、`complete=True`，failure count=0。结合 R1 腾讯/Sina 四组 complete 与全套合同，K1 功能验收通过；D1 后完整门禁 935 passed，全部固化门禁全绿。所有真实授权均已消耗，严禁重跑；当前变更未提交且工作树不干净，不得自动开始 K2、S1-08 或 Stage 2。
+S1-07K1-D1 唯一东财直连复验已执行：相同窗口的两只证券各尝试一次、零重试，均为 52 upstream/41 Canonical、`complete=True`，failure count=0。结合 R1 腾讯/Sina 四组 complete 与全套合同，K1 功能验收通过；D1 后完整门禁 935 passed，全部固化门禁全绿。所有真实授权均已消耗，严禁重跑；K1 已提交为 `f98f1d9`。K2 后续经用户明确授权并已独立主验收；S1-08 与 Stage 2 仍未获授权。
 
 ## 用户授权原文建议
 

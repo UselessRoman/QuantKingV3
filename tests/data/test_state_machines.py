@@ -11,7 +11,6 @@ from quantking.common.errors import (
     DatasetVersionImmutableError,
     DatasetVersionNotFoundError,
     InvalidDataTransitionError,
-    OverrideNotApplicableError,
 )
 from quantking.common.ids import new_entity_id
 from quantking.common.time import TradingDate, UtcTimestamp
@@ -28,11 +27,8 @@ from quantking.data.models import (
     IngestionBatchStatus,
     LegalEmptyClassification,
     ManifestFileEntry,
-    SourceOverride,
-    SourceOverrideStatus,
     transition_batch,
     transition_dataset_version,
-    transition_override,
 )
 
 _NOW = UtcTimestamp(datetime(2026, 7, 16, 1, 0, tzinfo=UTC))
@@ -70,26 +66,6 @@ def _building_version() -> DatasetVersion:
         parent_version_id=None,
         input_batch_ids=(new_entity_id("data_batch"),),
         created_at=_NOW,
-    )
-
-
-def _pending_override() -> SourceOverride:
-    return SourceOverride.pending(
-        override_id=new_entity_id("data_override"),
-        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        difference_report_id=new_entity_id("data_diff"),
-        primary_batch_id=new_entity_id("data_batch"),
-        fallback_batch_id=new_entity_id("data_batch"),
-        primary_source=DataUpstream.EASTMONEY,
-        fallback_source=DataUpstream.TENCENT,
-        scope_codes=("000001.SZ",),
-        scope_dates=(_TRADE_DATE,),
-        fields=("close",),
-        reason="missing bar on primary",
-        created_at=_NOW,
-        field_replacements=(
-            {"code": "000001.SZ", "trade_date": str(_TRADE_DATE), "field": "close"},
-        ),
     )
 
 
@@ -306,74 +282,6 @@ class TestDatasetVersionStateMachine:
             )
 
 
-class TestSourceOverrideStateMachine:
-    def test_pending_to_approved(self) -> None:
-        override = transition_override(
-            _pending_override(),
-            SourceOverrideStatus.APPROVED,
-            at=_LATER,
-            actor="analyst",
-        )
-        assert override.status is SourceOverrideStatus.APPROVED
-        assert override.approved_at == _LATER
-
-    def test_pending_to_rejected(self) -> None:
-        override = transition_override(
-            _pending_override(),
-            SourceOverrideStatus.REJECTED,
-            at=_LATER,
-            actor="analyst",
-        )
-        assert override.status is SourceOverrideStatus.REJECTED
-
-    def test_only_approved_can_be_applied(self) -> None:
-        with pytest.raises(OverrideNotApplicableError):
-            transition_override(
-                _pending_override(),
-                SourceOverrideStatus.APPLIED,
-                at=_LATER,
-                actor="a",
-                applied_version_id=new_entity_id("data_version"),
-            )
-
-    def test_approved_to_applied_requires_new_version_id(self) -> None:
-        approved = transition_override(
-            _pending_override(),
-            SourceOverrideStatus.APPROVED,
-            at=_NOW,
-            actor="analyst",
-        )
-        with pytest.raises(OverrideNotApplicableError):
-            transition_override(approved, SourceOverrideStatus.APPLIED, at=_LATER, actor="a")
-
-    def test_applied_is_immutable(self) -> None:
-        approved = transition_override(
-            _pending_override(),
-            SourceOverrideStatus.APPROVED,
-            at=_NOW,
-            actor="analyst",
-        )
-        applied = transition_override(
-            approved,
-            SourceOverrideStatus.APPLIED,
-            at=_LATER,
-            actor="a",
-            applied_version_id=new_entity_id("data_version"),
-        )
-        with pytest.raises(OverrideNotApplicableError):
-            transition_override(applied, SourceOverrideStatus.PENDING, at=_LATER, actor="a")
-
-    def test_rejected_is_immutable(self) -> None:
-        rejected = transition_override(
-            _pending_override(),
-            SourceOverrideStatus.REJECTED,
-            at=_NOW,
-            actor="analyst",
-        )
-        with pytest.raises(InvalidDataTransitionError):
-            transition_override(rejected, SourceOverrideStatus.APPROVED, at=_LATER, actor="a")
-
-
 class TestDirectConstructionConsistency:
     def test_direct_terminal_batch_without_terminal_fields_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="terminal"):
@@ -382,10 +290,6 @@ class TestDirectConstructionConsistency:
     def test_direct_published_version_without_validation_facts_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="coverage metadata"):
             replace(_building_version(), status=DatasetVersionStatus.PUBLISHED)
-
-    def test_direct_approved_override_without_decision_facts_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="decision facts"):
-            replace(_pending_override(), status=SourceOverrideStatus.APPROVED)
 
     def test_failure_categories_are_stable_and_distinct(self) -> None:
         categories = {
@@ -456,10 +360,6 @@ class TestErrorCodes:
     def test_immutable_error_code_is_stable(self) -> None:
         error = DatasetVersionImmutableError("nope")
         assert error.code.value == "dataset_version_immutable"
-
-    def test_override_not_applicable_code_is_stable(self) -> None:
-        error = OverrideNotApplicableError("nope")
-        assert error.code.value == "override_not_applicable"
 
     def test_not_found_code_is_stable(self) -> None:
         error = DatasetVersionNotFoundError("nope")

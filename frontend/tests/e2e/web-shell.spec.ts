@@ -1,6 +1,15 @@
 import { expect, test } from "@playwright/test";
 
 const FIXED_JOB_ID = "job:00000000-0000-4000-8000-000000000004";
+const FIXED_RESOLUTION_ID = "data_resolution:00000000-0000-4000-8000-000000000026";
+
+test.afterEach(async ({ request }) => {
+  try {
+    await request.post("/__playwright__/shutdown", { timeout: 2_000 });
+  } catch {
+    // Best effort: preserve the original assertion failure if the fixture is already gone.
+  }
+});
 
 test("数据中心显式版本、血缘、EOD 入队取消与 SSE 重连", async ({ page }) => {
   const streamCursors: number[] = [];
@@ -22,6 +31,18 @@ test("数据中心显式版本、血缘、EOD 入队取消与 SSE 重连", async
     }
     await route.continue();
   });
+  await page.route("**/api/data/resolution-runs**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/exceptions")) {
+      await route.fulfill({ json: { items: [{ symbol: "600000.SH", reason_code: "AC_AGREE_A_SELECTED" }], next_cursor: null } });
+    } else if (path.endsWith("/conflicts")) {
+      await route.fulfill({ json: { items: [{ symbol: "000001.SZ", reason_code: "NO_TWO_SOURCE_CONSENSUS" }], next_cursor: null } });
+    } else if (path.endsWith(FIXED_RESOLUTION_ID)) {
+      await route.fulfill({ json: { run_id: FIXED_RESOLUTION_ID, status: "BLOCKED", default_decision: null, difference_report_ids: [], run_blockers: [] } });
+    } else {
+      await route.fulfill({ json: { items: [{ run_id: FIXED_RESOLUTION_ID, status: "BLOCKED", conflict_count: 1 }], next_cursor: null } });
+    }
+  });
 
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "QuantKing 数据中心" })).toBeVisible();
@@ -37,17 +58,16 @@ test("数据中心显式版本、血缘、EOD 入队取消与 SSE 重连", async
   await page.getByRole("button", { name: "差异" }).click();
   await expect(page.getByRole("cell", { name: /^data_diff:/ })).toBeVisible();
   await page.getByRole("button", { name: "行级差异" }).first().click();
-  await expect(page.getByText("comparison-thresholds.v1")).toBeVisible();
+  await expect(
+    page.getByText("comparison-thresholds.daily-bar-unadjusted.k1.v1"),
+  ).toBeVisible();
   await expect(page.getByText(/000001.SZ/).first()).toBeVisible();
-  await page.getByRole("button", { name: "Override" }).click();
-  await expect(page.getByRole("cell", { name: /^data_override:/ })).toBeVisible();
-  await expect(page.getByRole("cell", { name: "APPLIED" })).toBeVisible();
-  await page.getByRole("button", { name: "审计血缘" }).click();
-  await expect(page.getByLabel("Override 完整血缘")).toBeVisible();
-  await expect(page.getByText("field_replacements", { exact: true })).toBeVisible();
-  await expect(page.getByText("application", { exact: true })).toBeVisible();
-  await expect(page.getByText("attempt", { exact: true })).toBeVisible();
-  await expect(page.getByText("child", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "仲裁" }).click();
+  await expect(page.getByRole("cell", { name: /^data_resolution:/ })).toBeVisible();
+  await page.getByRole("button", { name: "仲裁详情" }).click();
+  await expect(page.getByLabel("仲裁完整血缘")).toBeVisible();
+  await expect(page.getByText("AC_AGREE_A_SELECTED")).toBeVisible();
+  await expect(page.getByText("NO_TWO_SOURCE_CONSENSUS")).toBeVisible();
 
   await page.getByRole("button", { name: "EOD" }).click();
   await page.getByLabel("完整精确 version mapping").check();

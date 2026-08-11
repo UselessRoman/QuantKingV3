@@ -16,7 +16,6 @@ from quantking.data.models import (
     DataUpstream,
     IngestionBatchStatus,
     QualityRunStatus,
-    SourceOverrideStatus,
 )
 from quantking.jobs.models import JobStatus
 from quantking.web.data_center import DataCenterReadPort
@@ -203,26 +202,56 @@ def create_api_router(
                 data_center_port.difference_rows(report_id=report_id, cursor=cursor, limit=limit)
             )
 
-        @router.get("/data/source-overrides")
-        def source_overrides(
-            dataset: DatasetKind | None = None,
-            status: SourceOverrideStatus | None = None,
+        @router.get("/data/resolution-runs")
+        def resolution_runs(
+            conflicts_only: bool = False,
             cursor: str | None = None,
             limit: int = Query(default=50, ge=1, le=100),
         ) -> object:
-            validate_cursor(cursor, "overrides")
+            validate_cursor(cursor, "resolutions")
             return page(
-                data_center_port.list_source_overrides(
-                    dataset=dataset.value if dataset else None,
-                    status=status.value if status else None,
+                data_center_port.list_resolution_runs(
+                    conflicts_only=conflicts_only,
                     cursor=cursor,
                     limit=limit,
                 )
             )
 
-        @router.get("/data/source-overrides/{override_id}")
-        def source_override(override_id: str) -> object:
-            return data_center_port.get_source_override(override_id)
+        @router.get("/data/resolution-runs/{run_id}")
+        def resolution_run(run_id: str) -> object:
+            return data_center_port.get_resolution_run(run_id)
+
+        @router.get("/data/resolution-runs/{run_id}/exceptions")
+        def resolution_exceptions(
+            run_id: str,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=100),
+        ) -> object:
+            validate_cursor(cursor, f"resolution-exceptions:{run_id}")
+            return page(
+                data_center_port.resolution_decisions(
+                    run_id=run_id,
+                    conflicts=False,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
+
+        @router.get("/data/resolution-runs/{run_id}/conflicts")
+        def resolution_conflicts(
+            run_id: str,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=100),
+        ) -> object:
+            validate_cursor(cursor, f"resolution-conflicts:{run_id}")
+            return page(
+                data_center_port.resolution_decisions(
+                    run_id=run_id,
+                    conflicts=True,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
 
         @router.get("/data/failures")
         def data_failures(

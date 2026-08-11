@@ -69,8 +69,13 @@ def _manifest_payload(outcome: CrossSourceComparisonOutcome) -> dict[str, object
     sample_spec_bytes = json.dumps(
         list(outcome.sample_spec), ensure_ascii=False, separators=(",", ":"), sort_keys=True
     ).encode("utf-8")
-    return {
-        "manifest_schema_version": "difference-report-manifest.v1",
+    shared_candidate = outcome.primary_version_id == outcome.fallback_version_id
+    payload: dict[str, object] = {
+        "manifest_schema_version": (
+            "difference-report-manifest.k2.v2"
+            if shared_candidate
+            else "difference-report-manifest.v1"
+        ),
         "report_id": str(outcome.report_id),
         "dataset": outcome.dataset.value,
         "schema_version": outcome.schema_version,
@@ -96,6 +101,29 @@ def _manifest_payload(outcome: CrossSourceComparisonOutcome) -> dict[str, object
         "row_differences_file_sha256": compute_sha256(rows_bytes),
         "row_differences_file_size": len(rows_bytes),
     }
+    if shared_candidate:
+        payload["binding_mode"] = "SHARED_RESOLUTION_CANDIDATE"
+        payload["comparison_primary_keys"] = [
+            [value.isoformat() if hasattr(value, "isoformat") else value for value in key]
+            for key in (outcome.comparison_primary_keys or ())
+        ]
+        payload["primary_empty_result"] = (
+            None
+            if outcome.primary_empty_result is None
+            else {
+                "classification": outcome.primary_empty_result.classification.value,
+                "reason": outcome.primary_empty_result.reason,
+            }
+        )
+        payload["fallback_empty_result"] = (
+            None
+            if outcome.fallback_empty_result is None
+            else {
+                "classification": outcome.fallback_empty_result.classification.value,
+                "reason": outcome.fallback_empty_result.reason,
+            }
+        )
+    return payload
 
 
 def _row_differences_bytes(outcome: CrossSourceComparisonOutcome) -> bytes:

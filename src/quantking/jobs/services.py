@@ -321,23 +321,6 @@ class JobService:
             )
         )
 
-    def add_recovery_artifact(
-        self,
-        job_id: str,
-        *,
-        relative_path: str,
-        at: UtcTimestamp | None = None,
-    ) -> JobRun:
-        _required_text(relative_path, field="relative_path")
-        occurred_at = at or self._now()
-        return self._execute(
-            lambda repository: repository.add_recovery_artifact(
-                job_id,
-                relative_path=relative_path,
-                at=occurred_at,
-            )
-        )
-
     def require_upstreams_succeeded(self, job_id: str) -> None:
         ready = self._execute(lambda repository: repository.upstream_jobs_succeeded(job_id))
         if not ready:

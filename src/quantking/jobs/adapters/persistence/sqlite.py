@@ -744,38 +744,6 @@ class SQLiteJobRepository:
         )
         return self._domain(row)
 
-    def add_recovery_artifact(
-        self,
-        job_id: str,
-        *,
-        relative_path: str,
-        at: UtcTimestamp,
-    ) -> JobRun:
-        row = self._row(job_id)
-        domain = self._domain(row)
-        if domain.status not in {JobStatus.FAILED, JobStatus.INTERRUPTED}:
-            raise JobConflictError("recovery artifacts require a failed or interrupted job")
-        if (
-            not relative_path.startswith("artifacts/eod/")
-            or not relative_path.endswith(".incomplete")
-            or "\\" in relative_path
-            or ".." in relative_path.split("/")
-        ):
-            raise ValueError("recovery artifact path is invalid")
-        if relative_path in domain.artifacts:
-            return domain
-        row.artifacts_json = _json_sequence((*domain.artifacts, relative_path))
-        row.row_version += 1
-        self._event(
-            job_id=job_id,
-            event_type="job_recovery_artifact",
-            stage=row.stage,
-            progress=row.progress,
-            summary="interrupted EOD failure evidence attached",
-            at=at,
-        )
-        return self._domain(row)
-
     def upstream_jobs_succeeded(self, job_id: str) -> bool:
         total = self._session.scalar(
             select(func.count())

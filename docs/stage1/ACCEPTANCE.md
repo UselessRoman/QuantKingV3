@@ -15,7 +15,7 @@ Stage 1 尚未完成。S1-01～S1-06 的历史主验收继续有效；旧 S1-07 
 
 ## S1-07K1 验收
 
-`akshare==1.18.83` 已精确落锁。R1 腾讯/Sina 四组 complete；D1 两只东财证券各尝试一次、零重试，均为 52 upstream/41 Canonical、`complete=True`，Canonical 日期 `2026-06-11..2026-08-07`，冻结单位策略一致。D1 marker `1 passed, 4 deselected`、failure count=0，代理环境已恢复。综合六组真实 complete 与全套合同，K1 功能验收通过；当前变更未提交且工作树不干净，K2 未开始。
+`akshare==1.18.83` 已精确落锁。R1 腾讯/Sina 四组 complete；D1 两只东财证券各尝试一次、零重试，均为 52 upstream/41 Canonical、`complete=True`，Canonical 日期 `2026-06-11..2026-08-07`，冻结单位策略一致。D1 marker `1 passed, 4 deselected`、failure count=0，代理环境已恢复。综合六组真实 complete 与全套合同，K1 功能验收通过。
 
 已满足：
 
@@ -38,9 +38,12 @@ Stage 1 尚未完成。S1-01～S1-06 的历史主验收继续有效；旧 S1-07 
 - R1 marker 的 4 个阻断已由 D1 两组东财 complete 消解；腾讯/Sina 与东财六组共同构成 K1 真实功能证据。
 - R1 后完整 `scripts/quality.ps1` 已通过：918 passed、2 skipped、3 deselected；Ruff、format、mypy、架构、Markdown、前端和 E2E 均通过。
 - 原三源、R1、R2 和 D1 真实授权均已消耗，禁止重跑。D1 后完整质量门 935 passed，当前质量证据完整。
-- 当前 K1 变更尚未提交，工作树不干净。
+- K1 已提交为 `f98f1d9 feat(data): complete S1-07K1 AKShare integration`；当前未提交工作树只包含 K2 交付。
 
 ## S1-07K2 验收
+
+状态：纯离线实现完成并通过独立主验收。实现证据见
+[K2 实现交接](S1-07K2_IMPLEMENTATION_HANDOFF.md)。
 
 - A/B 正常一致时不需要 C。
 - A 或 B 失败/缺行/分歧时才调用 C。
@@ -51,6 +54,15 @@ Stage 1 尚未完成。S1-01～S1-06 的历史主验收继续有效；旧 S1-07 
 - active `SourceOverride`、旧 assessment 和 EOD success/failure evidence 已从运行时、API 和 Web 退役；历史迁移仍可审计。
 - 中断 Job 关闭并由新 Job 重试；相同输入指纹只复用 manifest/`COMPLETE` 完整的已发布版本。
 - 质量门、幂等、失败恢复、EOD 和 Web 合同无回归。
+
+独立主验收证据：
+
+- 锁文件离线检查解析 222 packages，frozen sync 检查 216 packages。
+- 完整离线 pytest：889 passed、2 skipped、5 deselected、4 warnings（131.62s）；另有 K2 组合聚焦 122 passed、EOD 单文件 32 passed。
+- Ruff、194 files format check、mypy 111 source files、架构边界、23 个文档状态测试、Markdown 链接和 `git diff --check` 全部通过。
+- 前端 typecheck、17 unit、production build 和 Playwright 1 passed（6.4s，Web server 正常关闭）全部通过。
+- 固化 `scripts/quality.ps1` 在共享 `E:\Apps` UV cache 的 Windows ACL 处被环境阻断；上述独立验收使用仓库忽略的 `.uv-cache` 逐项执行了同等门禁。该环境限制不掩盖测试失败。
+- K2 未运行真实网络、未写正式数据根；K2 工作树保持未提交。Stage 1 仍须完成 S1-08 才能最终验收。
 
 ## Stage 1 最终完成条件
 

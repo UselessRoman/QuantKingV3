@@ -8,7 +8,7 @@ thresholds. Tests cover:
 * null equality, null vs value differences.
 * Exact equality for strings/dates/booleans/status fields.
 * Field-level (not single-percentage) numeric thresholds.
-* Boundary cases: below, exactly at, and above threshold.
+* K1-evidence-backed zero tolerance for every daily numeric field.
 * Stable sort by primary key then field.
 * No mutation of either input table.
 * Versioned thresholds config; no magic constants.
@@ -78,18 +78,18 @@ class TestThresholdConfiguration:
         from quantking.data.comparison.thresholds import default_thresholds
 
         thresholds = default_thresholds()
-        assert thresholds.rule_version == "comparison-thresholds.v1"
+        assert thresholds.rule_version == "comparison-thresholds.daily-bar-unadjusted.k1.v1"
         # Must define per-field thresholds for daily_bar_unadjusted.
         daily = thresholds.for_dataset(DatasetKind.DAILY_BAR_UNADJUSTED)
         assert "open" in daily
         assert "close" in daily
         assert "volume" in daily
         assert "amount" in daily
-        # Each threshold must have an absolute and/or relative bound.
-        for field_name in ("open", "close", "volume", "amount"):
+        # K1 evidence supports exact equality only; no empirical tolerance is invented.
+        for field_name in ("open", "high", "low", "close", "pre_close", "volume", "amount"):
             spec = daily[field_name]
-            assert spec.absolute >= 0
-            assert spec.relative >= 0
+            assert spec.absolute == 0
+            assert spec.relative == 0
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +304,7 @@ class TestCrossSourceComparator:
         outcome = comparator.compare(request=request)
         assert outcome.total_differences == 0
 
-    def test_numeric_field_below_threshold_is_not_a_difference(self) -> None:
+    def test_any_nonzero_numeric_difference_is_a_difference(self) -> None:
         from quantking.data.comparison.comparator import (
             CrossSourceComparator,
             CrossSourceComparisonRequest,
@@ -313,7 +313,7 @@ class TestCrossSourceComparator:
         from quantking.data.content import canonical_content_sha256
 
         primary_rows = _primary_rows()
-        # Difference of 0.001 on close (10.5 vs 10.501) - small.
+        # K1 only proved exact equality, so even 0.001 must trigger resolution.
         fallback_rows = _primary_rows()
         fallback_rows[0]["close"] = 10.501
         primary = _make_table(primary_rows)
@@ -343,9 +343,11 @@ class TestCrossSourceComparator:
         )
         comparator = CrossSourceComparator()
         outcome = comparator.compare(request=request)
-        # The 0.001 difference should be below threshold.
         close_diffs = [r for r in outcome.row_differences if r.field == "close"]
-        assert close_diffs == []
+        assert len(close_diffs) == 1
+        assert close_diffs[0].threshold is not None
+        assert close_diffs[0].threshold.absolute == 0
+        assert close_diffs[0].threshold.relative == 0
 
     def test_numeric_field_above_threshold_is_a_difference(self) -> None:
         from quantking.data.comparison.comparator import (

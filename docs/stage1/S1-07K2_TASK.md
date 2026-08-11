@@ -2,7 +2,8 @@
 
 ## 状态
 
-未开始。所属 Stage：Stage 1。只有 S1-07K1 完成独立主验收后才能开始。
+纯离线实现完成并通过独立主验收。所属 Stage：Stage 1。没有运行真实网络、写正式数据根
+或开始 S1-08/Stage 2；实现证据见 [K2 实现交接](S1-07K2_IMPLEMENTATION_HANDOFF.md)。
 
 ## 目标
 

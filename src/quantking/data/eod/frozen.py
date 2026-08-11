@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from quantking.common.ids import parse_entity_id
 from quantking.common.time import TradingDate
 from quantking.data.eod.contracts import (
     EOD_CONFIG_SCHEMA,
@@ -50,7 +51,7 @@ class FrozenEodCommand:
     max_days_per_chunk: int
     max_items_per_chunk: int
     datasets: tuple[FrozenEodDataset, ...]
-    evidence_request: Mapping[str, object]
+    retry_of_job_id: str | None = None
 
 
 def _integer(value: object, *, field: str, minimum: int) -> int:
@@ -70,12 +71,19 @@ def parse_frozen_eod_command(
     try:
         if job_type != EOD_JOB_TYPE:
             raise FrozenEodCommandError("job type is invalid")
+        input_fields = frozenset(input_manifest)
         if (
-            set(input_manifest)
-            != {
-                "schema_version",
-                "request_json",
-                "request_sha256",
+            input_fields
+            not in {
+                frozenset({"schema_version", "request_json", "request_sha256"}),
+                frozenset(
+                    {
+                        "schema_version",
+                        "request_json",
+                        "request_sha256",
+                        "retry_of_job_id",
+                    }
+                ),
             }
             or input_manifest.get("schema_version") != EOD_REQUEST_MANIFEST_SCHEMA
         ):
@@ -87,6 +95,13 @@ def parse_frozen_eod_command(
         if sha256_text(request_json) != request_sha:
             raise FrozenEodCommandError("request SHA does not match")
         request = EodRunRequest.from_dict(load_canonical_json(request_json))
+        retry_of_job_id = input_manifest.get("retry_of_job_id")
+        if retry_of_job_id is not None:
+            if not isinstance(retry_of_job_id, str):
+                raise FrozenEodCommandError("retry_of_job_id is invalid")
+            parsed_retry = parse_entity_id(retry_of_job_id)
+            if parsed_retry.namespace != "job" or str(parsed_retry) != retry_of_job_id:
+                raise FrozenEodCommandError("retry_of_job_id is invalid")
         if request.publish_intent is not EodPublishIntent.PUBLISH_AFTER_QUALITY:
             raise FrozenEodCommandError("publish intent is invalid")
 
@@ -183,14 +198,6 @@ def parse_frozen_eod_command(
             raise
         raise FrozenEodCommandError("frozen EOD command is invalid") from error
 
-    evidence_request = {
-        "schema_version": "eod-request-evidence.v2",
-        "request": request.to_dict(),
-        "request_sha256": request_sha,
-        "config": dict(config),
-        "config_sha256": config_sha,
-        "version_manifest": dict(version_manifest),
-    }
     return FrozenEodCommand(
         request=request,
         request_sha256=request_sha,
@@ -202,47 +209,7 @@ def parse_frozen_eod_command(
         max_days_per_chunk=max_days,
         max_items_per_chunk=max_items,
         datasets=tuple(plans),
-        evidence_request=evidence_request,
-    )
-
-
-def parse_evidence_command(value: Mapping[str, object]) -> FrozenEodCommand:
-    """Rebuild the persisted manifest triplet from strict request evidence."""
-    if (
-        set(value)
-        != {
-            "schema_version",
-            "request",
-            "request_sha256",
-            "config",
-            "config_sha256",
-            "version_manifest",
-        }
-        or value.get("schema_version") != "eod-request-evidence.v2"
-    ):
-        raise FrozenEodCommandError("request evidence fields are invalid")
-    request = value["request"]
-    config = value["config"]
-    versions = value["version_manifest"]
-    if (
-        not isinstance(request, Mapping)
-        or not isinstance(config, Mapping)
-        or not isinstance(versions, Mapping)
-    ):
-        raise FrozenEodCommandError("request evidence values are invalid")
-    return parse_frozen_eod_command(
-        job_type=EOD_JOB_TYPE,
-        input_manifest={
-            "schema_version": EOD_REQUEST_MANIFEST_SCHEMA,
-            "request_json": canonical_json(request),
-            "request_sha256": value["request_sha256"],
-        },
-        config_manifest={
-            "schema_version": EOD_CONFIG_SCHEMA,
-            "config_json": canonical_json(config),
-            "config_sha256": value["config_sha256"],
-        },
-        version_manifest=versions,
+        retry_of_job_id=retry_of_job_id,
     )
 
 
@@ -250,6 +217,5 @@ __all__ = [
     "FrozenEodCommand",
     "FrozenEodCommandError",
     "FrozenEodDataset",
-    "parse_evidence_command",
     "parse_frozen_eod_command",
 ]

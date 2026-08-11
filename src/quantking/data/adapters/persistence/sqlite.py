@@ -4,9 +4,8 @@ This adapter maps the framework-free domain objects in
 :mod:`quantking.data.models` to and from the ORM rows in
 :mod:`quantking.data.adapters.persistence.models`. It reuses the engine and
 pragmas from the jobs persistence adapter (``create_sqlite_engine``) but does
-not depend on jobs domain logic. Immutability of PUBLISHED versions and
-APPLIED/APPROVED overrides is enforced both at the service layer (raise before
-write) and at the database layer (triggers created by the Alembic revision).
+not depend on jobs domain logic. Immutability of PUBLISHED versions is enforced
+both at the service layer and by the Alembic database triggers.
 
 Short transactions, one fresh session per call; ``SQLITE_BUSY``/``SQLITE_LOCKED``
 retries are delegated to the same retry boundary used by jobs. No Parquet row
@@ -18,9 +17,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Self
 
@@ -32,9 +30,8 @@ from quantking.common.errors import (
     DatasetVersionNotFoundError,
     InvalidDataTransitionError,
     InvalidIdError,
-    OverrideNotApplicableError,
 )
-from quantking.common.ids import EntityId, new_entity_id, parse_entity_id
+from quantking.common.ids import parse_entity_id
 from quantking.common.time import TradingDate, UtcTimestamp
 from quantking.data.adapters.persistence.models import (
     DatasetVersionBatchRow,
@@ -43,11 +40,8 @@ from quantking.data.adapters.persistence.models import (
     IngestionBatchRow,
     QualityResultRow,
     QualityRunRow,
-    SourceOverrideApplicationAttemptRow,
-    SourceOverrideApplicationRow,
-    SourceOverrideRow,
+    ResolutionRunRow,
 )
-from quantking.data.adapters.warehouse.manifest import compute_sha256
 from quantking.data.comparison.verifier import VerifiedDifferenceReport
 from quantking.data.models import (
     BATCH_TRANSITIONS,
@@ -68,10 +62,9 @@ from quantking.data.models import (
     QualityResult,
     QualityRun,
     QualityRunStatus,
-    SourceOverride,
-    SourceOverrideStatus,
-    transition_override,
 )
+from quantking.data.resolution.artifacts import VerifiedResolutionArtifact
+from quantking.data.resolution.models import ResolutionRun, ResolutionRunRecord
 from quantking.jobs.adapters.persistence.models import AuditRecordRow
 from quantking.jobs.adapters.persistence.sqlite import (
     create_sqlite_engine as _create_jobs_engine,
@@ -86,44 +79,6 @@ _TERMINAL_BATCH_STATUSES = frozenset(
         IngestionBatchStatus.FAILED,
     }
 )
-_ABSOLUTE_PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s,;]*|/[A-Za-z0-9_./=-]+")
-_TOKEN_RE = re.compile(r"(?i)(token|password|secret|api[_-]?key)=[^\s,;]+")
-
-
-@dataclass(frozen=True, slots=True)
-class OverrideApplicationAttempt:
-    attempt_id: EntityId
-    override_id: EntityId
-    attempt_no: int
-    child_version_id: EntityId
-    input_fingerprint: str
-    status: str
-    claimed_by: str
-    started_at: UtcTimestamp
-    ended_at: UtcTimestamp | None
-    failure_message: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class OverrideApplicationFailureState:
-    override_status: SourceOverrideStatus
-    child_status: DatasetVersionStatus
-    failure_message: str
-
-
-@dataclass(frozen=True, slots=True)
-class OverrideApplicationBinding:
-    application_id: EntityId
-    override_id: EntityId
-    child_version_id: EntityId
-    input_fingerprint: str
-    status: str
-    report_sha256: str | None
-    contribution_scope_sha256: str | None
-    claimed_by: str
-    claimed_at: UtcTimestamp
-    updated_at: UtcTimestamp
-    failure_message: str | None
 
 
 def create_data_engine(database_path: Path, *, busy_timeout_ms: int) -> Engine:
@@ -196,18 +151,6 @@ def _timestamp(value: str | None) -> UtcTimestamp | None:
 
 def _sha256_of_json(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _is_sha256(value: object) -> bool:
-    return isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{64}", value))
-
-
-def _sanitize_failure_text(value: str | None) -> str:
-    if not value:
-        return "application failed"
-    redacted = _TOKEN_RE.sub("[REDACTED_SECRET]", value)
-    redacted = _ABSOLUTE_PATH_RE.sub("[REDACTED_PATH]", redacted)
-    return "".join(ch if ch >= " " or ch in " \t" else "" for ch in redacted)
 
 
 def _empty_result_json(value: EmptyResultInfo | None) -> str | None:
@@ -463,6 +406,14 @@ def _difference_row_values(report: DifferenceReport) -> dict[str, object]:
 
 
 def _difference_from_verified(report: VerifiedDifferenceReport) -> DifferenceReport:
+    shared_candidate = report.primary_version_id == report.fallback_version_id
+    if shared_candidate and (
+        report.manifest_schema_version != "difference-report-manifest.k2.v2"
+        or report.binding_mode != "SHARED_RESOLUTION_CANDIDATE"
+    ):
+        raise InvalidDataTransitionError(
+            "shared DifferenceReport requires the verified K2 artifact schema"
+        )
     return DifferenceReport(
         report_id=report.report_id,
         version_id=report.primary_version_id,
@@ -514,103 +465,52 @@ def _difference_domain(row: DifferenceReportRow) -> DifferenceReport:
     )
 
 
-# ---------------------------------------------------------------------------
-# Override mapping
-# ---------------------------------------------------------------------------
-
-
-def _override_row_values(override: SourceOverride) -> dict[str, object]:
+def _resolution_row_values(
+    run: ResolutionRun,
+    artifact: VerifiedResolutionArtifact,
+) -> dict[str, object]:
+    if artifact.run_id != run.run_id or artifact.summary != run.summary_dict():
+        raise InvalidDataTransitionError("resolution artifact does not match run")
     return {
-        "override_id": str(override.override_id),
-        "dataset": override.dataset.value,
-        "difference_report_id": str(override.difference_report_id),
-        "primary_batch_id": str(override.primary_batch_id),
-        "fallback_batch_id": str(override.fallback_batch_id),
-        "primary_source": override.primary_source.value,
-        "fallback_source": override.fallback_source.value,
-        "status": override.status.value,
-        "scope_codes_json": _json_sequence(override.scope_codes),
-        "scope_dates_json": _json_sequence(tuple(str(d) for d in override.scope_dates)),
-        "fields_json": _json_sequence(override.fields),
-        "field_replacements_json": json.dumps(
-            [dict(unit) for unit in override.field_replacements],
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
+        "run_id": str(run.run_id),
+        "dataset": run.dataset.value,
+        "created_job_id": str(run.created_job_id),
+        "candidate_version_id": (
+            None if run.candidate_version_id is None else str(run.candidate_version_id)
         ),
-        "fallback_only_keys_json": json.dumps(
-            [dict(unit) for unit in override.fallback_only_keys],
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ),
-        "exact_scope_sha256": override.exact_scope_sha256,
-        "contribution_scope_sha256": override.contribution_scope_sha256,
-        "reason": override.reason,
-        "created_at": override.created_at.to_iso(),
-        "approved_at": None if override.approved_at is None else override.approved_at.to_iso(),
-        "approved_by": override.approved_by,
-        "applied_at": None if override.applied_at is None else override.applied_at.to_iso(),
-        "applied_version_id": (
-            None if override.applied_version_id is None else str(override.applied_version_id)
-        ),
+        "created_at": run.created_at.to_iso(),
+        "rule_version": run.rule_version,
+        "threshold_rule_version": run.threshold_rule_version,
+        "input_fingerprint": run.input_fingerprint,
+        "artifact_relative_path": artifact.relative_path,
+        "manifest_sha256": artifact.manifest_sha256,
+        "total_decisions": run.total_decisions,
+        "default_decision_count": run.default_decision_count,
+        "exception_count": len(run.exceptions),
+        "conflict_count": len(run.conflicts),
+        "blocker_count": len(run.run_blockers),
     }
 
 
-def _override_domain(row: SourceOverrideRow) -> SourceOverride:
-    raw_dates = json.loads(row.scope_dates_json)
-    scope_dates = tuple(TradingDate.from_iso(str(d)) for d in raw_dates)
-    applied_version = (
-        None if row.applied_version_id is None else parse_entity_id(row.applied_version_id)
-    )
-    override = SourceOverride(
-        override_id=parse_entity_id(row.override_id),
+def _resolution_domain(row: ResolutionRunRow) -> ResolutionRunRecord:
+    return ResolutionRunRecord(
+        run_id=parse_entity_id(row.run_id),
         dataset=DatasetKind(row.dataset),
-        difference_report_id=parse_entity_id(row.difference_report_id),
-        primary_batch_id=parse_entity_id(row.primary_batch_id),
-        fallback_batch_id=parse_entity_id(row.fallback_batch_id),
-        primary_source=DataUpstream(row.primary_source),
-        fallback_source=DataUpstream(row.fallback_source),
-        status=SourceOverrideStatus(row.status),
-        scope_codes=_load_str_sequence(row.scope_codes_json),
-        scope_dates=scope_dates,
-        fields=_load_str_sequence(row.fields_json),
-        reason=row.reason,
+        created_job_id=parse_entity_id(row.created_job_id),
+        candidate_version_id=(
+            None if row.candidate_version_id is None else parse_entity_id(row.candidate_version_id)
+        ),
         created_at=UtcTimestamp.from_iso(row.created_at),
-        approved_at=_timestamp(row.approved_at),
-        approved_by=row.approved_by,
-        applied_at=_timestamp(row.applied_at),
-        applied_version_id=applied_version,
-        field_replacements=tuple(
-            {str(key): str(value) for key, value in unit.items()}
-            for unit in json.loads(row.field_replacements_json)
-        ),
-        fallback_only_keys=tuple(
-            {str(key): str(value) for key, value in unit.items()}
-            for unit in json.loads(row.fallback_only_keys_json)
-        ),
-    )
-    if row.exact_scope_sha256 != override.exact_scope_sha256:
-        raise OverrideNotApplicableError("persisted exact scope SHA-256 is inconsistent")
-    if row.contribution_scope_sha256 != override.contribution_scope_sha256:
-        raise OverrideNotApplicableError("persisted contribution scope SHA-256 is inconsistent")
-    return override
-
-
-def _override_attempt_domain(
-    row: SourceOverrideApplicationAttemptRow,
-) -> OverrideApplicationAttempt:
-    return OverrideApplicationAttempt(
-        attempt_id=parse_entity_id(row.attempt_id),
-        override_id=parse_entity_id(row.override_id),
-        attempt_no=row.attempt_no,
-        child_version_id=parse_entity_id(row.child_version_id),
+        rule_version=row.rule_version,
+        threshold_rule_version=row.threshold_rule_version,
         input_fingerprint=row.input_fingerprint,
-        status=row.status,
-        claimed_by=row.claimed_by,
-        started_at=UtcTimestamp.from_iso(row.started_at),
-        ended_at=_timestamp(row.ended_at),
-        failure_message=row.failure_message,
+        artifact_relative_path=row.artifact_relative_path,
+        manifest_sha256=row.manifest_sha256,
+        total_decisions=row.total_decisions,
+        default_decision_count=row.default_decision_count,
+        exception_count=row.exception_count,
+        conflict_count=row.conflict_count,
+        blocker_count=row.blocker_count,
     )
 
 
@@ -716,6 +616,14 @@ class DataRepository:
         statement = statement.order_by(
             IngestionBatchRow.started_at.desc(), IngestionBatchRow.batch_id.desc()
         ).limit(limit)
+        return [_batch_domain(row) for row in self._session.scalars(statement)]
+
+    def list_batches_for_job(self, job_run_id: str) -> list[IngestionBatch]:
+        statement = (
+            select(IngestionBatchRow)
+            .where(IngestionBatchRow.job_run_id == job_run_id)
+            .order_by(IngestionBatchRow.batch_id)
+        )
         return [_batch_domain(row) for row in self._session.scalars(statement)]
 
     # -- versions ----------------------------------------------------------
@@ -947,7 +855,7 @@ class DataRepository:
         domain = _difference_from_verified(report)
         if self._session.get(DatasetVersionRow, str(domain.version_id)) is None:
             raise DatasetVersionNotFoundError("difference report dataset version does not exist")
-        self._validate_difference_report_bindings(domain)
+        self._validate_difference_report_bindings(domain, verified=report)
         row = self._session.get(DifferenceReportRow, str(domain.report_id))
         values = _difference_row_values(domain)
         if row is None:
@@ -957,7 +865,12 @@ class DataRepository:
         self._session.flush()
         return domain
 
-    def _validate_difference_report_bindings(self, report: DifferenceReport) -> None:
+    def _validate_difference_report_bindings(
+        self,
+        report: DifferenceReport,
+        *,
+        verified: VerifiedDifferenceReport,
+    ) -> None:
         """Verify both-side batches, sources, datasets and quality runs exist and match.
 
         A DifferenceReport must not be persisted if either side references a
@@ -977,6 +890,24 @@ class DataRepository:
                 "difference report fallback_batch_id does not exist",
                 context={"fallback_batch_id": str(report.fallback_batch_id)},
             )
+        if report.primary_version_id == report.fallback_version_id:
+            for side, batch, declared in (
+                ("primary", primary_batch, verified.primary_empty_result),
+                ("fallback", fallback_batch, verified.fallback_empty_result),
+            ):
+                actual_empty = _load_empty_result(batch.empty_result_json)
+                actual = (
+                    None
+                    if actual_empty is None
+                    else {
+                        "classification": actual_empty.classification.value,
+                        "reason": actual_empty.reason,
+                    }
+                )
+                if declared != actual:
+                    raise InvalidDataTransitionError(
+                        f"difference report {side} empty result does not match batch"
+                    )
         if primary_batch.source != report.primary_source.value:
             raise InvalidDataTransitionError(
                 "difference report primary_source does not match primary batch source",
@@ -1013,11 +944,21 @@ class DataRepository:
                 "difference report fallback_version_id does not exist",
                 context={"fallback_version_id": str(report.fallback_version_id)},
             )
-        if (
+        shared_candidate = report.primary_version_id == report.fallback_version_id
+        if shared_candidate:
+            if primary_version.status not in {
+                DatasetVersionStatus.BUILDING.value,
+                DatasetVersionStatus.FAILED.value,
+                DatasetVersionStatus.PUBLISHED.value,
+            }:
+                raise InvalidDataTransitionError(
+                    "K2 difference report shared candidate has an invalid status"
+                )
+        elif (
             primary_version.status != DatasetVersionStatus.PUBLISHED.value
             or fallback_version.status != DatasetVersionStatus.PUBLISHED.value
         ):
-            raise InvalidDataTransitionError("difference report requires PUBLISHED versions")
+            raise InvalidDataTransitionError("legacy difference report requires PUBLISHED versions")
         if primary_version.dataset != primary_batch.dataset:
             raise InvalidDataTransitionError(
                 "difference report primary_version dataset does not match primary batch dataset",
@@ -1093,14 +1034,23 @@ class DataRepository:
             raise InvalidDataTransitionError("primary quality SHA does not match report")
         if fallback_run.content_sha256 != report.fallback_content_sha256:
             raise InvalidDataTransitionError("fallback quality SHA does not match report")
-        if primary_version.content_sha256 != report.primary_content_sha256:
-            raise InvalidDataTransitionError("primary version content SHA does not match report")
-        if fallback_version.content_sha256 != report.fallback_content_sha256:
-            raise InvalidDataTransitionError("fallback version content SHA does not match report")
-        if primary_version.quality_run_id != str(report.primary_quality_run_id):
-            raise InvalidDataTransitionError("primary version quality run does not match report")
-        if fallback_version.quality_run_id != str(report.fallback_quality_run_id):
-            raise InvalidDataTransitionError("fallback version quality run does not match report")
+        if not shared_candidate:
+            if primary_version.content_sha256 != report.primary_content_sha256:
+                raise InvalidDataTransitionError(
+                    "primary version content SHA does not match report"
+                )
+            if fallback_version.content_sha256 != report.fallback_content_sha256:
+                raise InvalidDataTransitionError(
+                    "fallback version content SHA does not match report"
+                )
+            if primary_version.quality_run_id != str(report.primary_quality_run_id):
+                raise InvalidDataTransitionError(
+                    "primary version quality run does not match report"
+                )
+            if fallback_version.quality_run_id != str(report.fallback_quality_run_id):
+                raise InvalidDataTransitionError(
+                    "fallback version quality run does not match report"
+                )
 
     def get_difference_report(self, report_id: str) -> DifferenceReport:
         row = self._session.get(DifferenceReportRow, report_id)
@@ -1154,671 +1104,83 @@ class DataRepository:
         ).limit(limit)
         return [_difference_domain(row) for row in self._session.scalars(statement)]
 
-    # -- overrides ---------------------------------------------------------
+    # -- resolution runs ---------------------------------------------------
 
-    def save_override(self, override: SourceOverride) -> SourceOverride:
-        """Insert a PENDING override; decisions require audited methods below."""
-        existing = self._session.get(SourceOverrideRow, str(override.override_id))
-        values = _override_row_values(override)
+    def save_resolution_run(
+        self,
+        run: ResolutionRun,
+        artifact: VerifiedResolutionArtifact,
+    ) -> ResolutionRunRecord:
+        values = _resolution_row_values(run, artifact)
+        existing = self._session.get(ResolutionRunRow, str(run.run_id))
         if existing is not None:
-            if _row_matches(existing, values):
-                return override
-            raise OverrideNotApplicableError(
-                "override decisions must use audited repository operations",
-                context={"override_id": str(override.override_id)},
+            if not _row_matches(existing, values):
+                raise InvalidDataTransitionError("resolution run is immutable")
+            return _resolution_domain(existing)
+        existing_job = self._session.scalar(
+            select(ResolutionRunRow).where(
+                ResolutionRunRow.created_job_id == str(run.created_job_id)
             )
-        else:
-            if override.status is not SourceOverrideStatus.PENDING:
-                raise OverrideNotApplicableError("new override must start in PENDING")
-            self._validate_override_bindings(override)
-            self._session.add(SourceOverrideRow(**values))
+        )
+        if existing_job is not None:
+            raise InvalidDataTransitionError("job already has a resolution run")
+        row = ResolutionRunRow(**values)
+        self._session.add(row)
         self._session.flush()
-        return override
+        return _resolution_domain(row)
 
-    def _validate_override_bindings(self, override: SourceOverride) -> None:
-        report_row = self._session.get(DifferenceReportRow, str(override.difference_report_id))
-        primary = self._session.get(IngestionBatchRow, str(override.primary_batch_id))
-        fallback = self._session.get(IngestionBatchRow, str(override.fallback_batch_id))
-        if report_row is None or primary is None or fallback is None:
-            raise OverrideNotApplicableError("override lineage references must exist")
-        report_version = self._session.get(DatasetVersionRow, report_row.version_id)
-        if report_version is None or report_version.dataset != override.dataset.value:
-            raise OverrideNotApplicableError("difference report dataset does not match override")
-        if (
-            report_row.primary_source != override.primary_source.value
-            or report_row.fallback_source != override.fallback_source.value
-            or primary.source != override.primary_source.value
-            or fallback.source != override.fallback_source.value
-            or primary.dataset != override.dataset.value
-            or fallback.dataset != override.dataset.value
-            or primary.status not in {"SUCCEEDED", "PARTIAL"}
-            or fallback.status not in {"SUCCEEDED", "PARTIAL"}
-        ):
-            raise OverrideNotApplicableError("override source or batch lineage is inconsistent")
-        # The override's primary/fallback batches must match the difference
-        # report's bindings; an override cannot be bound to a report that
-        # compared different batches.
-        if str(report_row.primary_batch_id) != str(override.primary_batch_id) or str(
-            report_row.fallback_batch_id
-        ) != str(override.fallback_batch_id):
-            raise OverrideNotApplicableError(
-                "override batches must match the difference report's compared batches"
-            )
-
-    def approve_override(self, override_id: str, *, actor: str, at: UtcTimestamp) -> SourceOverride:
-        return self._decide_override(
-            override_id,
-            target=SourceOverrideStatus.APPROVED,
-            actor=actor,
-            at=at,
-            applied_version_id=None,
-        )
-
-    def reject_override(self, override_id: str, *, actor: str, at: UtcTimestamp) -> SourceOverride:
-        return self._decide_override(
-            override_id,
-            target=SourceOverrideStatus.REJECTED,
-            actor=actor,
-            at=at,
-            applied_version_id=None,
-        )
-
-    def apply_override(
-        self,
-        override_id: str,
-        *,
-        actor: str,
-        at: UtcTimestamp,
-        applied_version_id: str,
-    ) -> SourceOverride:
-        from quantking.common.ids import parse_entity_id
-
-        return self._decide_override(
-            override_id,
-            target=SourceOverrideStatus.APPLIED,
-            actor=actor,
-            at=at,
-            applied_version_id=parse_entity_id(applied_version_id),
-        )
-
-    def _decide_override(
-        self,
-        override_id: str,
-        *,
-        target: SourceOverrideStatus,
-        actor: str,
-        at: UtcTimestamp,
-        applied_version_id: object,
-    ) -> SourceOverride:
-        from quantking.common.ids import EntityId
-
-        row = self._session.get(SourceOverrideRow, override_id)
+    def get_resolution_run(self, run_id: str) -> ResolutionRunRecord:
+        row = self._session.get(ResolutionRunRow, run_id)
         if row is None:
             raise InvalidIdError(
-                "source override does not exist", context={"override_id": override_id}
+                "resolution run does not exist",
+                context={"run_id": run_id},
             )
-        current = _override_domain(row)
-        version_id = applied_version_id if isinstance(applied_version_id, EntityId) else None
-        if target is SourceOverrideStatus.APPLIED:
-            if version_id is None:
-                raise OverrideNotApplicableError("APPLIED requires a dataset version")
-            version = self.get_version(str(version_id))
-            report = self.get_difference_report(str(current.difference_report_id))
-            if (
-                version.dataset is not current.dataset
-                or version.status is not DatasetVersionStatus.PUBLISHED
-                or version.version_id == report.version_id
-                or version.parent_version_id != report.version_id
-                or current.approved_at is None
-                or version.created_at.value < current.approved_at.value
-            ):
-                raise OverrideNotApplicableError(
-                    "applied version must be a new same-dataset child of the compared version"
-                )
-            application = self._session.scalar(
-                select(SourceOverrideApplicationRow).where(
-                    SourceOverrideApplicationRow.override_id == override_id,
-                    SourceOverrideApplicationRow.child_version_id == str(version_id),
-                    SourceOverrideApplicationRow.status == "PUBLISHED",
-                )
-            )
-            if application is None:
-                raise OverrideNotApplicableError(
-                    "APPLIED requires the persisted PUBLISHED application binding"
-                )
-        changed = transition_override(
-            current,
-            target,
-            at=at,
-            actor=actor,
-            applied_version_id=version_id,
-        )
-        for key, value in _override_row_values(changed).items():
-            setattr(row, key, value)
-        if target is SourceOverrideStatus.APPLIED:
-            self._session.flush()
-            assert version_id is not None
-            assert application is not None
-            application.status = "APPLIED"
-            application.updated_at = at.to_iso()
-            attempt = self._session.scalar(
-                select(SourceOverrideApplicationAttemptRow).where(
-                    SourceOverrideApplicationAttemptRow.override_id == override_id,
-                    SourceOverrideApplicationAttemptRow.child_version_id == str(version_id),
-                )
-            )
-            if attempt is None or attempt.status != "PUBLISHED":
-                raise OverrideNotApplicableError(
-                    "APPLIED requires the persisted PUBLISHED application attempt"
-                )
-            attempt.status = "APPLIED"
-        action = {
-            SourceOverrideStatus.APPROVED: "override_approved",
-            SourceOverrideStatus.REJECTED: "override_rejected",
-            SourceOverrideStatus.APPLIED: "override_applied",
-        }[target]
-        details = {"status": target.value}
-        if version_id is not None:
-            details["applied_version_id"] = str(version_id)
-        self.append_audit(
-            actor=actor,
-            entity=override_id,
-            action=action,
-            correlation_id=override_id,
-            occurred_at=at,
-            details=details,
-        )
-        self._session.flush()
-        return changed
+        return _resolution_domain(row)
 
-    def get_override(self, override_id: str) -> SourceOverride:
-        row = self._session.get(SourceOverrideRow, override_id)
-        if row is None:
-            raise InvalidIdError(
-                "source override does not exist", context={"override_id": override_id}
-            )
-        return _override_domain(row)
+    def find_resolution_run_by_fingerprint(
+        self,
+        input_fingerprint: str,
+    ) -> ResolutionRunRecord | None:
+        row = self._session.scalar(
+            select(ResolutionRunRow)
+            .where(ResolutionRunRow.input_fingerprint == input_fingerprint)
+            .order_by(ResolutionRunRow.created_at.desc(), ResolutionRunRow.run_id.desc())
+        )
+        return None if row is None else _resolution_domain(row)
 
-    def list_overrides_page(
+    def find_resolution_run_by_job_id(self, job_id: str) -> ResolutionRunRecord | None:
+        row = self._session.scalar(
+            select(ResolutionRunRow).where(ResolutionRunRow.created_job_id == job_id)
+        )
+        return None if row is None else _resolution_domain(row)
+
+    def list_resolution_runs_page(
         self,
         *,
-        dataset: DatasetKind | None,
-        status: SourceOverrideStatus | None,
         before: tuple[str, str] | None,
         limit: int,
-    ) -> list[SourceOverride]:
-        statement = select(SourceOverrideRow)
-        if dataset is not None:
-            statement = statement.where(SourceOverrideRow.dataset == dataset.value)
-        if status is not None:
-            statement = statement.where(SourceOverrideRow.status == status.value)
+        conflicts_only: bool = False,
+    ) -> list[ResolutionRunRecord]:
+        statement = select(ResolutionRunRow)
+        if conflicts_only:
+            statement = statement.where(ResolutionRunRow.conflict_count > 0)
         if before is not None:
             timestamp, stable_id = before
             statement = statement.where(
                 or_(
-                    SourceOverrideRow.created_at < timestamp,
+                    ResolutionRunRow.created_at < timestamp,
                     and_(
-                        SourceOverrideRow.created_at == timestamp,
-                        SourceOverrideRow.override_id < stable_id,
+                        ResolutionRunRow.created_at == timestamp,
+                        ResolutionRunRow.run_id < stable_id,
                     ),
                 )
             )
         statement = statement.order_by(
-            SourceOverrideRow.created_at.desc(), SourceOverrideRow.override_id.desc()
+            ResolutionRunRow.created_at.desc(),
+            ResolutionRunRow.run_id.desc(),
         ).limit(limit)
-        return [_override_domain(row) for row in self._session.scalars(statement)]
-
-    # -- override application attempts -------------------------------------
-
-    def _validate_override_application_graph(
-        self,
-        *,
-        override_id: str,
-        child_version_id: str,
-        allow_applied: bool = False,
-    ) -> tuple[SourceOverride, DifferenceReport, DatasetVersion]:
-        override = self.get_override(override_id)
-        allowed = {SourceOverrideStatus.APPROVED}
-        if allow_applied:
-            allowed.add(SourceOverrideStatus.APPLIED)
-        if override.status not in allowed or override.approved_at is None:
-            raise OverrideNotApplicableError("override application requires an APPROVED override")
-        report = self.get_difference_report(str(override.difference_report_id))
-        child = self.get_version(child_version_id)
-        if (
-            child.dataset is not override.dataset
-            or child.parent_version_id != report.primary_version_id
-            or child.input_batch_ids != (override.primary_batch_id, override.fallback_batch_id)
-            or child.created_at.value < override.approved_at.value
-        ):
-            raise OverrideNotApplicableError(
-                "override application child has invalid dataset, parent or batch lineage"
-            )
-        return override, report, child
-
-    def claim_override_application_child(
-        self,
-        *,
-        override_id: str,
-        child: DatasetVersion,
-        input_fingerprint: str,
-        actor: str,
-        at: UtcTimestamp,
-    ) -> OverrideApplicationAttempt:
-        """Atomically reuse an active child or persist and claim the supplied child."""
-        active = self._session.scalar(
-            select(SourceOverrideApplicationRow).where(
-                SourceOverrideApplicationRow.override_id == override_id,
-                SourceOverrideApplicationRow.status.in_(["CLAIMED", "PUBLISHED", "APPLIED"]),
-            )
-        )
-        if active is not None:
-            if active.input_fingerprint != input_fingerprint:
-                raise OverrideNotApplicableError(
-                    "active override application fingerprint does not match retry input"
-                )
-            self._validate_override_application_graph(
-                override_id=override_id,
-                child_version_id=active.child_version_id,
-                allow_applied=True,
-            )
-            attempt = self._session.scalar(
-                select(SourceOverrideApplicationAttemptRow).where(
-                    SourceOverrideApplicationAttemptRow.override_id == override_id,
-                    SourceOverrideApplicationAttemptRow.child_version_id == active.child_version_id,
-                )
-            )
-            if attempt is None:
-                raise OverrideNotApplicableError("active application is missing its attempt")
-            return _override_attempt_domain(attempt)
-        if child.status is not DatasetVersionStatus.BUILDING:
-            raise OverrideNotApplicableError("new override application child must be BUILDING")
-        self.save_version(child)
-        return self.claim_override_application(
-            override_id=override_id,
-            child_version_id=str(child.version_id),
-            input_fingerprint=input_fingerprint,
-            actor=actor,
-            at=at,
-        )
-
-    def claim_override_application(
-        self,
-        *,
-        override_id: str,
-        child_version_id: str,
-        input_fingerprint: str,
-        actor: str,
-        at: UtcTimestamp,
-    ) -> OverrideApplicationAttempt:
-        if not _is_sha256(input_fingerprint):
-            raise OverrideNotApplicableError("input_fingerprint must be a SHA-256")
-        self._validate_override_application_graph(
-            override_id=override_id, child_version_id=child_version_id
-        )
-        active = self._session.scalar(
-            select(SourceOverrideApplicationRow).where(
-                SourceOverrideApplicationRow.override_id == override_id,
-                SourceOverrideApplicationRow.status.in_(["CLAIMED", "PUBLISHED", "APPLIED"]),
-            )
-        )
-        if active is not None:
-            if active.input_fingerprint != input_fingerprint:
-                raise OverrideNotApplicableError(
-                    "active override application fingerprint does not match retry input"
-                )
-            attempt = self._session.scalar(
-                select(SourceOverrideApplicationAttemptRow).where(
-                    SourceOverrideApplicationAttemptRow.override_id == override_id,
-                    SourceOverrideApplicationAttemptRow.child_version_id == active.child_version_id,
-                )
-            )
-            if attempt is not None:
-                return _override_attempt_domain(attempt)
-        max_attempt = self._session.scalar(
-            select(SourceOverrideApplicationAttemptRow.attempt_no)
-            .where(SourceOverrideApplicationAttemptRow.override_id == override_id)
-            .order_by(SourceOverrideApplicationAttemptRow.attempt_no.desc())
-            .limit(1)
-        )
-        attempt_no = int(max_attempt or 0) + 1
-        attempt = SourceOverrideApplicationAttemptRow(
-            attempt_id=str(new_entity_id("data_override_attempt")),
-            override_id=override_id,
-            attempt_no=attempt_no,
-            child_version_id=child_version_id,
-            input_fingerprint=input_fingerprint,
-            status="CLAIMED",
-            claimed_by=actor,
-            started_at=at.to_iso(),
-            ended_at=None,
-            failure_message=None,
-        )
-        self._session.add(attempt)
-        self._session.add(
-            SourceOverrideApplicationRow(
-                application_id=str(new_entity_id("data_override_application")),
-                override_id=override_id,
-                child_version_id=child_version_id,
-                input_fingerprint=input_fingerprint,
-                status="CLAIMED",
-                report_sha256=None,
-                contribution_scope_sha256=None,
-                claimed_by=actor,
-                claimed_at=at.to_iso(),
-                updated_at=at.to_iso(),
-                failure_message=None,
-            )
-        )
-        self._session.flush()
-        return _override_attempt_domain(attempt)
-
-    def finish_override_application_attempt(
-        self,
-        *,
-        attempt_id: str,
-        status: str,
-        failure_message: str | None,
-        at: UtcTimestamp,
-    ) -> OverrideApplicationAttempt:
-        if status not in {"FAILED", "PUBLISHED", "APPLIED"}:
-            raise OverrideNotApplicableError("invalid override application attempt status")
-        row = self._session.get(SourceOverrideApplicationAttemptRow, attempt_id)
-        if row is None:
-            raise InvalidIdError("override application attempt does not exist")
-        _, _, child = self._validate_override_application_graph(
-            override_id=row.override_id,
-            child_version_id=row.child_version_id,
-            allow_applied=status == "APPLIED",
-        )
-        if status == "FAILED" and child.status is not DatasetVersionStatus.FAILED:
-            raise OverrideNotApplicableError("FAILED attempt requires a real FAILED child")
-        if (
-            status in {"PUBLISHED", "APPLIED"}
-            and child.status is not DatasetVersionStatus.PUBLISHED
-        ):
-            raise OverrideNotApplicableError("published attempt requires a real PUBLISHED child")
-        row.status = status
-        row.ended_at = at.to_iso()
-        row.failure_message = _sanitize_failure_text(failure_message) if failure_message else None
-        app = self._session.scalar(
-            select(SourceOverrideApplicationRow).where(
-                SourceOverrideApplicationRow.override_id == row.override_id,
-                SourceOverrideApplicationRow.child_version_id == row.child_version_id,
-            )
-        )
-        if app is not None:
-            app.status = status
-            app.updated_at = at.to_iso()
-            app.failure_message = row.failure_message
-        self._session.flush()
-        return _override_attempt_domain(row)
-
-    def bind_published_override_child(
-        self,
-        *,
-        override_id: str,
-        child_version_id: str,
-        report_sha256: str,
-        contribution_scope_sha256: str,
-        manifest_source_override: Mapping[str, object],
-        at: UtcTimestamp,
-    ) -> OverrideApplicationAttempt:
-        if not _is_sha256(report_sha256) or not _is_sha256(contribution_scope_sha256):
-            raise OverrideNotApplicableError("override child binding requires SHA-256 credentials")
-        override, report, child = self._validate_override_application_graph(
-            override_id=override_id, child_version_id=child_version_id
-        )
-        if child.status is not DatasetVersionStatus.PUBLISHED:
-            raise OverrideNotApplicableError("override binding requires a real PUBLISHED child")
-        self._validate_override_manifest_provenance(
-            override=override,
-            report=report,
-            provenance=manifest_source_override,
-            report_sha256=report_sha256,
-            contribution_scope_sha256=contribution_scope_sha256,
-        )
-        row = self._session.scalar(
-            select(SourceOverrideApplicationRow).where(
-                SourceOverrideApplicationRow.override_id == override_id,
-                SourceOverrideApplicationRow.status.in_(["CLAIMED", "PUBLISHED"]),
-            )
-        )
-        if row is None:
-            raise OverrideNotApplicableError("published child has no persisted application claim")
-        if row.child_version_id != child_version_id or row.status not in {"CLAIMED", "PUBLISHED"}:
-            raise OverrideNotApplicableError("published child does not match the active claim")
-        row.status = "PUBLISHED"
-        row.report_sha256 = report_sha256
-        row.contribution_scope_sha256 = contribution_scope_sha256
-        row.updated_at = at.to_iso()
-        attempt_row = self._session.scalar(
-            select(SourceOverrideApplicationAttemptRow).where(
-                SourceOverrideApplicationAttemptRow.override_id == override_id,
-                SourceOverrideApplicationAttemptRow.child_version_id == child_version_id,
-            )
-        )
-        if attempt_row is None or attempt_row.status not in {"CLAIMED", "PUBLISHED"}:
-            raise OverrideNotApplicableError(
-                "published child is missing its active application attempt"
-            )
-        attempt_row.status = "PUBLISHED"
-        attempt_row.ended_at = at.to_iso()
-        attempt_row.failure_message = None
-        self._session.flush()
-        return _override_attempt_domain(attempt_row)
-
-    def _validate_override_manifest_provenance(
-        self,
-        *,
-        override: SourceOverride,
-        report: DifferenceReport,
-        provenance: Mapping[str, object],
-        report_sha256: str,
-        contribution_scope_sha256: str,
-    ) -> None:
-        primary = provenance.get("primary")
-        fallback = provenance.get("fallback")
-        contributions = provenance.get("fallback_contributions")
-        summary = provenance.get("contribution_summary")
-        if (
-            not isinstance(primary, Mapping)
-            or not isinstance(fallback, Mapping)
-            or not isinstance(contributions, list)
-            or (summary is not None and not isinstance(summary, Mapping))
-        ):
-            raise OverrideNotApplicableError("manifest source_override provenance is invalid")
-        expected_primary = {
-            "source": override.primary_source.value,
-            "batch_id": str(override.primary_batch_id),
-            "version_id": str(report.primary_version_id),
-            "content_sha256": report.primary_content_sha256,
-        }
-        expected_fallback = {
-            "source": override.fallback_source.value,
-            "batch_id": str(override.fallback_batch_id),
-            "version_id": str(report.fallback_version_id),
-            "content_sha256": report.fallback_content_sha256,
-        }
-        digest_payload: object = contributions
-        if isinstance(summary, Mapping):
-            digest_payload = {"contributions": contributions, "summary": dict(summary)}
-        computed_scope_sha = compute_sha256(
-            json.dumps(
-                digest_payload,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-        )
-        expected_fields = {
-            "override_id",
-            "difference_report_id",
-            "report_sha256",
-            "primary",
-            "fallback",
-            "fallback_contributions",
-            "contribution_scope_sha256",
-        }
-        if summary is not None:
-            expected_fields.add("contribution_summary")
-        if (
-            set(provenance) != expected_fields
-            or provenance.get("override_id") != str(override.override_id)
-            or provenance.get("difference_report_id") != str(report.report_id)
-            or provenance.get("report_sha256") != report.report_sha256
-            or report_sha256 != report.report_sha256
-            or dict(primary) != expected_primary
-            or dict(fallback) != expected_fallback
-            or provenance.get("contribution_scope_sha256") != computed_scope_sha
-            or contribution_scope_sha256 != computed_scope_sha
-        ):
-            raise OverrideNotApplicableError(
-                "manifest source_override provenance does not match the application lineage"
-            )
-
-    def find_recoverable_override_child(self, override_id: str) -> DatasetVersion:
-        row = self._session.scalar(
-            select(SourceOverrideApplicationRow).where(
-                SourceOverrideApplicationRow.override_id == override_id,
-                SourceOverrideApplicationRow.status.in_(["CLAIMED", "PUBLISHED", "APPLIED"]),
-            )
-        )
-        if row is None:
-            raise InvalidIdError("recoverable override child does not exist")
-        _, _, child = self._validate_override_application_graph(
-            override_id=override_id,
-            child_version_id=row.child_version_id,
-            allow_applied=True,
-        )
-        if (
-            row.status in {"PUBLISHED", "APPLIED"}
-            and child.status is not DatasetVersionStatus.PUBLISHED
-        ):
-            raise OverrideNotApplicableError("recoverable published binding has no PUBLISHED child")
-        return child
-
-    def get_override_application_binding(self, override_id: str) -> OverrideApplicationBinding:
-        row = self._session.scalar(
-            select(SourceOverrideApplicationRow).where(
-                SourceOverrideApplicationRow.override_id == override_id,
-                SourceOverrideApplicationRow.status.in_(["CLAIMED", "PUBLISHED", "APPLIED"]),
-            )
-        )
-        if row is None:
-            raise InvalidIdError("override application binding does not exist")
-        self._validate_override_application_graph(
-            override_id=override_id,
-            child_version_id=row.child_version_id,
-            allow_applied=True,
-        )
-        return self._override_binding_domain(row)
-
-    @staticmethod
-    def _override_binding_domain(
-        row: SourceOverrideApplicationRow,
-    ) -> OverrideApplicationBinding:
-        return OverrideApplicationBinding(
-            application_id=parse_entity_id(row.application_id),
-            override_id=parse_entity_id(row.override_id),
-            child_version_id=parse_entity_id(row.child_version_id),
-            input_fingerprint=row.input_fingerprint,
-            status=row.status,
-            report_sha256=row.report_sha256,
-            contribution_scope_sha256=row.contribution_scope_sha256,
-            claimed_by=row.claimed_by,
-            claimed_at=UtcTimestamp.from_iso(row.claimed_at),
-            updated_at=UtcTimestamp.from_iso(row.updated_at),
-            failure_message=row.failure_message,
-        )
-
-    def find_latest_override_application_binding(
-        self, override_id: str
-    ) -> OverrideApplicationBinding | None:
-        row = self._session.scalar(
-            select(SourceOverrideApplicationRow)
-            .where(SourceOverrideApplicationRow.override_id == override_id)
-            .order_by(
-                SourceOverrideApplicationRow.claimed_at.desc(),
-                SourceOverrideApplicationRow.application_id.desc(),
-            )
-            .limit(1)
-        )
-        return self._override_binding_domain(row) if row is not None else None
-
-    def find_active_override_application_binding(
-        self, override_id: str
-    ) -> OverrideApplicationBinding | None:
-        row = self._session.scalar(
-            select(SourceOverrideApplicationRow).where(
-                SourceOverrideApplicationRow.override_id == override_id,
-                SourceOverrideApplicationRow.status.in_(["CLAIMED", "PUBLISHED", "APPLIED"]),
-            )
-        )
-        return self._override_binding_domain(row) if row is not None else None
-
-    def find_last_override_application_attempt(
-        self, override_id: str
-    ) -> OverrideApplicationAttempt | None:
-        row = self._session.scalar(
-            select(SourceOverrideApplicationAttemptRow)
-            .where(SourceOverrideApplicationAttemptRow.override_id == override_id)
-            .order_by(SourceOverrideApplicationAttemptRow.attempt_no.desc())
-            .limit(1)
-        )
-        return _override_attempt_domain(row) if row is not None else None
-
-    def list_override_audits(self, override_id: str, *, limit: int) -> list[AuditRecord]:
-        rows = self._session.scalars(
-            select(AuditRecordRow)
-            .where(AuditRecordRow.entity == override_id)
-            .order_by(AuditRecordRow.audit_id.desc())
-            .limit(limit)
-        )
-        return [
-            AuditRecord(
-                audit_id=row.audit_id,
-                actor=row.actor,
-                entity=row.entity,
-                action=row.action,
-                correlation_id=row.correlation_id,
-                occurred_at=UtcTimestamp.from_iso(row.occurred_at),
-                details=_load_mapping(row.details_json),
-            )
-            for row in rows
-        ]
-
-    def record_override_application_failure(
-        self,
-        *,
-        override_id: str,
-        attempt_id: str,
-        child_version_id: str,
-        failure_stage: str,
-        message: str,
-        at: UtcTimestamp,
-    ) -> OverrideApplicationFailureState:
-        sanitized = _sanitize_failure_text(f"{failure_stage}: {message}")
-        _, _, child = self._validate_override_application_graph(
-            override_id=override_id, child_version_id=child_version_id
-        )
-        if child.status is not DatasetVersionStatus.FAILED:
-            raise OverrideNotApplicableError("failure recording requires a real FAILED child")
-        attempt = self._session.get(SourceOverrideApplicationAttemptRow, attempt_id)
-        if (
-            attempt is None
-            or attempt.override_id != override_id
-            or attempt.child_version_id != child_version_id
-        ):
-            raise OverrideNotApplicableError("failure attempt does not match override child")
-        self.finish_override_application_attempt(
-            attempt_id=attempt_id, status="FAILED", failure_message=sanitized, at=at
-        )
-        return OverrideApplicationFailureState(
-            override_status=SourceOverrideStatus.APPROVED,
-            child_status=DatasetVersionStatus.FAILED,
-            failure_message=sanitized,
-        )
+        return [_resolution_domain(row) for row in self._session.scalars(statement)]
 
     # -- audit (delegates to the shared audit_records table) --------------
 

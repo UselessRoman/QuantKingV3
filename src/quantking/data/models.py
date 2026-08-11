@@ -1,4 +1,4 @@
-"""Framework-free data ingestion, version, quality, and override domain objects.
+"""Framework-free data ingestion, version, quality, and resolution domain objects.
 
 These contracts are deliberately independent of SQLAlchemy, PyArrow, Pandas and
 any vendor SDK. Persistent ORM rows live in ``data.adapters.persistence`` and are
@@ -19,11 +19,9 @@ from types import MappingProxyType
 from quantking.common.errors import (
     DatasetVersionImmutableError,
     InvalidDataTransitionError,
-    OverrideNotApplicableError,
 )
 from quantking.common.ids import EntityId
 from quantking.common.time import TradingDate, UtcTimestamp
-from quantking.data.override_scope import contribution_scope_sha256, normalize_override_scope
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -102,15 +100,6 @@ class QualityRunStatus(StrEnum):
     SKIPPED = "SKIPPED"
 
 
-class SourceOverrideStatus(StrEnum):
-    """Lifecycle of one explicit fallback-source override; APPLIED/REJECTED terminal."""
-
-    PENDING = "PENDING"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
-    APPLIED = "APPLIED"
-
-
 # ---------------------------------------------------------------------------
 # Transition tables
 # ---------------------------------------------------------------------------
@@ -147,20 +136,6 @@ DATASET_VERSION_TRANSITIONS: Mapping[DatasetVersionStatus, frozenset[DatasetVers
             ),
             DatasetVersionStatus.PUBLISHED: frozenset(),
             DatasetVersionStatus.FAILED: frozenset(),
-        }
-    )
-)
-
-_OVERRIDE_TERMINAL = frozenset({SourceOverrideStatus.REJECTED, SourceOverrideStatus.APPLIED})
-OVERRIDE_TRANSITIONS: Mapping[SourceOverrideStatus, frozenset[SourceOverrideStatus]] = (
-    MappingProxyType(
-        {
-            SourceOverrideStatus.PENDING: frozenset(
-                {SourceOverrideStatus.APPROVED, SourceOverrideStatus.REJECTED}
-            ),
-            SourceOverrideStatus.APPROVED: frozenset({SourceOverrideStatus.APPLIED}),
-            SourceOverrideStatus.REJECTED: frozenset(),
-            SourceOverrideStatus.APPLIED: frozenset(),
         }
     )
 )
@@ -748,8 +723,17 @@ class DifferenceReport:
                 raise ValueError(f"{field_name} must use the {namespace} namespace")
         if self.primary_batch_id == self.fallback_batch_id:
             raise ValueError("primary_batch_id and fallback_batch_id must differ")
-        if self.primary_version_id == self.fallback_version_id:
-            raise ValueError("primary_version_id and fallback_version_id must differ")
+        shared_candidate = self.primary_version_id == self.fallback_version_id
+        if shared_candidate:
+            if (
+                self.version_id != self.primary_version_id
+                or self.threshold_rule_version != "comparison-thresholds.daily-bar-unadjusted.k1.v1"
+            ):
+                raise ValueError(
+                    "shared DifferenceReport versions require the K2 final candidate binding"
+                )
+        elif self.version_id != self.primary_version_id:
+            raise ValueError("legacy DifferenceReport version_id must equal primary_version_id")
         if self.primary_quality_run_id == self.fallback_quality_run_id:
             raise ValueError("primary_quality_run_id and fallback_quality_run_id must differ")
         sha256_fields = (
@@ -781,183 +765,6 @@ class DifferenceReport:
             "report_relative_path",
             _managed_relative(self.report_relative_path, field="report_relative_path"),
         )
-
-
-@dataclass(frozen=True, slots=True)
-class SourceOverride:
-    """One explicit fallback-source override; APPLIED targets a new version only."""
-
-    override_id: EntityId
-    dataset: DatasetKind
-    difference_report_id: EntityId
-    primary_batch_id: EntityId
-    fallback_batch_id: EntityId
-    primary_source: DataUpstream
-    fallback_source: DataUpstream
-    status: SourceOverrideStatus
-    scope_codes: tuple[str, ...]
-    scope_dates: tuple[TradingDate, ...]
-    fields: tuple[str, ...]
-    reason: str
-    created_at: UtcTimestamp
-    approved_at: UtcTimestamp | None
-    approved_by: str | None
-    applied_at: UtcTimestamp | None
-    applied_version_id: EntityId | None
-    field_replacements: tuple[Mapping[str, str], ...] = ()
-    fallback_only_keys: tuple[Mapping[str, str], ...] = ()
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.override_id, EntityId)
-            or self.override_id.namespace != "data_override"
-        ):
-            raise ValueError("override_id must use the data_override namespace")
-        if not isinstance(self.dataset, DatasetKind):
-            raise TypeError("dataset must be a DatasetKind")
-        for field, namespace in (
-            ("difference_report_id", "data_diff"),
-            ("primary_batch_id", "data_batch"),
-            ("fallback_batch_id", "data_batch"),
-        ):
-            value = getattr(self, field)
-            if not isinstance(value, EntityId) or value.namespace != namespace:
-                raise ValueError(f"{field} must use the {namespace} namespace")
-        if self.primary_batch_id == self.fallback_batch_id:
-            raise ValueError("primary_batch_id and fallback_batch_id must differ")
-        if not isinstance(self.primary_source, DataUpstream):
-            raise TypeError("primary_source must be a DataUpstream")
-        if not isinstance(self.fallback_source, DataUpstream):
-            raise TypeError("fallback_source must be a DataUpstream")
-        if self.primary_source == self.fallback_source:
-            raise ValueError("primary and fallback sources must differ")
-        if not isinstance(self.status, SourceOverrideStatus):
-            raise TypeError("status must be a SourceOverrideStatus")
-        object.__setattr__(self, "scope_codes", _tuple_text(self.scope_codes, field="scope_codes"))
-        object.__setattr__(
-            self, "scope_dates", _tuple_trading_dates(self.scope_dates, field="scope_dates")
-        )
-        object.__setattr__(self, "fields", _tuple_text(self.fields, field="fields"))
-        exact_scope = normalize_override_scope(
-            dataset=self.dataset.value,
-            field_replacements=self.field_replacements,
-            fallback_only_keys=self.fallback_only_keys,
-        )
-        summary = (
-            self.scope_codes,
-            tuple(str(item) for item in self.scope_dates),
-            self.fields,
-        )
-        expected_summary = (
-            exact_scope.scope_codes,
-            exact_scope.scope_dates,
-            exact_scope.fields,
-        )
-        if summary != expected_summary:
-            raise ValueError("SourceOverride summary must exactly equal the exact-scope projection")
-        object.__setattr__(self, "field_replacements", exact_scope.field_replacements)
-        object.__setattr__(self, "fallback_only_keys", exact_scope.fallback_only_keys)
-        _text(self.reason, field="reason")
-        if not isinstance(self.created_at, UtcTimestamp):
-            raise TypeError("created_at must be a UtcTimestamp")
-        for field in ("approved_at", "applied_at"):
-            value = getattr(self, field)
-            if value is not None and not isinstance(value, UtcTimestamp):
-                raise TypeError(f"{field} must be a UtcTimestamp or None")
-        if self.approved_by is not None:
-            _text(self.approved_by, field="approved_by")
-        if self.applied_version_id is not None and (
-            not isinstance(self.applied_version_id, EntityId)
-            or self.applied_version_id.namespace != "data_version"
-        ):
-            raise ValueError("applied_version_id must use the data_version namespace")
-
-        if self.status is SourceOverrideStatus.PENDING:
-            if any(
-                value is not None
-                for value in (
-                    self.approved_at,
-                    self.approved_by,
-                    self.applied_at,
-                    self.applied_version_id,
-                )
-            ):
-                raise ValueError("PENDING override cannot carry decision or application facts")
-        elif self.status in {SourceOverrideStatus.APPROVED, SourceOverrideStatus.REJECTED}:
-            if self.approved_at is None or self.approved_by is None:
-                raise ValueError("APPROVED/REJECTED override requires decision facts")
-            if self.applied_at is not None or self.applied_version_id is not None:
-                raise ValueError("APPROVED/REJECTED override cannot carry application facts")
-        elif self.status is SourceOverrideStatus.APPLIED:
-            if self.approved_at is None or self.approved_by is None:
-                raise OverrideNotApplicableError("APPLIED override requires approval facts")
-            if self.applied_at is None or self.applied_version_id is None:
-                raise OverrideNotApplicableError(
-                    "APPLIED override requires application facts and a new version"
-                )
-            if self.applied_at.value < self.approved_at.value:
-                raise ValueError("applied_at must not precede approved_at")
-
-    @classmethod
-    def pending(
-        cls,
-        *,
-        override_id: EntityId,
-        dataset: DatasetKind,
-        difference_report_id: EntityId,
-        primary_batch_id: EntityId,
-        fallback_batch_id: EntityId,
-        primary_source: DataUpstream,
-        fallback_source: DataUpstream,
-        scope_codes: tuple[str, ...],
-        scope_dates: tuple[TradingDate, ...],
-        fields: tuple[str, ...],
-        reason: str,
-        created_at: UtcTimestamp,
-        field_replacements: tuple[Mapping[str, str], ...] = (),
-        fallback_only_keys: tuple[Mapping[str, str], ...] = (),
-    ) -> SourceOverride:
-        """Create a PENDING override without persistence side effects."""
-        return cls(
-            override_id=override_id,
-            dataset=dataset,
-            difference_report_id=difference_report_id,
-            primary_batch_id=primary_batch_id,
-            fallback_batch_id=fallback_batch_id,
-            primary_source=primary_source,
-            fallback_source=fallback_source,
-            status=SourceOverrideStatus.PENDING,
-            scope_codes=scope_codes,
-            scope_dates=scope_dates,
-            fields=fields,
-            reason=reason,
-            created_at=created_at,
-            approved_at=None,
-            approved_by=None,
-            applied_at=None,
-            applied_version_id=None,
-            field_replacements=field_replacements,
-            fallback_only_keys=fallback_only_keys,
-        )
-
-    @property
-    def exact_scope_sha256(self) -> str:
-        """SHA-256 of the normalized authoritative exact scope."""
-        return normalize_override_scope(
-            dataset=self.dataset.value,
-            field_replacements=self.field_replacements,
-            fallback_only_keys=self.fallback_only_keys,
-        ).sha256
-
-    @property
-    def contribution_scope_sha256(self) -> str:
-        """Manifest contribution SHA derived from the authoritative exact scope."""
-        scope = normalize_override_scope(
-            dataset=self.dataset.value,
-            field_replacements=self.field_replacements,
-            fallback_only_keys=self.fallback_only_keys,
-        )
-        return contribution_scope_sha256(dataset=self.dataset.value, scope=scope)
 
 
 # ---------------------------------------------------------------------------
@@ -1076,64 +883,4 @@ def transition_dataset_version(
         content_sha256=content_sha256
         if target is DatasetVersionStatus.VALIDATED
         else version.content_sha256,
-    )
-
-
-def transition_override(
-    override: SourceOverride,
-    target: SourceOverrideStatus,
-    *,
-    at: UtcTimestamp,
-    actor: str,
-    applied_version_id: EntityId | None = None,
-) -> SourceOverride:
-    """Apply the authoritative source-override transition table."""
-    if override.status is SourceOverrideStatus.APPLIED:
-        raise OverrideNotApplicableError(
-            "applied override is immutable",
-            context={"current": override.status.value, "target": target.value},
-        )
-    if override.status is SourceOverrideStatus.REJECTED:
-        raise InvalidDataTransitionError(
-            "rejected override cannot be transitioned",
-            context={"current": override.status.value, "target": target.value},
-        )
-    if (
-        target is SourceOverrideStatus.APPLIED
-        and override.status is not SourceOverrideStatus.APPROVED
-    ):
-        raise OverrideNotApplicableError(
-            "only APPROVED overrides can be APPLIED",
-            context={"current": override.status.value, "target": target.value},
-        )
-    if target not in OVERRIDE_TRANSITIONS[override.status]:
-        raise InvalidDataTransitionError(
-            "source override transition is not allowed",
-            context={"current": override.status.value, "target": target.value},
-        )
-    if target is SourceOverrideStatus.APPLIED:
-        if applied_version_id is None or not isinstance(applied_version_id, EntityId):
-            raise OverrideNotApplicableError("APPLIED override requires a new applied_version_id")
-        if applied_version_id.namespace != "data_version":
-            raise OverrideNotApplicableError(
-                "applied_version_id must use the data_version namespace"
-            )
-        return replace(
-            override,
-            status=target,
-            applied_at=at,
-            applied_version_id=applied_version_id,
-        )
-    if target is SourceOverrideStatus.APPROVED:
-        return replace(
-            override,
-            status=target,
-            approved_at=at,
-            approved_by=actor,
-        )
-    return replace(
-        override,
-        status=target,
-        approved_at=at,
-        approved_by=actor,
     )

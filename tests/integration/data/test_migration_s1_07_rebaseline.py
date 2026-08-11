@@ -10,7 +10,7 @@ from sqlalchemy import inspect, text
 
 from quantking.jobs.adapters.persistence.sqlite import _REPOSITORY_ROOT, create_sqlite_engine
 
-HEAD = "20260808_0013"
+HEAD = "20260810_0014"
 
 
 def _config(database: Path) -> Config:

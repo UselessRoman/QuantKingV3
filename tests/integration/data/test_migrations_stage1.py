@@ -25,9 +25,10 @@ STAGE1_TABLES = {
     "quality_results",
     "difference_reports",
     "source_overrides",
+    "resolution_runs",
 }
 STAGE0_TABLES = {"job_runs", "job_dependencies", "job_events", "audit_records"}
-HEAD = "20260808_0013"
+HEAD = "20260810_0014"
 
 
 def _alembic_config(database: Path) -> Config:

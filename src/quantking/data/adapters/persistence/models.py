@@ -14,21 +14,31 @@ relative identifier.
 
 from __future__ import annotations
 
+from typing import cast
+
 from sqlalchemy import (
     CheckConstraint,
     ForeignKey,
     Index,
     Integer,
     String,
+    Table,
     Text,
     UniqueConstraint,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from quantking.jobs.adapters.persistence.models import JobRunRow
+
 
 class Base(DeclarativeBase):
     """Stage 1 data metadata persistence metadata, separate from the jobs Base."""
+
+
+# ResolutionRun has a real JobRun FK. Copy the complete jobs table metadata so
+# SQLAlchemy create_all and Alembic-backed schemas enforce the same relationship.
+cast(Table, JobRunRow.__table__).to_metadata(Base.metadata)
 
 
 class IngestionBatchRow(Base):
@@ -216,6 +226,56 @@ class DifferenceReportRow(Base):
     sample_spec_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     threshold_rule_version: Mapped[str] = mapped_column(String(64), nullable=False)
     report_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class ResolutionRunRow(Base):
+    __tablename__ = "resolution_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "dataset = 'daily_bar_unadjusted'",
+            name="ck_resolution_runs_daily_only",
+        ),
+        CheckConstraint(
+            "length(input_fingerprint) = 64 AND length(manifest_sha256) = 64",
+            name="ck_resolution_runs_sha_lengths",
+        ),
+        CheckConstraint(
+            "total_decisions >= 0 AND default_decision_count >= 0 "
+            "AND exception_count >= 0 AND conflict_count >= 0 AND blocker_count >= 0 "
+            "AND total_decisions = default_decision_count + exception_count + conflict_count",
+            name="ck_resolution_runs_counts",
+        ),
+        CheckConstraint(
+            "(conflict_count = 0 AND blocker_count = 0 "
+            "AND candidate_version_id IS NOT NULL) "
+            "OR ((conflict_count > 0 OR blocker_count > 0) "
+            "AND candidate_version_id IS NULL)",
+            name="ck_resolution_runs_candidate",
+        ),
+        UniqueConstraint("created_job_id", name="uq_resolution_runs_job"),
+        Index("ix_resolution_runs_created_at", "created_at", "run_id"),
+        Index("ix_resolution_runs_fingerprint", "input_fingerprint"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    dataset: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_job_id: Mapped[str] = mapped_column(
+        ForeignKey("job_runs.job_id", ondelete="RESTRICT"), nullable=False
+    )
+    candidate_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("dataset_versions.version_id", ondelete="RESTRICT"), nullable=True
+    )
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False)
+    rule_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    threshold_rule_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    total_decisions: Mapped[int] = mapped_column(Integer, nullable=False)
+    default_decision_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    exception_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    conflict_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    blocker_count: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
 class SourceOverrideRow(Base):

@@ -62,15 +62,22 @@ class DataCenterReadPort(Protocol):
     def difference_rows(
         self, *, report_id: str, cursor: str | None, limit: int
     ) -> DataCenterPage: ...
-    def list_source_overrides(
+    def list_resolution_runs(
         self,
         *,
-        dataset: str | None,
-        status: str | None,
+        conflicts_only: bool,
         cursor: str | None,
         limit: int,
     ) -> DataCenterPage: ...
-    def get_source_override(self, override_id: str) -> Mapping[str, object]: ...
+    def get_resolution_run(self, run_id: str) -> Mapping[str, object]: ...
+    def resolution_decisions(
+        self,
+        *,
+        run_id: str,
+        conflicts: bool,
+        cursor: str | None,
+        limit: int,
+    ) -> DataCenterPage: ...
     def list_failures(self, *, cursor: str | None, limit: int) -> DataCenterPage: ...
     def list_eod_runs(
         self, *, status: str | None, cursor: str | None, limit: int

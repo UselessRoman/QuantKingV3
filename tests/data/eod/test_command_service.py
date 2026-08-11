@@ -14,6 +14,7 @@ from quantking.jobs.adapters.persistence.sqlite import (
     create_sqlite_engine,
     initialize_database,
 )
+from quantking.jobs.models import FailureInfo, JobStatus
 from quantking.jobs.services import JobService
 
 
@@ -116,3 +117,80 @@ def test_execution_config_rejects_bool_integer_fields(field: str, value: bool) -
 
     with pytest.raises((TypeError, ValueError)):
         EodExecutionConfig(**arguments)  # type: ignore[arg-type]
+
+
+def _finish(jobs: JobService, job_id: str, status: JobStatus) -> None:
+    jobs.transition(job_id, JobStatus.RUNNING, worker_id="test-worker", summary="claimed")
+    if status is JobStatus.SUCCEEDED:
+        jobs.transition(job_id, status, summary="done")
+    elif status in {JobStatus.FAILED, JobStatus.INTERRUPTED}:
+        jobs.transition(
+            job_id,
+            status,
+            failure=FailureInfo("TEST_FAILURE", "stable failure", False),
+            summary="terminal",
+        )
+
+
+@pytest.mark.parametrize("terminal", [JobStatus.FAILED, JobStatus.INTERRUPTED])
+def test_retry_creates_new_claimable_job_with_exact_frozen_link(
+    tmp_path: Path,
+    terminal: JobStatus,
+) -> None:
+    command, jobs = _service(tmp_path)
+    previous = command.enqueue(_request(), idempotency_key="previous", requester="pytest")
+    _finish(jobs, previous.job_id, terminal)
+
+    retry = command.enqueue(
+        _request(),
+        idempotency_key=f"retry-{terminal.value.lower()}",
+        requester="pytest",
+        retry_of_job_id=previous.job_id,
+    )
+
+    assert retry.job_id != previous.job_id
+    persisted = jobs.get_job(retry.job_id)
+    assert persisted.status is JobStatus.PENDING
+    assert persisted.input_manifest["retry_of_job_id"] == previous.job_id
+    assert persisted.upstream_job_ids == ()
+
+
+@pytest.mark.parametrize("terminal", [JobStatus.RUNNING, JobStatus.SUCCEEDED])
+def test_retry_rejects_nonfailed_source_job(tmp_path: Path, terminal: JobStatus) -> None:
+    command, jobs = _service(tmp_path)
+    previous = command.enqueue(_request(), idempotency_key="previous", requester="pytest")
+    _finish(jobs, previous.job_id, terminal)
+
+    with pytest.raises(ValueError, match="failed or interrupted"):
+        command.enqueue(
+            _request(),
+            idempotency_key=f"retry-{terminal.value.lower()}",
+            requester="pytest",
+            retry_of_job_id=previous.job_id,
+        )
+
+
+def test_retry_rejects_changed_request_or_execution_versions(tmp_path: Path) -> None:
+    command, jobs = _service(tmp_path)
+    previous = command.enqueue(_request(), idempotency_key="previous", requester="pytest")
+    _finish(jobs, previous.job_id, JobStatus.FAILED)
+
+    with pytest.raises(ValueError, match="exactly match"):
+        command.enqueue(
+            _request(day=date(2026, 7, 16)),
+            idempotency_key="changed-range",
+            requester="pytest",
+            retry_of_job_id=previous.job_id,
+        )
+
+    changed = EodCommandService(
+        jobs,
+        config=EodExecutionConfig.production(code_version="changed-code"),
+    )
+    with pytest.raises(ValueError, match="exactly match"):
+        changed.enqueue(
+            _request(),
+            idempotency_key="changed-config",
+            requester="pytest",
+            retry_of_job_id=previous.job_id,
+        )

@@ -11,8 +11,8 @@
 | S1-05 | 已主验收 | EOD、Worker、CLI/API、幂等和失败恢复 |
 | S1-06 | 已主验收 | 数据中心 Web |
 | 旧 S1-07A～C1C1-P0 | 已退役 | 真实运行数始终为 0；实现、专用测试和当前文档已删除 |
-| S1-07K1 | D1 东财两组与 R1 腾讯/Sina 四组均 complete；功能验收通过，完整质量门 935 passed，变更未提交 | AKShare 三 upstream 适配、旧来源/assessment 退役、日线单数据集运行时和小样本实测 |
-| S1-07K2 | 未开始 | `ResolutionDecision`、`SourceOverride` 退役、简化恢复、三渠道生产 EOD |
+| S1-07K1 | D1 东财两组与 R1 腾讯/Sina 四组均 complete；功能验收通过，完整质量门 935 passed；已提交 `f98f1d9` | AKShare 三 upstream 适配、旧来源/assessment 退役、日线单数据集运行时和小样本实测 |
+| S1-07K2 | 纯离线实现完成并通过独立主验收；工作树未提交 | `ResolutionDecision`、`SourceOverride` 退役、简化恢复、三渠道生产 EOD |
 | S1-08 | 未开始 | 首个明确范围 DatasetVersion 与 Stage 1 最终验收 |
 
 S1-01～S1-06 的具体证据见本目录对应的 `S1-0x_ACCEPTANCE.md`。旧 S1-07 历史留在 Git 中，不要求新任务维护其密码学合同或状态措辞。
@@ -44,7 +44,7 @@ K1 不实现全市场下载、不写正式数据根、不发布 DatasetVersion�
 - 使用 `ResolutionDecision` 记录选择来源、参与来源、规则版本、原因和差异报告；三个 Raw 永远独立保存。
 - 从 active runtime、API 和 Web 删除 `SourceOverride` 的申请、批准、claim、attempt 和 child-version 工作流；历史数据不原地改写。
 - 在重写生产 EOD 时删除平行 success/failure evidence 和多层 checkpoint 恢复；中断 Job 关闭，新 Job 通过输入指纹复用完整发布。
-- 用限速、超时和有界重试保护公开上游；默认测试继续完全离线。
+- 使用固定超时并保持应用层零自动重试/零静默 fallback；默认测试继续完全离线。
 
 完整任务见 [S1-07K2 任务卡](S1-07K2_TASK.md)。K2 不做分钟/Tick、实时行情、交易账户、自动下单、DataCenter P1 重构或机构级证据链。
 

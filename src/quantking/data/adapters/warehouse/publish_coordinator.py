@@ -143,7 +143,7 @@ class CanonicalPublishCoordinatorRequest:
     rule_version: str
     quality_run_id: EntityId
     empty_result: EmptyResultInfo | None = None
-    source_override: Mapping[str, object] | None = None
+    resolution: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.version, DatasetVersion):
@@ -165,8 +165,8 @@ class CanonicalPublishCoordinatorRequest:
             raise ValueError("quality_run_id must use the data_quality namespace")
         if self.empty_result is not None and not isinstance(self.empty_result, EmptyResultInfo):
             raise TypeError("empty_result must be an EmptyResultInfo or None")
-        if self.source_override is not None and not isinstance(self.source_override, Mapping):
-            raise TypeError("source_override must be a mapping or None")
+        if self.resolution is not None and not isinstance(self.resolution, Mapping):
+            raise TypeError("resolution must be a mapping or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,7 +257,7 @@ class CanonicalPublishCoordinator:
             code_version=request.code_version,
             rule_version=request.rule_version,
             empty_result=request.empty_result,
-            source_override=request.source_override,
+            resolution=request.resolution,
         )
         directory = self._warehouse.publish(warehouse_request)
         # Step 4: read the actual manifest credentials from the on-disk

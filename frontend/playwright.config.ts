@@ -10,7 +10,7 @@ export default defineConfig({
   },
   webServer: {
     command:
-      "uv run --offline --frozen python ../scripts/run_web_e2e_server.py --port 8766 --static-root dist",
+      '"..\\.venv\\Scripts\\python.exe" ..\\scripts\\run_web_e2e_server.py --port 8766 --static-root dist',
     url: "http://127.0.0.1:8766/api/health",
     reuseExistingServer: false,
     timeout: 30_000,

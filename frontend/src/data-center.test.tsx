@@ -202,9 +202,9 @@ describe("Stage 1 data center", () => {
     expect(getData).toHaveBeenCalledWith(expect.stringContaining("cursor=preview-next"));
   });
 
-  it("pages DifferenceReport rows independently and renders full Override lineage", async () => {
+  it("pages DifferenceReport rows and renders bounded resolution exception/conflict views", async () => {
     const reportId = "data_diff:00000000-0000-4000-8000-000000000026";
-    const overrideId = "data_override:00000000-0000-4000-8000-000000000026";
+    const resolutionId = "data_resolution:00000000-0000-4000-8000-000000000026";
     const getData = vi.fn(async (path: string) => {
       if (path.includes("/difference-reports/") && path.includes("/rows?limit=50&cursor=")) {
         return { items: [{ field: "volume" }], next_cursor: null };
@@ -218,20 +218,41 @@ describe("Stage 1 data center", () => {
       if (path.endsWith("/difference-reports")) {
         return { items: [{ report_id: reportId }], next_cursor: null };
       }
-      if (path === `/api/data/source-overrides/${encodeURIComponent(overrideId)}`) {
+      if (path === `/api/data/resolution-runs/${encodeURIComponent(resolutionId)}`) {
         return {
-          override_id: overrideId,
-          exact_scope_sha256: "a".repeat(64),
-          field_replacements: [{ code: "000001.SZ", field: "close" }],
-          fallback_only_keys: [],
-          application: { status: "APPLIED" },
-          attempt: { status: "APPLIED" },
-          child: { version_id: "data_version:child" },
-          audits: [{ action: "override_applied" }],
+          run_id: resolutionId,
+          status: "BLOCKED",
+          default_decision: null,
+          difference_report_ids: [reportId],
+          run_blockers: [],
         };
       }
-      if (path.endsWith("/source-overrides")) {
-        return { items: [{ override_id: overrideId, status: "APPLIED" }], next_cursor: null };
+      if (path.includes("/exceptions?limit=50&cursor=exceptions-next")) {
+        return { items: [{ symbol: "601051.SH", reason_code: "BC_AGREE_B_SELECTED" }], next_cursor: null };
+      }
+      if (path.includes("/conflicts?limit=50&cursor=conflicts-next")) {
+        return { items: [{ symbol: "000051.SZ", reason_code: "NO_TWO_SOURCE_CONSENSUS" }], next_cursor: null };
+      }
+      if (path.includes(`/api/data/resolution-runs/${encodeURIComponent(resolutionId)}/exceptions`)) {
+        return {
+          items: Array.from({ length: 50 }, (_, index) => ({
+            symbol: `600${String(index).padStart(3, "0")}.SH`,
+            reason_code: "AC_AGREE_A_SELECTED",
+          })),
+          next_cursor: "exceptions-next",
+        };
+      }
+      if (path.includes(`/api/data/resolution-runs/${encodeURIComponent(resolutionId)}/conflicts`)) {
+        return {
+          items: Array.from({ length: 50 }, (_, index) => ({
+            symbol: `000${String(index).padStart(3, "0")}.SZ`,
+            reason_code: "NO_TWO_SOURCE_CONSENSUS",
+          })),
+          next_cursor: "conflicts-next",
+        };
+      }
+      if (path.endsWith("/resolution-runs")) {
+        return { items: [{ run_id: resolutionId, status: "BLOCKED" }], next_cursor: null };
       }
       return { datasets: [] };
     });
@@ -242,11 +263,17 @@ describe("Stage 1 data center", () => {
     expect(await screen.findByText("volume")).toBeInTheDocument();
     expect(getData).toHaveBeenCalledWith(expect.stringContaining("cursor=difference-next"));
 
-    fireEvent.click(screen.getByRole("button", { name: "Override" }));
-    fireEvent.click(await screen.findByRole("button", { name: "审计血缘" }));
-    expect(await screen.findByLabelText("Override 完整血缘")).toBeInTheDocument();
-    expect(screen.getByText(/data_version:child/)).toBeInTheDocument();
-    expect(screen.getByText(/override_applied/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "仲裁" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仲裁详情" }));
+    expect(await screen.findByLabelText("仲裁完整血缘")).toBeInTheDocument();
+    expect(screen.getAllByText("AC_AGREE_A_SELECTED")).toHaveLength(50);
+    expect(screen.getAllByText("NO_TWO_SOURCE_CONSENSUS")).toHaveLength(50);
+    fireEvent.click(screen.getByRole("button", { name: "加载更多来源例外" }));
+    fireEvent.click(screen.getByRole("button", { name: "加载更多冲突" }));
+    expect(await screen.findByText("601051.SH")).toBeInTheDocument();
+    expect(await screen.findByText("000051.SZ")).toBeInTheDocument();
+    expect(getData).toHaveBeenCalledWith(expect.stringContaining("cursor=exceptions-next"));
+    expect(getData).toHaveBeenCalledWith(expect.stringContaining("cursor=conflicts-next"));
   });
 
   it("keeps EOD idempotency key stable after deselecting and reselecting a dataset", async () => {

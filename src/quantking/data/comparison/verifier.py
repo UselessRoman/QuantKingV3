@@ -14,8 +14,9 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from quantking.common.ids import EntityId, parse_entity_id
 from quantking.common.time import UtcTimestamp
@@ -25,11 +26,15 @@ from quantking.data.adapters.warehouse.manifest import (
     compute_sha256,
 )
 from quantking.data.comparison.comparator import RowClassification
-from quantking.data.schemas import descriptor_for
+from quantking.data.comparison.thresholds import THRESHOLD_RULE_VERSION
+from quantking.data.models import EmptyResultInfo, LegalEmptyClassification
+from quantking.data.schemas import canonical_code_pattern, descriptor_for
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
 _ROW_DIFFERENCES_FILENAME = "row_differences.json"
 _MANIFEST_SCHEMA_VERSION = "difference-report-manifest.v1"
+_K2_MANIFEST_SCHEMA_VERSION = "difference-report-manifest.k2.v2"
+_K2_BINDING_MODE = "SHARED_RESOLUTION_CANDIDATE"
 
 
 class DifferenceReportVerificationError(Exception):
@@ -72,6 +77,11 @@ class VerifiedDifferenceReport:
     row_differences: list[dict[str, Any]]
     units: tuple[VerifiedDifferenceUnit, ...]
     fallback_only_rows: frozenset[tuple[tuple[str, str], ...]]
+    manifest_schema_version: str = _MANIFEST_SCHEMA_VERSION
+    binding_mode: str | None = None
+    comparison_primary_keys: tuple[tuple[str, ...], ...] | None = None
+    primary_empty_result: dict[str, str] | None = None
+    fallback_empty_result: dict[str, str] | None = None
 
     def scope_matches(
         self, *, codes: frozenset[str], dates: frozenset[str], fields: frozenset[str]
@@ -249,6 +259,20 @@ class DifferenceReportVerifier:
             row_differences=row_differences,
             units=tuple(units),
             fallback_only_rows=fallback_only,
+            manifest_schema_version=str(manifest["manifest_schema_version"]),
+            binding_mode=(
+                None if manifest.get("binding_mode") is None else str(manifest["binding_mode"])
+            ),
+            comparison_primary_keys=(
+                None
+                if manifest.get("comparison_primary_keys") is None
+                else tuple(
+                    tuple(str(value) for value in key)
+                    for key in manifest["comparison_primary_keys"]
+                )
+            ),
+            primary_empty_result=_empty_result_payload(manifest.get("primary_empty_result")),
+            fallback_empty_result=_empty_result_payload(manifest.get("fallback_empty_result")),
         )
 
     def _verify_manifest(
@@ -287,10 +311,69 @@ class DifferenceReportVerifier:
             "total_compared",
             "total_differences",
         }
+        manifest_schema_version = manifest.get("manifest_schema_version")
+        if manifest_schema_version == _K2_MANIFEST_SCHEMA_VERSION:
+            required.update(
+                {
+                    "binding_mode",
+                    "comparison_primary_keys",
+                    "primary_empty_result",
+                    "fallback_empty_result",
+                }
+            )
         if set(manifest) != required:
             raise DifferenceReportVerificationError("manifest fields do not match schema")
-        if manifest["manifest_schema_version"] != _MANIFEST_SCHEMA_VERSION:
+        if manifest_schema_version not in {
+            _MANIFEST_SCHEMA_VERSION,
+            _K2_MANIFEST_SCHEMA_VERSION,
+        }:
             raise DifferenceReportVerificationError("manifest schema version is unsupported")
+        if manifest_schema_version == _K2_MANIFEST_SCHEMA_VERSION and (
+            manifest["binding_mode"] != _K2_BINDING_MODE
+            or manifest["primary_version_id"] != manifest["fallback_version_id"]
+            or manifest["dataset"] != "daily_bar_unadjusted"
+            or manifest["threshold_rule_version"] != THRESHOLD_RULE_VERSION
+        ):
+            raise DifferenceReportVerificationError("K2 shared candidate binding is invalid")
+        comparison_keys = manifest.get("comparison_primary_keys")
+        if manifest_schema_version == _K2_MANIFEST_SCHEMA_VERSION and (
+            not isinstance(comparison_keys, list)
+            or any(
+                not isinstance(key, list)
+                or len(key) != 2
+                or any(not isinstance(value, str) for value in key)
+                for key in comparison_keys
+            )
+        ):
+            raise DifferenceReportVerificationError("K2 comparison scope is invalid")
+        if manifest_schema_version == _K2_MANIFEST_SCHEMA_VERSION:
+            comparison_keys = cast(list[list[str]], comparison_keys)
+            normalized_scope: list[tuple[str, str]] = []
+            for key in comparison_keys:
+                symbol, trade_date_value = key
+                try:
+                    parsed_date = date.fromisoformat(trade_date_value)
+                except ValueError as error:
+                    raise DifferenceReportVerificationError(
+                        "K2 comparison scope is invalid"
+                    ) from error
+                if (
+                    canonical_code_pattern().fullmatch(symbol) is None
+                    or parsed_date.isoformat() != trade_date_value
+                ):
+                    raise DifferenceReportVerificationError("K2 comparison scope is invalid")
+                normalized_scope.append((symbol, trade_date_value))
+            if normalized_scope != sorted(set(normalized_scope)):
+                raise DifferenceReportVerificationError(
+                    "K2 comparison scope must be sorted and unique"
+                )
+            _empty_result_payload(manifest["primary_empty_result"])
+            _empty_result_payload(manifest["fallback_empty_result"])
+        if (
+            manifest_schema_version == _MANIFEST_SCHEMA_VERSION
+            and manifest["primary_version_id"] == manifest["fallback_version_id"]
+        ):
+            raise DifferenceReportVerificationError("legacy DifferenceReport versions must differ")
         if manifest["report_id"] != str(report_id):
             raise DifferenceReportVerificationError("manifest report_id does not match request")
         if manifest["row_differences_file"] != _ROW_DIFFERENCES_FILENAME:
@@ -356,6 +439,10 @@ class DifferenceReportVerifier:
         }
         previous_sort: tuple[tuple[str, ...], str] | None = None
         units: list[VerifiedDifferenceUnit] = []
+        comparison_scope = None
+        if manifest.get("manifest_schema_version") == _K2_MANIFEST_SCHEMA_VERSION:
+            comparison_keys = cast(list[list[str]], manifest["comparison_primary_keys"])
+            comparison_scope = {(item[0], item[1]) for item in comparison_keys}
         for row in rows:
             if not isinstance(row, dict) or set(row) != required:
                 raise DifferenceReportVerificationError("row evidence structure is invalid")
@@ -370,6 +457,17 @@ class DifferenceReportVerifier:
             if not isinstance(primary_key, dict) or set(primary_key) != set(descriptor.primary_key):
                 raise DifferenceReportVerificationError("row evidence primary key is invalid")
             pk = {key: str(primary_key[key]) for key in descriptor.primary_key}
+            if (
+                comparison_scope is not None
+                and (
+                    pk["code"],
+                    pk["trade_date"],
+                )
+                not in comparison_scope
+            ):
+                raise DifferenceReportVerificationError(
+                    "row evidence is outside the K2 comparison scope"
+                )
             field = row["field"]
             if not isinstance(field, str):
                 raise DifferenceReportVerificationError("row evidence field is invalid")
@@ -406,17 +504,22 @@ __all__ = [
 
 
 def _compute_report_sha_from_manifest(manifest: dict[str, object], rows: list[object]) -> str:
+    request = {
+        "dataset": manifest["dataset"],
+        "schema_version": manifest["schema_version"],
+        "primary_source": manifest["primary_source"],
+        "fallback_source": manifest["fallback_source"],
+        "primary_content_sha256": manifest["primary_content_sha256"],
+        "fallback_content_sha256": manifest["fallback_content_sha256"],
+        "threshold_rule_version": manifest["threshold_rule_version"],
+        "sample_spec": manifest["sample_spec"],
+    }
+    if manifest.get("manifest_schema_version") == _K2_MANIFEST_SCHEMA_VERSION:
+        request["comparison_primary_keys"] = manifest["comparison_primary_keys"]
+        request["primary_empty_result"] = manifest["primary_empty_result"]
+        request["fallback_empty_result"] = manifest["fallback_empty_result"]
     payload = {
-        "request": {
-            "dataset": manifest["dataset"],
-            "schema_version": manifest["schema_version"],
-            "primary_source": manifest["primary_source"],
-            "fallback_source": manifest["fallback_source"],
-            "primary_content_sha256": manifest["primary_content_sha256"],
-            "fallback_content_sha256": manifest["fallback_content_sha256"],
-            "threshold_rule_version": manifest["threshold_rule_version"],
-            "sample_spec": manifest["sample_spec"],
-        },
+        "request": request,
         "total_compared": manifest["total_compared"],
         "total_differences": manifest["total_differences"],
         "field_differences": manifest["field_differences"],
@@ -424,3 +527,24 @@ def _compute_report_sha_from_manifest(manifest: dict[str, object], rows: list[ob
     }
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _empty_result_payload(value: object) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"classification", "reason"}:
+        raise DifferenceReportVerificationError("K2 empty result binding is invalid")
+    classification = value["classification"]
+    reason = value["reason"]
+    if not isinstance(classification, str) or not isinstance(reason, str):
+        raise DifferenceReportVerificationError("K2 empty result binding is invalid")
+    try:
+        empty = EmptyResultInfo(
+            classification=LegalEmptyClassification(classification),
+            reason=reason,
+        )
+    except (TypeError, ValueError) as error:
+        raise DifferenceReportVerificationError("K2 empty result binding is invalid") from error
+    if empty.classification is not LegalEmptyClassification.NO_TRADING_SESSION:
+        raise DifferenceReportVerificationError("K2 empty result must be NO_TRADING_SESSION")
+    return {"classification": classification, "reason": reason}

@@ -10,13 +10,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Protocol, Self, cast
+from typing import Any, Protocol, Self
 
 from quantking.common.errors import (
-    DatasetVersionNotFoundError,
     InvalidIdError,
     InvalidTimeError,
-    OverrideNotApplicableError,
 )
 from quantking.common.ids import EntityId, parse_entity_id
 from quantking.common.time import Clock, TradingDate, UtcTimestamp, utc_now
@@ -36,11 +34,13 @@ from quantking.data.models import (
     IngestionBatchStatus,
     QualityRun,
     QualityRunStatus,
-    SourceOverride,
-    SourceOverrideStatus,
 )
-from quantking.data.schemas import descriptor_for
-from quantking.jobs.models import AuditRecord, FailureInfo, JobRun, JobStatus
+from quantking.data.resolution.artifacts import (
+    ResolutionArtifactVerificationError,
+    VerifiedResolutionArtifact,
+)
+from quantking.data.resolution.models import ResolutionRunRecord
+from quantking.jobs.models import FailureInfo, JobRun, JobStatus
 
 DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 100
@@ -66,17 +66,7 @@ class DataRepositoryPort(Protocol):
     def get_version(self, version_id: str) -> DatasetVersion: ...
     def get_quality_run(self, run_id: str) -> QualityRun: ...
     def get_difference_report(self, report_id: str) -> DifferenceReport: ...
-    def get_override(self, override_id: str) -> SourceOverride: ...
-    def find_latest_override_application_binding(
-        self, override_id: str
-    ) -> OverrideBinding | None: ...
-    def find_active_override_application_binding(
-        self, override_id: str
-    ) -> OverrideBinding | None: ...
-    def find_last_override_application_attempt(
-        self, override_id: str
-    ) -> OverrideAttempt | None: ...
-    def list_override_audits(self, override_id: str, *, limit: int) -> list[AuditRecord]: ...
+    def get_resolution_run(self, run_id: str) -> ResolutionRunRecord: ...
     def count_failed_entities(self) -> int: ...
 
     def list_batches_page(
@@ -118,14 +108,13 @@ class DataRepositoryPort(Protocol):
         limit: int,
     ) -> list[DifferenceReport]: ...
 
-    def list_overrides_page(
+    def list_resolution_runs_page(
         self,
         *,
-        dataset: DatasetKind | None,
-        status: SourceOverrideStatus | None,
         before: tuple[str, str] | None,
         limit: int,
-    ) -> list[SourceOverride]: ...
+        conflicts_only: bool = False,
+    ) -> list[ResolutionRunRecord]: ...
 
 
 class DataUnitOfWork(Protocol):
@@ -189,35 +178,12 @@ class VerifiedDifference(Protocol):
     created_at: UtcTimestamp
 
 
-class OverrideBinding(Protocol):
-    application_id: EntityId
-    override_id: EntityId
-    status: str
-    child_version_id: EntityId
-    input_fingerprint: str
-    report_sha256: str | None
-    contribution_scope_sha256: str | None
-    claimed_by: str
-    claimed_at: UtcTimestamp
-    updated_at: UtcTimestamp
-    failure_message: str | None
-
-
-class OverrideAttempt(Protocol):
-    attempt_id: EntityId
-    override_id: EntityId
-    attempt_no: int
-    status: str
-    child_version_id: EntityId
-    input_fingerprint: str
-    claimed_by: str
-    started_at: UtcTimestamp
-    ended_at: UtcTimestamp | None
-    failure_message: str | None
-
-
 class DifferenceVerifierPort(Protocol):
     def verify(self, *, report_id: EntityId) -> VerifiedDifference: ...
+
+
+class ResolutionVerifierPort(Protocol):
+    def verify(self, record: ResolutionRunRecord) -> VerifiedResolutionArtifact: ...
 
 
 class JobListPort(Protocol):
@@ -446,25 +412,26 @@ def _report(item: DifferenceReport) -> Mapping[str, object]:
     }
 
 
-def _override(item: SourceOverride) -> dict[str, object]:
+def _resolution(item: ResolutionRunRecord) -> Mapping[str, object]:
     return {
-        "override_id": str(item.override_id),
+        "run_id": str(item.run_id),
         "dataset": item.dataset.value,
         "status": item.status.value,
-        "difference_report_id": str(item.difference_report_id),
-        "primary_source": item.primary_source.value,
-        "fallback_source": item.fallback_source.value,
-        "primary_batch_id": str(item.primary_batch_id),
-        "fallback_batch_id": str(item.fallback_batch_id),
-        "field_replacements": [dict(value) for value in item.field_replacements],
-        "fallback_only_keys": [dict(value) for value in item.fallback_only_keys],
-        "exact_scope_sha256": item.exact_scope_sha256,
-        "reason": item.reason,
+        "created_job_id": str(item.created_job_id),
+        "candidate_version_id": (
+            None if item.candidate_version_id is None else str(item.candidate_version_id)
+        ),
         "created_at": item.created_at.to_iso(),
-        "approved_at": item.approved_at.to_iso() if item.approved_at else None,
-        "approved_by": item.approved_by,
-        "applied_at": item.applied_at.to_iso() if item.applied_at else None,
-        "applied_version_id": str(item.applied_version_id) if item.applied_version_id else None,
+        "rule_version": item.rule_version,
+        "threshold_rule_version": item.threshold_rule_version,
+        "input_fingerprint": item.input_fingerprint,
+        "artifact_relative_path": item.artifact_relative_path,
+        "manifest_sha256": item.manifest_sha256,
+        "total_decisions": item.total_decisions,
+        "default_decision_count": item.default_decision_count,
+        "exception_count": item.exception_count,
+        "conflict_count": item.conflict_count,
+        "blocker_count": item.blocker_count,
     }
 
 
@@ -533,100 +500,6 @@ def _validate_preview_sort_values(dataset: str, values: Sequence[str]) -> None:
                 raise InvalidDataCenterQueryError("cursor sort key is invalid") from error
 
 
-def _override_provenance(override: SourceOverride, report: DifferenceReport) -> dict[str, object]:
-    selected: dict[tuple[tuple[str, str], ...], set[str]] = {}
-    for unit in override.field_replacements:
-        key = tuple(sorted((name, value) for name, value in unit.items() if name != "field"))
-        selected.setdefault(key, set()).add(unit["field"])
-    contributions: list[dict[str, object]] = [
-        {
-            "primary_key": dict(key),
-            "kind": "FIELD_REPLACEMENT",
-            "fields": sorted(unit_fields),
-        }
-        for key, unit_fields in sorted(selected.items())
-    ]
-    descriptor = descriptor_for(override.dataset.value)
-    inserted_fields = sorted(set(descriptor.field_names) - set(descriptor.primary_key))
-    contributions.extend(
-        {
-            "primary_key": dict(sorted(unit.items())),
-            "kind": "ROW_INSERT",
-            "fields": inserted_fields,
-        }
-        for unit in override.fallback_only_keys
-    )
-    contributions.sort(
-        key=lambda item: (
-            tuple(sorted(cast(Mapping[str, str], item["primary_key"]).items())),
-            str(item["kind"]),
-        )
-    )
-    replacement_cells = 0
-    row_insert_count = 0
-    for item in contributions:
-        if item["kind"] == "FIELD_REPLACEMENT":
-            replacement_cells += len(cast(Sequence[str], item["fields"]))
-        if item["kind"] == "ROW_INSERT":
-            row_insert_count += 1
-    summary = {
-        "field_replacement_cells": str(replacement_cells),
-        "row_insert_count": str(row_insert_count),
-        "affected_primary_key_count": str(len(contributions)),
-    }
-    return {
-        "override_id": str(override.override_id),
-        "difference_report_id": str(report.report_id),
-        "report_sha256": report.report_sha256,
-        "primary": {
-            "source": report.primary_source.value,
-            "batch_id": str(report.primary_batch_id),
-            "version_id": str(report.primary_version_id),
-            "content_sha256": report.primary_content_sha256,
-        },
-        "fallback": {
-            "source": report.fallback_source.value,
-            "batch_id": str(report.fallback_batch_id),
-            "version_id": str(report.fallback_version_id),
-            "content_sha256": report.fallback_content_sha256,
-        },
-        "fallback_contributions": contributions,
-        "contribution_summary": summary,
-        "contribution_scope_sha256": override.contribution_scope_sha256,
-    }
-
-
-def _binding_response(binding: OverrideBinding) -> Mapping[str, object]:
-    return {
-        "application_id": str(binding.application_id),
-        "override_id": str(binding.override_id),
-        "status": binding.status,
-        "child_version_id": str(binding.child_version_id),
-        "input_fingerprint": binding.input_fingerprint,
-        "report_sha256": binding.report_sha256,
-        "contribution_scope_sha256": binding.contribution_scope_sha256,
-        "claimed_by": binding.claimed_by,
-        "claimed_at": binding.claimed_at.to_iso(),
-        "updated_at": binding.updated_at.to_iso(),
-        "failure_message": binding.failure_message,
-    }
-
-
-def _attempt_response(attempt: OverrideAttempt) -> Mapping[str, object]:
-    return {
-        "attempt_id": str(attempt.attempt_id),
-        "override_id": str(attempt.override_id),
-        "attempt_no": attempt.attempt_no,
-        "status": attempt.status,
-        "child_version_id": str(attempt.child_version_id),
-        "input_fingerprint": attempt.input_fingerprint,
-        "claimed_by": attempt.claimed_by,
-        "started_at": attempt.started_at.to_iso(),
-        "ended_at": attempt.ended_at.to_iso() if attempt.ended_at else None,
-        "failure_message": attempt.failure_message,
-    }
-
-
 class DataCenterQueryService:
     """Compose metadata, verified artifacts and bounded Canonical queries."""
 
@@ -636,12 +509,14 @@ class DataCenterQueryService:
         data_uow_factory: DataUnitOfWorkFactory,
         preview: CanonicalPreviewPort,
         difference_verifier: DifferenceVerifierPort,
+        resolution_verifier: ResolutionVerifierPort | None = None,
         jobs: JobListPort,
         clock: Clock | None = None,
     ) -> None:
         self._uow_factory = data_uow_factory
         self._preview = preview
         self._difference_verifier = difference_verifier
+        self._resolution_verifier = resolution_verifier
         self._jobs = jobs
         self._clock = clock
 
@@ -1094,229 +969,97 @@ class DataCenterQueryService:
             )
         return DataCenterPage(tuple(visible), next_cursor)
 
-    def list_source_overrides(
+    def _load_verified_resolution(
+        self, run_id: str
+    ) -> tuple[ResolutionRunRecord, VerifiedResolutionArtifact]:
+        if self._resolution_verifier is None:
+            raise DataCenterReadIntegrityError("resolution verifier is unavailable")
+        try:
+            parsed = parse_entity_id(run_id)
+            if parsed.namespace != "data_resolution" or str(parsed) != run_id:
+                raise InvalidIdError("resolution run identifier is invalid")
+            with self._uow_factory() as uow:
+                record = uow.data.get_resolution_run(run_id)
+            return record, self._resolution_verifier.verify(record)
+        except (InvalidIdError, ResolutionArtifactVerificationError, ValueError) as error:
+            raise DataCenterReadIntegrityError("resolution lineage is invalid") from error
+
+    def list_resolution_runs(
         self,
         *,
-        dataset: str | None = None,
-        status: str | None = None,
+        conflicts_only: bool = False,
         cursor: str | None = None,
         limit: int = DEFAULT_PAGE_LIMIT,
     ) -> DataCenterPage:
         fingerprint = _query_fingerprint(
-            "overrides",
-            {"dataset": dataset, "status": status},
+            "resolutions",
+            {"conflicts_only": conflicts_only},
         )
         parsed = _parse_cursor(
             cursor,
-            "overrides",
+            "resolutions",
             query_fingerprint=fingerprint,
-            stable_namespaces=frozenset({"data_override"}),
+            stable_namespaces=frozenset({"data_resolution"}),
         )
         with self._uow_factory() as uow:
-            rows = uow.data.list_overrides_page(
-                dataset=DatasetKind(dataset) if dataset else None,
-                status=SourceOverrideStatus(status) if status else None,
+            rows = uow.data.list_resolution_runs_page(
                 before=(parsed[0], parsed[1]) if parsed else None,
                 limit=limit + 1,
+                conflicts_only=conflicts_only,
             )
         return self._page(
-            "overrides",
+            "resolutions",
             fingerprint,
             rows,
             limit,
-            _override,
-            lambda x: x.created_at.to_iso(),
-            lambda x: str(x.override_id),
+            _resolution,
+            lambda item: item.created_at.to_iso(),
+            lambda item: str(item.run_id),
         )
 
-    @staticmethod
-    def _validate_override_state_graph(
-        override: SourceOverride,
-        latest_binding: OverrideBinding | None,
-        active_binding: OverrideBinding | None,
-        attempt: OverrideAttempt | None,
-    ) -> None:
-        if latest_binding is None:
-            if active_binding is not None or attempt is not None:
-                raise DataCenterReadIntegrityError(
-                    "override application and attempt presence do not match"
-                )
-            if override.status is SourceOverrideStatus.APPLIED:
-                raise DataCenterReadIntegrityError(
-                    "APPLIED override application binding is missing"
-                )
-            return
-
-        if attempt is None:
-            raise DataCenterReadIntegrityError(
-                "override application and attempt presence do not match"
-            )
-        if (
-            latest_binding.override_id != override.override_id
-            or attempt.override_id != override.override_id
-            or latest_binding.child_version_id != attempt.child_version_id
-            or latest_binding.input_fingerprint != attempt.input_fingerprint
-            or latest_binding.status != attempt.status
-        ):
-            raise DataCenterReadIntegrityError(
-                "override application and attempt lineage do not match"
-            )
-
-        allowed_statuses = {
-            SourceOverrideStatus.PENDING: frozenset(),
-            SourceOverrideStatus.REJECTED: frozenset(),
-            SourceOverrideStatus.APPROVED: frozenset({"FAILED", "CLAIMED", "PUBLISHED"}),
-            SourceOverrideStatus.APPLIED: frozenset({"APPLIED"}),
+    def get_resolution_run(self, run_id: str) -> Mapping[str, object]:
+        record, verified = self._load_verified_resolution(run_id)
+        return {
+            **_resolution(record),
+            "summary": verified.summary,
+            "default_decision": verified.summary["default_decision"],
+            "difference_report_ids": verified.summary["difference_report_ids"],
+            "run_blockers": verified.summary["run_blockers"],
         }
-        if latest_binding.status not in allowed_statuses[override.status]:
-            raise DataCenterReadIntegrityError(
-                f"{override.status.value} override application state is invalid"
-            )
 
-        requires_active = latest_binding.status in {"CLAIMED", "PUBLISHED", "APPLIED"}
-        if requires_active != (active_binding is not None):
-            raise DataCenterReadIntegrityError(
-                "override active application does not match its state"
-            )
-        if active_binding is not None and (
-            active_binding.application_id != latest_binding.application_id
-            or active_binding.override_id != latest_binding.override_id
-            or active_binding.child_version_id != latest_binding.child_version_id
-            or active_binding.input_fingerprint != latest_binding.input_fingerprint
-            or active_binding.status != latest_binding.status
-            or active_binding.report_sha256 != latest_binding.report_sha256
-            or active_binding.contribution_scope_sha256 != latest_binding.contribution_scope_sha256
-            or active_binding.claimed_by != latest_binding.claimed_by
-            or active_binding.claimed_at != latest_binding.claimed_at
-            or active_binding.updated_at != latest_binding.updated_at
-            or active_binding.failure_message != latest_binding.failure_message
-        ):
-            raise DataCenterReadIntegrityError(
-                "override active application is not the latest binding"
-            )
-        if override.status is SourceOverrideStatus.APPLIED and (
-            override.applied_version_id != latest_binding.child_version_id
-            or attempt.child_version_id != latest_binding.child_version_id
-        ):
-            raise DataCenterReadIntegrityError("APPLIED override application binding is invalid")
-
-    def get_source_override(self, override_id: str) -> Mapping[str, object]:
-        try:
-            with self._uow_factory() as uow:
-                override = uow.data.get_override(override_id)
-                latest_binding = uow.data.find_latest_override_application_binding(override_id)
-                active_binding = uow.data.find_active_override_application_binding(override_id)
-                attempt = uow.data.find_last_override_application_attempt(override_id)
-                audits = uow.data.list_override_audits(override_id, limit=100)
-            report, verified = self._load_verified_difference(str(override.difference_report_id))
-            if (
-                override.dataset.value != verified.dataset
-                or override.primary_source is not report.primary_source
-                or override.fallback_source is not report.fallback_source
-                or override.primary_batch_id != report.primary_batch_id
-                or override.fallback_batch_id != report.fallback_batch_id
-            ):
-                raise DataCenterReadIntegrityError(
-                    "override does not match its verified difference report"
-                )
-            self._validate_override_state_graph(
-                override,
-                latest_binding,
-                active_binding,
-                attempt,
-            )
-
-            child_response: Mapping[str, object] | None = None
-            if latest_binding is not None:
-                with self._uow_factory() as uow:
-                    child = uow.data.get_version(str(latest_binding.child_version_id))
-                    child_quality = (
-                        uow.data.get_quality_run(str(child.quality_run_id))
-                        if child.quality_run_id is not None
-                        else None
-                    )
-                if (
-                    child.dataset is not override.dataset
-                    or child.parent_version_id != report.primary_version_id
-                    or child.input_batch_ids
-                    != (override.primary_batch_id, override.fallback_batch_id)
-                    or (
-                        override.approved_at is not None
-                        and child.created_at.value < override.approved_at.value
-                    )
-                ):
-                    raise DataCenterReadIntegrityError(
-                        "override child is not the required direct lineage child"
-                    )
-                if latest_binding.status == "FAILED":
-                    if child.status is not DatasetVersionStatus.FAILED:
-                        raise DataCenterReadIntegrityError(
-                            "FAILED override attempt does not bind a FAILED child"
-                        )
-                elif latest_binding.status == "CLAIMED":
-                    if child.status is not DatasetVersionStatus.BUILDING:
-                        raise DataCenterReadIntegrityError(
-                            "CLAIMED override application does not bind a BUILDING child"
-                        )
-                else:
-                    if (
-                        latest_binding.status not in {"PUBLISHED", "APPLIED"}
-                        or child.status is not DatasetVersionStatus.PUBLISHED
-                        or latest_binding.report_sha256 != report.report_sha256
-                        or latest_binding.contribution_scope_sha256
-                        != override.contribution_scope_sha256
-                        or child_quality is None
-                        or child_quality.status is not QualityRunStatus.PASSED
-                        or child_quality.version_id != child.version_id
-                        or child_quality.run_id != child.quality_run_id
-                        or child_quality.schema_version != child.schema_version
-                        or child_quality.rule_version != child.rule_version
-                        or child_quality.content_sha256 != child.content_sha256
-                    ):
-                        raise DataCenterReadIntegrityError(
-                            "published override child credentials are invalid"
-                        )
-                    manifest = self._preview.verify_manifest_by_id(
-                        version_id=str(child.version_id),
-                        dataset=child.dataset.value,
-                    ).manifest
-                    if manifest.get("source_override") != _override_provenance(override, report):
-                        raise DataCenterReadIntegrityError(
-                            "override child manifest provenance is invalid"
-                        )
-                child_response = _version(child)
-        except (
-            InvalidIdError,
-            DatasetVersionNotFoundError,
-            OverrideNotApplicableError,
-            ManifestIntegrityError,
-            IncompatibleInputError,
-            ValueError,
-        ) as error:
-            if isinstance(error, DataCenterReadIntegrityError):
-                raise
-            raise DataCenterReadIntegrityError("override application lineage is invalid") from error
-
-        result = _override(override)
-        result["application"] = (
-            _binding_response(active_binding) if active_binding is not None else None
+    def resolution_decisions(
+        self,
+        *,
+        run_id: str,
+        conflicts: bool,
+        cursor: str | None,
+        limit: int,
+    ) -> DataCenterPage:
+        kind = "conflicts" if conflicts else "exceptions"
+        resource = f"resolution-{kind}:{run_id}"
+        fingerprint = _query_fingerprint(resource, {"run_id": run_id})
+        parsed = _parse_cursor(
+            cursor,
+            resource,
+            query_fingerprint=fingerprint,
+            stable_namespaces=frozenset({"data_resolution"}),
+            offset_required=True,
         )
-        result["last_application"] = (
-            _binding_response(latest_binding) if latest_binding is not None else None
-        )
-        result["attempt"] = _attempt_response(attempt) if attempt is not None else None
-        result["child"] = child_response
-        result["audits"] = [
-            {
-                "audit_id": audit.audit_id,
-                "actor": audit.actor,
-                "action": audit.action,
-                "occurred_at": audit.occurred_at.to_iso(),
-                "details": dict(audit.details),
-            }
-            for audit in audits
-        ]
-        return result
+        record, verified = self._load_verified_resolution(run_id)
+        rows = verified.conflicts if conflicts else verified.exceptions
+        start = parsed[3] if parsed else 0
+        assert start is not None
+        visible = rows[start : start + limit]
+        next_cursor = None
+        if start + limit < len(rows):
+            next_cursor = _cursor(
+                resource,
+                fingerprint,
+                record.created_at.to_iso(),
+                run_id,
+                offset=start + limit,
+            )
+        return DataCenterPage(tuple(item.to_dict() for item in visible), next_cursor)
 
     def list_eod_runs(
         self,
