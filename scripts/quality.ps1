@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$ToolchainRoot = "E:\Apps\QuantKingV3Toolchain"
+    [string]$ToolchainRoot = "E:\Apps\QuantKingV3Toolchain",
+    [string]$UvCacheDirectory
 )
 
 Set-StrictMode -Version Latest
@@ -27,10 +28,12 @@ $RepositoryRoot = Split-Path -Parent $PSScriptRoot
 $PreviousLocation = Get-Location
 try {
     Set-Location -LiteralPath $RepositoryRoot
-    . (Join-Path $PSScriptRoot "activate-toolchain.ps1") -ToolchainRoot $ToolchainRoot
+    . (Join-Path $PSScriptRoot "activate-toolchain.ps1") `
+        -ToolchainRoot $ToolchainRoot `
+        -UvCacheDirectory $UvCacheDirectory
 
-    $Uv = Join-Path $ToolchainRoot "uv\uv.exe"
-    $Npm = Join-Path $ToolchainRoot "node\24.18.0\node-v24.18.0-win-x64\npm.cmd"
+    $Uv = $env:QUANTKING_UV_EXECUTABLE
+    $Npm = $env:QUANTKING_NPM_EXECUTABLE
 
     Invoke-NativeStep "uv lock check" $Uv @("lock", "--check", "--offline")
     Invoke-NativeStep "frozen dependency sync" $Uv @(
@@ -62,7 +65,9 @@ try {
     Invoke-NativeStep "frontend unit tests" $Npm @("--prefix", "frontend", "run", "test")
     Invoke-NativeStep "frontend production build" $Npm @("--prefix", "frontend", "run", "build")
     Invoke-NativeStep "frontend e2e" $Npm @("--prefix", "frontend", "run", "test:e2e")
-    Invoke-NativeStep "Git whitespace check" "git" @("diff", "--check")
+    Invoke-NativeStep "Git whitespace check" "git" @(
+        "--no-optional-locks", "-c", "core.excludesFile=", "diff", "--check"
+    )
 }
 finally {
     Set-Location -LiteralPath $PreviousLocation

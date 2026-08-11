@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$ToolchainRoot = "E:\Apps\QuantKingV3Toolchain"
+    [string]$ToolchainRoot = "E:\Apps\QuantKingV3Toolchain",
+    [string]$UvCacheDirectory
 )
 
 $UvVersion = "0.11.28"
@@ -16,6 +17,7 @@ $UvExecutable = Join-Path $UvDirectory "uv.exe"
 $NodeExecutable = Join-Path $NodeDirectory "node.exe"
 $NpmExecutable = Join-Path $NodeDirectory "npm.cmd"
 $PythonExecutable = Join-Path $PythonDirectory "python.exe"
+$RepositoryRoot = Split-Path -Parent $PSScriptRoot
 
 foreach ($Executable in @($UvExecutable, $NodeExecutable, $NpmExecutable, $PythonExecutable)) {
     if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
@@ -23,7 +25,26 @@ foreach ($Executable in @($UvExecutable, $NodeExecutable, $NpmExecutable, $Pytho
     }
 }
 
-$env:UV_CACHE_DIR = Join-Path $ToolchainRoot "cache\uv"
+if ([string]::IsNullOrWhiteSpace($UvCacheDirectory)) {
+    if ([string]::IsNullOrWhiteSpace($env:QUANTKING_UV_CACHE_DIR)) {
+        $UvCacheDirectory = Join-Path $ToolchainRoot "cache\uv"
+    }
+    else {
+        $UvCacheDirectory = $env:QUANTKING_UV_CACHE_DIR
+    }
+}
+if (-not [System.IO.Path]::IsPathFullyQualified($UvCacheDirectory)) {
+    $UvCacheDirectory = Join-Path $RepositoryRoot $UvCacheDirectory
+}
+$UvCacheDirectory = [System.IO.Path]::GetFullPath($UvCacheDirectory)
+
+$env:QUANTKING_TOOLCHAIN_ROOT = $ToolchainRoot
+$env:QUANTKING_UV_EXECUTABLE = $UvExecutable
+$env:QUANTKING_NODE_EXECUTABLE = $NodeExecutable
+$env:QUANTKING_NPM_EXECUTABLE = $NpmExecutable
+$env:QUANTKING_PYTHON_EXECUTABLE = $PythonExecutable
+$env:QUANTKING_UV_CACHE_DIR = $UvCacheDirectory
+$env:UV_CACHE_DIR = $UvCacheDirectory
 $env:UV_PYTHON_INSTALL_DIR = $PythonInstallDirectory
 $env:UV_PYTHON_PREFERENCE = "managed"
 
@@ -51,4 +72,8 @@ if ($ActualPython -ne "Python $PythonVersion") {
     throw "Expected Python $PythonVersion, found: $ActualPython"
 }
 
-Write-Output "QuantKing toolchain active in current shell: uv $UvVersion, Python $PythonVersion, Node $NodeVersion, npm $NpmVersion"
+Write-Output (
+    "QuantKing toolchain active in current shell: " +
+    "uv $UvVersion, Python $PythonVersion, Node $NodeVersion, npm $NpmVersion; " +
+    "uv cache $UvCacheDirectory"
+)

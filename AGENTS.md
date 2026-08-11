@@ -68,6 +68,17 @@
 - 使用 `apply_patch` 编辑项目文件；禁止未经授权删除或覆盖用户数据。
 - 不执行 `git reset --hard`、`git checkout --` 等破坏性命令。
 
+## 开发工具与 Git
+
+- 固定工具链根是 `E:\Apps\QuantKingV3Toolchain`。定向 Python/前端命令优先使用
+  `scripts\uv.ps1` 和 `scripts\npm.ps1`，或先点调用 `scripts\activate-toolchain.ps1`；
+  不依赖调用方 PATH，不使用 Codex 内置 Node，也不使用 `E:\Apps\uv\uv.exe`。
+- 完整离线门禁只运行 `scripts\quality.ps1`。共享 uv cache 无写权限时，显式传入
+  `-UvCacheDirectory .uv-cache`；不得把环境 ACL 阻断记录成测试失败或擅自联网补包。
+- Codex 沙箱中的只读 Git 操作使用 `scripts\git-read.ps1`，避免可选 index lock 和不可读
+  用户级 ignore 警告。`git add`、`commit`、分支/标签修改等 Git 元数据写入必须通过工具的
+  沙箱升级机制获得授权；不得修改 `.git` ACL，也不得在没有残留锁时删除 `index.lock`。
+
 ## 提交前最低检查
 
 精确命令已在 Stage 0 固化。最低范围必须包括：

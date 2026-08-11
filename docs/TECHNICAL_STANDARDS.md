@@ -147,7 +147,20 @@ docs/                架构、规范和阶段文档
 
 ## 13. 质量门禁
 
-Stage 0 固化精确命令。目标门禁至少覆盖：
+Stage 0 固化的正式入口是从仓库根运行：
+
+```powershell
+.\scripts\quality.ps1
+```
+
+该入口自行激活 `E:\Apps\QuantKingV3Toolchain` 中锁定的 uv、Python、Node 和 npm，
+不得依赖调用方 PATH。共享 uv cache 因执行环境 ACL 不可写时，使用仓库内 cache 回退：
+
+```powershell
+.\scripts\quality.ps1 -UvCacheDirectory .uv-cache
+```
+
+目标门禁至少覆盖：
 
 ```powershell
 uv lock --check

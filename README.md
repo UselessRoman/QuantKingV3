@@ -47,4 +47,20 @@ Stage 0 已完成。Stage 1 的 S1-01～S1-06、K1 和 K2 已完成主验收；S
 .\scripts\quality.ps1
 ```
 
+定向开发命令统一通过仓库入口运行，避免依赖当前 PowerShell 的 PATH：
+
+```powershell
+.\scripts\uv.ps1 run --offline --frozen pytest tests\test_development_tooling.py -q
+.\scripts\npm.ps1 --prefix frontend run typecheck
+.\scripts\git-read.ps1 status --short
+```
+
+也可以先用 `. .\scripts\activate-toolchain.ps1` 激活当前 PowerShell，再直接调用 `uv`、
+`node` 和 `npm`。固定工具链根是 `E:\Apps\QuantKingV3Toolchain`；不得改用 Codex 内置
+Node 或历史的 `E:\Apps\uv\uv.exe`。共享 uv cache 受当前执行环境 ACL 阻断时，使用
+`.\scripts\quality.ps1 -UvCacheDirectory .uv-cache` 执行同一离线质量门。
+
+Codex 的只读 Git 命令使用 `scripts\git-read.ps1`；Git 元数据写入必须通过明确授权在
+沙箱外执行，不能通过删除不存在的 `index.lock` 或修改仓库 ACL 绕过。
+
 真实网络测试和正式数据根写入必须由用户按任务明确授权；默认测试完全离线。
