@@ -6,9 +6,12 @@
 
 ```mermaid
 flowchart LR
+    BS["BaoStock / 独立服务"] --> RAW["独立 Raw"]
     EM["AKShare / 东财"] --> RAW["独立 Raw"]
     TX["AKShare / 腾讯"] --> RAW
     SN["AKShare / 新浪"] --> RAW
+    LEGACY["旧 XTQuant / DATA_ONLY"] --> IMPORT["受管导入 + SHA"]
+    IMPORT --> RAW
     RAW --> CAN["Canonical 日线"]
     CAN --> QA["质量与跨源比较"]
     QA --> PUB["DatasetVersion 原子发布"]
@@ -34,7 +37,7 @@ Ports
 Adapters
 ```
 
-- AKShare、Qlib、Backtrader、数据库和文件系统依赖只出现在适配器或入口层。
+- BaoStock、AKShare、Qlib、Backtrader、数据库和文件系统依赖只出现在适配器或入口层。
 - Web 不直接读 SQLite、Parquet、日志或供应商对象。
 - 业务层只处理稳定的 Canonical、DatasetVersion、QualityRun、DifferenceReport 等对象。
 
@@ -56,11 +59,11 @@ Adapters
 
 ```text
 手动触发 EOD
-  → 东财(A) + 腾讯(B) 独立抓取
+  → BaoStock(A) + 东财(B) 独立抓取
   → Raw 只追加
   → 统一未复权日线
   → A/B 比较
-  → 异常时新浪(C)第三方判定
+  → 异常时腾讯(C)，仍无共识才调用新浪(D)
   → 两源一致才形成候选
   → ResolutionDecision
   → 质量门
@@ -74,8 +77,9 @@ Stage 1 的生产主链只处理 `daily_bar_unadjusted`。其他历史 schema �
 
 ## 复杂度边界
 
-- 来源模型只包含 `AKSHARE` provider 和 `EASTMONEY/TENCENT/SINA` upstream；不保留候选供应商审批矩阵。
-- A/B/C 仲裁是正常解析，由 `ResolutionDecision` 记录，不经过 `SourceOverride` 审批状态机。
+- 来源模型固定为 `BAOSTOCK`、`AKSHARE/EASTMONEY|TENCENT|SINA`，以及仅用于受管历史导入
+  的 `XTQUANT_LEGACY`；不恢复候选供应商审批矩阵。
+- A/B/C/D 仲裁是正常解析，由 `ResolutionDecision` 记录，不经过 `SourceOverride` 审批状态机。
 - EOD 的权威恢复事实只有冻结 `JobRun`、Raw manifest、DatasetVersion manifest 和 JSON Lines。中断任务失败关闭，新 Job 通过输入指纹复用完整发布。
 - K1/K2 不新增 evidence envelope、签名、claim、attempt、forensic/authoritative 双终态或额外 checkpoint 层。
 - Web/CLI/Worker 复用应用服务；内部简单函数不为了测试而机械包装 Protocol。
@@ -101,7 +105,7 @@ Stage 1 的生产主链只处理 `daily_bar_unadjusted`。其他历史 schema �
 
 ## 状态
 
-Stage 0 已完成。Stage 1 的 S1-01～S1-06、K1 和 K2 已主验收；旧 S1-07 证据链、active
-`SourceOverride` 与平行 EOD evidence 已由 AKShare 三源、`ResolutionDecision` 和简化 EOD
-替换。当前合同见 [Stage 1 合同](stage1/CONTRACTS.md)，下一任务见
-[S1-08](stage1/S1-08_TASK.md)。Stage 1 尚未完成，Stage 2 未开始。
+Stage 0 已完成。Stage 1 的 S1-01～S1-06、K1 和 K2 已主验收；S1-08 首次 AKShare 三源
+正式运行被量额零容差阻断。[S1-07K3](stage1/S1-07K3_TASK.md) 已完成 BaoStock、四源仲裁、
+受管旧数据导入和正式 EOD 的离线实现；代表性实测、旧根实际迁移和新阈值激活尚未完成。
+随后由 [S1-08](stage1/S1-08_TASK.md) 重新执行首发与终验。Stage 1 尚未完成，Stage 2 未开始。

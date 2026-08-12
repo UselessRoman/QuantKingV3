@@ -16,7 +16,7 @@ from quantking.data.adapters.sources.contracts import (
     VolumeUnit,
 )
 from quantking.data.adapters.sources.parameters import DailyBarRequest
-from quantking.data.adapters.sources.registry import source_registry
+from quantking.data.adapters.sources.registry import AKSHARE_RUNTIME_UPSTREAMS, source_registry
 from quantking.data.adapters.sources.units import AKSHARE_UNIT_POLICY_VERSION
 from quantking.data.models import DataProvider, DatasetKind, DataUpstream
 
@@ -86,7 +86,7 @@ def _rows(upstream: DataUpstream) -> list[dict[str, object]]:
     return [row]
 
 
-@pytest.mark.parametrize("upstream", tuple(DataUpstream))
+@pytest.mark.parametrize("upstream", AKSHARE_RUNTIME_UPSTREAMS)
 def test_each_adapter_calls_only_its_fixed_endpoint_once(upstream: DataUpstream) -> None:
     module = FakeModule(_rows(upstream))
     adapter = AkshareDailyBarAdapter(upstream, module_loader=lambda: module, clock=_clock)
@@ -200,7 +200,7 @@ def test_context_without_any_target_rows_is_complete_empty_target() -> None:
 
 def test_registry_has_only_three_daily_akshare_upstreams() -> None:
     registry = source_registry()
-    assert tuple(item.upstream for item in registry) == tuple(DataUpstream)
+    assert tuple(item.upstream for item in registry) == AKSHARE_RUNTIME_UPSTREAMS
     assert {item.provider for item in registry} == {DataProvider.AKSHARE}
     assert {item.dataset for item in registry} == {DatasetKind.DAILY_BAR_UNADJUSTED}
     assert {item.endpoint for item in registry} == {

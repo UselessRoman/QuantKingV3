@@ -9,11 +9,13 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
+from quantking.data.adapters.sources.registry import PROVIDER_UPSTREAM_PAIRS
 from quantking.data.adapters.sources.request_window import AkshareRequestWindow
 from quantking.data.incremental import FetchChunk, validate_fetch_chunk
 from quantking.data.models import BatchFailureKind, DataProvider, DatasetKind, DataUpstream
 
-_RAW_RESPONSE_SCHEMA_VERSION = "akshare-raw-response.v1"
+_AKSHARE_RAW_RESPONSE_SCHEMA_VERSION = "akshare-raw-response.v1"
+_MARKET_DATA_RAW_RESPONSE_SCHEMA_VERSION = "market-data-raw-response.v2"
 
 
 class SourceErrorCode(StrEnum):
@@ -28,6 +30,16 @@ class SourceErrorCode(StrEnum):
     UNEXPECTED_EMPTY = "AKSHARE_UNEXPECTED_EMPTY"
     PARTIAL_RESPONSE = "AKSHARE_PARTIAL_RESPONSE"
     INTERNAL_PROVIDER = "AKSHARE_INTERNAL_PROVIDER"
+    BAOSTOCK_LOGIN_FAILED = "BAOSTOCK_LOGIN_FAILED"
+    BAOSTOCK_QUERY_FAILED = "BAOSTOCK_QUERY_FAILED"
+    BAOSTOCK_SERVICE_REJECTED = "BAOSTOCK_SERVICE_REJECTED"
+    BAOSTOCK_TIMEOUT = "BAOSTOCK_TIMEOUT"
+    BAOSTOCK_DISCONNECTED = "BAOSTOCK_DISCONNECTED"
+    BAOSTOCK_UNEXPECTED_EMPTY = "BAOSTOCK_UNEXPECTED_EMPTY"
+    BAOSTOCK_PARTIAL_RESPONSE = "BAOSTOCK_PARTIAL_RESPONSE"
+    BAOSTOCK_SCHEMA_DRIFT = "BAOSTOCK_SCHEMA_DRIFT"
+    BAOSTOCK_LOGOUT_FAILED = "BAOSTOCK_LOGOUT_FAILED"
+    BAOSTOCK_INTERNAL_PROVIDER = "BAOSTOCK_INTERNAL_PROVIDER"
 
 
 class NetworkReason(StrEnum):
@@ -52,6 +64,16 @@ _MESSAGES: dict[SourceErrorCode, str] = {
     SourceErrorCode.UNEXPECTED_EMPTY: "AKShare upstream returned an unexpected empty response",
     SourceErrorCode.PARTIAL_RESPONSE: "AKShare upstream returned a partial response",
     SourceErrorCode.INTERNAL_PROVIDER: "AKShare provider failed internally",
+    SourceErrorCode.BAOSTOCK_LOGIN_FAILED: "BaoStock login failed",
+    SourceErrorCode.BAOSTOCK_QUERY_FAILED: "BaoStock query failed",
+    SourceErrorCode.BAOSTOCK_SERVICE_REJECTED: "BaoStock service rejected the request",
+    SourceErrorCode.BAOSTOCK_TIMEOUT: "BaoStock session exceeded its hard timeout",
+    SourceErrorCode.BAOSTOCK_DISCONNECTED: "BaoStock service connection was interrupted",
+    SourceErrorCode.BAOSTOCK_UNEXPECTED_EMPTY: "BaoStock returned an unexpected empty response",
+    SourceErrorCode.BAOSTOCK_PARTIAL_RESPONSE: "BaoStock returned a partial response",
+    SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT: "BaoStock response schema changed",
+    SourceErrorCode.BAOSTOCK_LOGOUT_FAILED: "BaoStock logout failed",
+    SourceErrorCode.BAOSTOCK_INTERNAL_PROVIDER: "BaoStock provider failed internally",
 }
 
 _FAILURE_KIND: dict[SourceErrorCode, BatchFailureKind] = {
@@ -64,6 +86,16 @@ _FAILURE_KIND: dict[SourceErrorCode, BatchFailureKind] = {
     SourceErrorCode.UNEXPECTED_EMPTY: BatchFailureKind.UNEXPECTED_EMPTY,
     SourceErrorCode.PARTIAL_RESPONSE: BatchFailureKind.PARTIAL_SOURCE,
     SourceErrorCode.INTERNAL_PROVIDER: BatchFailureKind.INTERNAL,
+    SourceErrorCode.BAOSTOCK_LOGIN_FAILED: BatchFailureKind.NETWORK,
+    SourceErrorCode.BAOSTOCK_QUERY_FAILED: BatchFailureKind.NETWORK,
+    SourceErrorCode.BAOSTOCK_SERVICE_REJECTED: BatchFailureKind.PERMISSION,
+    SourceErrorCode.BAOSTOCK_TIMEOUT: BatchFailureKind.NETWORK,
+    SourceErrorCode.BAOSTOCK_DISCONNECTED: BatchFailureKind.NETWORK,
+    SourceErrorCode.BAOSTOCK_UNEXPECTED_EMPTY: BatchFailureKind.UNEXPECTED_EMPTY,
+    SourceErrorCode.BAOSTOCK_PARTIAL_RESPONSE: BatchFailureKind.PARTIAL_SOURCE,
+    SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT: BatchFailureKind.PARSE,
+    SourceErrorCode.BAOSTOCK_LOGOUT_FAILED: BatchFailureKind.NETWORK,
+    SourceErrorCode.BAOSTOCK_INTERNAL_PROVIDER: BatchFailureKind.INTERNAL,
 }
 
 _RETRYABLE: dict[SourceErrorCode, bool] = {
@@ -76,7 +108,21 @@ _RETRYABLE: dict[SourceErrorCode, bool] = {
     SourceErrorCode.UNEXPECTED_EMPTY: False,
     SourceErrorCode.PARTIAL_RESPONSE: True,
     SourceErrorCode.INTERNAL_PROVIDER: False,
+    SourceErrorCode.BAOSTOCK_LOGIN_FAILED: True,
+    SourceErrorCode.BAOSTOCK_QUERY_FAILED: True,
+    SourceErrorCode.BAOSTOCK_SERVICE_REJECTED: False,
+    SourceErrorCode.BAOSTOCK_TIMEOUT: True,
+    SourceErrorCode.BAOSTOCK_DISCONNECTED: True,
+    SourceErrorCode.BAOSTOCK_UNEXPECTED_EMPTY: False,
+    SourceErrorCode.BAOSTOCK_PARTIAL_RESPONSE: True,
+    SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT: False,
+    SourceErrorCode.BAOSTOCK_LOGOUT_FAILED: True,
+    SourceErrorCode.BAOSTOCK_INTERNAL_PROVIDER: False,
 }
+
+_PARTIAL_CODES = frozenset(
+    {SourceErrorCode.PARTIAL_RESPONSE.value, SourceErrorCode.BAOSTOCK_PARTIAL_RESPONSE.value}
+)
 
 
 class SourceAdapterError(Exception):
@@ -217,10 +263,12 @@ class SourceLineage:
     fetched_at: str
 
     def __post_init__(self) -> None:
-        if self.provider is not DataProvider.AKSHARE:
-            raise ValueError("Stage 1 provider must be AKSHARE")
+        if not isinstance(self.provider, DataProvider):
+            raise TypeError("provider must be a DataProvider")
         if not isinstance(self.upstream, DataUpstream):
             raise TypeError("upstream must be a DataUpstream")
+        if (self.provider, self.upstream) not in PROVIDER_UPSTREAM_PAIRS:
+            raise ValueError("provider/upstream pair is not a fixed Stage 1 source")
         for field in ("endpoint", "library_version", "fetched_at"):
             value = getattr(self, field)
             if not isinstance(value, str) or not value.strip():
@@ -420,7 +468,7 @@ class SupplierResponse:
             raise SourceAdapterError(SourceErrorCode.SCHEMA_DRIFT)
         if self.complete and self.partial_reason is not None:
             raise ValueError("complete response cannot carry partial_reason")
-        if not self.complete and self.partial_reason != SourceErrorCode.PARTIAL_RESPONSE.value:
+        if not self.complete and self.partial_reason not in _PARTIAL_CODES:
             raise ValueError("partial response requires the stable partial code")
         rebuilt = self.from_raw_payload(self.raw_payload, expected_chunk=self.chunk)
         if (
@@ -461,7 +509,11 @@ class SupplierResponse:
         ):
             raise ValueError("upstream_row_count must cover all canonicalizable records")
         envelope = {
-            "schema_version": _RAW_RESPONSE_SCHEMA_VERSION,
+            "schema_version": (
+                _AKSHARE_RAW_RESPONSE_SCHEMA_VERSION
+                if contract.lineage.provider is DataProvider.AKSHARE
+                else _MARKET_DATA_RAW_RESPONSE_SCHEMA_VERSION
+            ),
             "binding": _chunk_payload(chunk),
             "request_window": request_window.to_payload(),
             "contract": _contract_payload(contract),
@@ -511,7 +563,10 @@ class SupplierResponse:
             "provider_payload",
         }:
             raise SourceAdapterError(SourceErrorCode.SCHEMA_DRIFT)
-        if value["schema_version"] != _RAW_RESPONSE_SCHEMA_VERSION:
+        if value["schema_version"] not in {
+            _AKSHARE_RAW_RESPONSE_SCHEMA_VERSION,
+            _MARKET_DATA_RAW_RESPONSE_SCHEMA_VERSION,
+        }:
             raise SourceAdapterError(SourceErrorCode.SCHEMA_DRIFT)
         if value["binding"] != _chunk_payload(expected_chunk):
             raise SourceAdapterError(SourceErrorCode.PARSE)
@@ -544,7 +599,7 @@ class SupplierResponse:
             raise SourceAdapterError(SourceErrorCode.PARSE)
         if complete and partial_reason is not None:
             raise SourceAdapterError(SourceErrorCode.PARSE)
-        if not complete and partial_reason != SourceErrorCode.PARTIAL_RESPONSE.value:
+        if not complete and partial_reason not in _PARTIAL_CODES:
             raise SourceAdapterError(SourceErrorCode.PARSE)
         if (
             isinstance(upstream_row_count, bool)
@@ -556,6 +611,11 @@ class SupplierResponse:
         object.__setattr__(obj, "records", tuple(MappingProxyType(record) for record in records))
         object.__setattr__(obj, "raw_payload", bytes(payload))
         object.__setattr__(obj, "contract", _contract_from_payload(value["contract"]))
+        if (
+            value["schema_version"] == _AKSHARE_RAW_RESPONSE_SCHEMA_VERSION
+            and obj.contract.lineage.provider is not DataProvider.AKSHARE
+        ):
+            raise SourceAdapterError(SourceErrorCode.SCHEMA_DRIFT)
         object.__setattr__(obj, "complete", complete)
         object.__setattr__(obj, "partial_reason", partial_reason)
         object.__setattr__(obj, "chunk", expected_chunk)

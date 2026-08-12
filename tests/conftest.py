@@ -23,6 +23,9 @@ def pytest_configure(config: pytest.Config) -> None:
     """Register every test class that requires explicit external authorization."""
     config.addinivalue_line("markers", "real_external: accesses an authorized external target")
     config.addinivalue_line("markers", "real_akshare: accesses real AKShare upstream services")
+    config.addinivalue_line(
+        "markers", "real_k3_sources: accesses fixed BaoStock and AKShare probe targets"
+    )
     config.addinivalue_line("markers", "real_legacy_data: reads the authorized legacy-data root")
     config.addinivalue_line("markers", "real_backup: writes a real data or backup root")
 
@@ -72,6 +75,7 @@ def block_external_access(
         for marker in (
             "real_external",
             "real_akshare",
+            "real_k3_sources",
         )
     )
     if not network_authorized:
@@ -85,6 +89,7 @@ def block_external_access(
         for marker in (
             "real_external",
             "real_akshare",
+            "real_k3_sources",
             "real_legacy_data",
             "real_backup",
         )

@@ -26,13 +26,23 @@ QuantKing V3 是单用户、本机运行的沪深京 A 股日频量化研究和�
 
 Parquet 保存批量数据，DuckDB 用于查询，SQLite 保存元数据、任务、审计、策略账和对账状态。
 
-## ADR-004：数据源与备用策略
+## ADR-004：数据源与仲裁策略
 
-**状态：已接受（2026-08-08 修订，替代 XTQuant 路线）**
+**状态：已接受（2026-08-12 修订，取代 AKShare 单 provider 路线）**
 
-Stage 1 统一使用 AKShare 作为接入库，并把实际 upstream 作为独立来源：东财为 A 主来源、腾讯为 B 常态互验来源、新浪为 C 异常第三源。A/B 每次比较；任一失败、缺行、质量失败或分歧时调用 C。至少两个 upstream 在冻结阈值内一致才可形成发布候选。
+Stage 1 使用 BaoStock 独立服务和 AKShare 三个明确 upstream。常态采集 BaoStock(A) 与
+AKShare/东财(B)；任一调用失败、缺行、质量失败或字段分歧时，先按受影响证券/日期调用
+AKShare/腾讯(C)，仍无法形成共识时才调用 AKShare/新浪(D)。至少两个独立来源在冻结的字段、
+单位和精度规则内一致，才可形成发布候选；不以简单多数绕过单位、复权或缺行冲突。
 
-结果：三个 upstream 独立进入 Raw；K2 通过 `ResolutionDecision` 按证券/交易日记录选择来源、参与比较来源、规则版本和原因。该决定属于正常解析链，不使用人工备用源审批语义。无两源一致则隔离。XTQuant、BaoStock、Tushare 和 JQData 不再是 Stage 1 生产依赖。
+结果：BaoStock 与三个 AKShare upstream 分别进入 Raw，`ResolutionDecision` 按证券/交易日
+记录选择来源、参与比较来源、规则版本和原因。BaoStock 是常态供数来源，但不是可绕过复核
+直接发布的权威源；AKShare 三源是独立复核/仲裁来源，新浪不得用于全市场常态抓取。没有
+两源一致时隔离。XTQuant/QMT 不再是生产依赖；Tushare 和 JQData 不进入 Stage 1。
+
+首次 AKShare 三源正式 Job 的 OHLC/`pre_close` 一致，而量额存在最大 50 股/50 元级舍入差。
+因此容差必须由 S1-07K3 的 BaoStock、旧 XTQuant 和 AKShare 代表性样本实测后版本化冻结；
+不得修改既有 Raw、把历史失败改写为成功，或仅凭两只证券永久设定全市场阈值。
 
 ## ADR-005：数据范围与分期
 
@@ -120,7 +130,8 @@ Qlib 用于快速研究回测，Backtrader 用于正式事件驱动验收。两�
 
 **状态：已接受**
 
-统一使用 Python 3.12；使用 `uv`、`pyproject.toml` 和锁文件管理解释器与依赖。AKShare 和 Qlib 使用明确锁定版本，不跟随开发分支。
+统一使用 Python 3.12；使用 `uv`、`pyproject.toml` 和锁文件管理解释器与依赖。BaoStock、
+AKShare 和 Qlib 使用明确锁定版本，不跟随开发分支。
 
 ## ADR-015：日志与审计
 
@@ -138,9 +149,16 @@ Qlib 用于快速研究回测，Backtrader 用于正式事件驱动验收。两�
 
 ## ADR-017：旧项目迁移
 
-**状态：已接受**
+**状态：已接受（2026-08-12 修订）**
 
 旧项目 `E:\QuantKing` 不整体搬迁。候选内容按 `REUSE / ADAPT / REWRITE / DISCARD / DATA_ONLY` 审计，并只在目标模块所属阶段迁移。任何代码复用都必须重新验证依赖、数据口径、前视风险、测试和新模块边界。
+
+Stage 0 清单中的 `data/kline/1d/*.parquet` 是 Stage 1 明确指定的 `DATA_ONLY` 候选。迁移必须
+从旧根只读，以独立导入批次复制到 `E:\QuantKingV3Data` 的受管 Raw/staging；先记录源文件
+相对路径、大小、mtime、SHA-256、字段/单位/复权语义和覆盖，再转换为 Canonical 候选。
+旧 XTQuant 只能标识为 `provider=XTQUANT_LEGACY` 的历史来源，不能冒充当前 XTQuant 能力，
+也不能因文件存在而直接发布。至少与 BaoStock 或 AKShare 一个独立来源复核；分歧行进入
+Difference/Resolution，无法形成两源一致时隔离。禁止修改旧项目、整体复制代码或启动 QMT。
 
 ## ADR-018：Stage 1 控制面简化
 
@@ -148,9 +166,13 @@ Qlib 用于快速研究回测，Backtrader 用于正式事件驱动验收。两�
 
 Stage 1 以尽快交付真实、明确范围的未复权日线版本为复杂度边界，不建设通用数据平台或机构级证据系统：
 
-- K1 删除 XTQuant/QMT 生产路线、旧 `DataSource` 候选集合、`SourceCandidateAssessment` 和 24 单元 source×dataset 矩阵；来源只建模为 `provider=AKSHARE` 与三个明确 upstream。
+- K1 删除 XTQuant/QMT 生产路线、旧 `DataSource` 候选集合、`SourceCandidateAssessment` 和
+  24 单元 source×dataset 矩阵；K3 在不恢复该控制面的前提下，把固定来源扩展为
+  `BAOSTOCK`、`AKSHARE/EASTMONEY|TENCENT|SINA` 和仅迁移使用的 `XTQUANT_LEGACY`。
 - K1 的生产运行时只支持 `daily_bar_unadjusted`；其他五类历史 schema 不得驱动 EOD 分支。
-- K2 使用 `ResolutionDecision` 表达 A/B/C 正常仲裁，并退役 `SourceOverride` 的申请、批准、claim、attempt 和 child-version 状态机。人工改判如未来确有需求，必须另立任务和新 DatasetVersion。
+- K2 最初使用 `ResolutionDecision` 表达 A/B/C 正常仲裁；K3 扩展到固定 A/B/C/D，但不改变
+  该领域合同。`SourceOverride` 的申请、批准、claim、attempt 和 child-version 状态机保持
+  退役。人工改判如未来确有需求，必须另立任务和新 DatasetVersion。
 - K2 在改造生产 EOD 时把恢复事实收敛为冻结 `JobRun`、Raw manifest、已发布 DatasetVersion manifest 和 JSON Lines 日志。中断任务标记 `INTERRUPTED`；重试创建新 Job，并以输入指纹复用已经完整发布的版本。不得新增独立的 success/failure evidence、forensic success、authoritative failure 或多层 checkpoint 合同。
 - 已验收的 S1-01～S1-06 代码在 K1/K2 替换前可作为过渡实现存在，但历史验收只证明当时范围，不得覆盖本 ADR 的目标边界。
 

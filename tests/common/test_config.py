@@ -19,6 +19,9 @@ def _write_defaults(path: Path, *, web_port: int = 8765) -> None:
                 'host = "127.0.0.1"',
                 f"port = {web_port}",
                 "",
+                "[eod]",
+                'symbols = ["000001.SZ", "600000.SH"]',
+                "",
                 "[sqlite]",
                 "busy_timeout_ms = 250",
                 "max_attempts = 7",
@@ -80,6 +83,53 @@ def test_load_settings_rejects_unknown_or_empty_prefixed_environment_values(
         load_settings(config_path, environ={"QUANTKING_SECRET_TOKEN": "do-not-read"})
     with pytest.raises(ConfigurationError, match="empty"):
         load_settings(config_path, environ={"QUANTKING_WEB_PORT": "  "})
+
+
+def test_load_settings_accepts_only_reserved_toolchain_process_keys(tmp_path: Path) -> None:
+    config_path = tmp_path / "default.toml"
+    _write_defaults(config_path)
+    toolchain_environment = {
+        "QUANTKING_TOOLCHAIN_ROOT": r"E:\Apps\QuantKingV3Toolchain",
+        "QUANTKING_UV_EXECUTABLE": r"E:\Apps\QuantKingV3Toolchain\uv.exe",
+        "QUANTKING_PYTHON_EXECUTABLE": r"E:\Apps\QuantKingV3Toolchain\python.exe",
+        "QUANTKING_NODE_EXECUTABLE": r"E:\Apps\QuantKingV3Toolchain\node.exe",
+        "QUANTKING_NPM_EXECUTABLE": r"E:\Apps\QuantKingV3Toolchain\npm.cmd",
+        "QUANTKING_UV_CACHE_DIR": str(tmp_path / ".uv-cache"),
+    }
+
+    settings = load_settings(config_path, environ=toolchain_environment)
+
+    assert settings.eod_symbols == ("000001.SZ", "600000.SH")
+    with pytest.raises(ConfigurationError, match="unknown"):
+        load_settings(
+            config_path,
+            environ={**toolchain_environment, "QUANTKING_NOT_RESERVED": "value"},
+        )
+
+
+@pytest.mark.parametrize(
+    "symbols",
+    [
+        "[]",
+        '["000001.SZ", "000001.SZ"]',
+        '["600000.SH", "000001.SZ"]',
+        '["000001.SZ", "601398.SH"]',
+        '["000001", "600000.SH"]',
+    ],
+)
+def test_load_settings_rejects_noncanonical_or_nonrelease_eod_scope(
+    tmp_path: Path, symbols: str
+) -> None:
+    config_path = tmp_path / "default.toml"
+    _write_defaults(config_path)
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(
+        text.replace('symbols = ["000001.SZ", "600000.SH"]', f"symbols = {symbols}"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError):
+        load_settings(config_path, environ={})
 
 
 def test_load_settings_wraps_invalid_path_with_stable_error_chain(tmp_path: Path) -> None:

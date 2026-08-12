@@ -7,6 +7,9 @@ offsite_backup_root = "F:\\QuantKingV3Backups"
 host = "127.0.0.1"
 port = 8765
 
+[eod]
+symbols = ["000001.SZ", "600000.SH"]
+
 [sqlite]
 busy_timeout_ms = 250
 max_attempts = 7

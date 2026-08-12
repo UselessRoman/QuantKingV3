@@ -8,8 +8,22 @@ from quantking.data.adapters.sources.contracts import AmountUnit, VolumeUnit
 from quantking.data.adapters.sources.parameters import is_supported_a_share
 from quantking.data.models import DataUpstream
 
+BAOSTOCK_UNIT_POLICY_VERSION = "baostock-0.9.3-returned-units.v1"
 AKSHARE_UNIT_POLICY_VERSION = "akshare-1.18.83-returned-units.v1"
 _VERIFIED_AKSHARE_VERSION = "1.18.83"
+
+
+def upstream_unit_policy_version(upstream: DataUpstream) -> str:
+    """Return the fixed returned-unit policy version bound to one K3 source."""
+    if upstream is DataUpstream.BAOSTOCK:
+        return BAOSTOCK_UNIT_POLICY_VERSION
+    if upstream in {
+        DataUpstream.EASTMONEY,
+        DataUpstream.TENCENT,
+        DataUpstream.SINA,
+    }:
+        return AKSHARE_UNIT_POLICY_VERSION
+    raise ValueError("upstream has no locked K3 unit policy")
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +81,8 @@ def resolve_returned_units(
 
 __all__ = [
     "AKSHARE_UNIT_POLICY_VERSION",
+    "BAOSTOCK_UNIT_POLICY_VERSION",
     "ReturnedUnitPolicy",
     "resolve_returned_units",
+    "upstream_unit_policy_version",
 ]

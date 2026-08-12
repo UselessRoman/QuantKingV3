@@ -1,157 +1,146 @@
-# S1-08 任务卡：首个正式日线版本与 Stage 1 最终验收
+# S1-08 任务卡：正式历史日线版本与 Stage 1 最终验收
 
-## 状态与授权边界
+## 状态
 
-状态：任务设计完成，未授权执行。所属 Stage：Stage 1。
+状态：首次 AKShare 三源正式运行已失败并保留证据；后续执行暂停，等待
+[S1-07K3](S1-07K3_TASK.md) 完成 BaoStock 接入、四源仲裁重基线和旧 XTQuant 日线
+`DATA_ONLY` 迁移。所属 Stage：Stage 1。Stage 2 未开始。
 
-本任务同时包含少量生产入口收口、一次有界 AKShare 真实运行、写入
-`E:\QuantKingV3Data`、真实版本复验和 Stage 1 最终文档验收。开始任何网络调用或正式数据
-写入前，必须取得用户对本卡“固定运行范围”的明确授权。授权不覆盖失败重试、扩大证券/日期、
-访问 `E:\QuantKing`、访问 F 盘、QMT、券商 SDK、S1-09、Stage 2 或其他阶段。
+本卡不再授权或指导旧的 AKShare 三源方案重跑。K3 未提交并通过独立主验收前，不得创建新的
+S1-08 正式 Job。
 
-## 当前基线
+## 首次正式运行的不可变事实（2026-08-12）
 
-- K1 提交：`f98f1d9`；K2 提交：`0ebf84b`，均已独立主验收。
-- AKShare 锁定为 `1.18.83`；A=东财、B=腾讯、C=新浪。
-- 数据合同和仲裁规则见 [当前合同](CONTRACTS.md)。
-- 2026-08-11 只读盘点时，正式数据根仅有：
-  - `acceptance/`：86 files、约 0.20 MiB，两组 Stage 0 恢复验收；
-  - `validation/s1-07b/`：231 files、约 3.24 MiB，已退役路线的完整/失败审计证据；
-  - 尚无 `metadata/`、`raw/`、`artifacts/` 或 `warehouse/` 正式业务目录。
-- 上述数据根内容体积很小，且包含恢复验收和失败证据；本任务不得删除、覆盖或搬移。
+首次固定范围是 `000001.SZ`、`600000.SH`，目标窗口
+`2026-06-11..2026-08-09`，15 日 lookback 为 `2026-05-27..2026-08-09`。唯一 Job
+`job:4c7c9ecf-ca97-425a-88f1-cd24d7e7c7b5` 终态 `FAILED/RESOLUTION_BLOCKED`：
 
-代码根清理不是阻断项：`.mypy_cache`、Python bytecode、pytest/Ruff cache、`frontend/dist`、
-`frontend/test-results` 和 `tmp` 合计约 43 MiB，可在需要时重建；`.venv` 约 908 MiB、
-`frontend/node_modules` 约 112 MiB，是当前锁定环境。S1-08 默认全部保留，不以清缓存冒充
-数据清理，也不在正式运行前删除可用于诊断的失败产物。
+- 东财、腾讯、新浪实际 endpoint invocation 各 4 次，共 12 次，应用层零重试；锁包源码
+  HTTP 上界估算 24，不冒充实际 HTTP 计数。
+- 东财、腾讯各形成 82 行/2 证券 Raw；新浪形成 41 行与 40 行 Raw；四个单源质量运行均
+  `PASSED`。
+- 5 份 DifferenceReport 形成 82 个决定：default 1、exception 1、conflict 80。
+- OHLC/`pre_close` 没有冲突。东财/腾讯 amount 最大绝对差 50 元；涉及新浪的 volume 最大
+  差 50 股，amount 最大差 50 元。
+- 候选 `data_version:a4403bce-1dd3-4686-a3c6-f50e8a0b7604` 已安全收束为 `FAILED`；没有
+  `PUBLISHED` DatasetVersion 或 Warehouse 发布目录。
+- 首次授权已消耗，失败 Raw、质量、Difference、Resolution 和 Job 日志必须保留，不能修改
+  规则后把旧 Job 改写为成功。
 
-## 固定首发范围
+该次失败证明三源价格一致，也证明全字段零容差不适合直接推广。它不证明 BaoStock、旧
+XTQuant 数据、全市场覆盖或新的比较规则已经可用。
 
-| 项 | 固定值 |
+## K3 前置产物
+
+S1-08R2 开始前必须有以下已提交、已独立验收产物：
+
+- 精确锁定并实测的 BaoStock 适配器、单位/复权/停牌语义和稳定错误合同；
+- `BAOSTOCK + AKSHARE/EASTMONEY|TENCENT|SINA` 固定四来源 EOD 路由；
+- 由代表性真实证据支持的新比较规则版本，历史零容差版本保持可复验；
+- 旧 `E:\QuantKing\data\kline\1d` 全部候选文件的只读清单、受管导入、转换、复核、隔离
+  和缺口报告；
+- 旧根迁移前后指纹一致，正式数据根中每个导入对象可由源相对路径和 SHA-256 追溯；
+- DataCenter 和 release verifier 已支持 BaoStock、三个 AKShare upstream 与
+  `XTQUANT_LEGACY` 血缘；
+- K3 完整离线质量门、真实探针结果和独立验收提交。
+
+## R2 固定范围的形成方式
+
+R2 的范围不能沿用用户估计或旧任务的两只证券。联网/正式写入前由 K3 已验收 manifest 生成
+并由用户授权，至少冻结：
+
+| 项 | 必须冻结的内容 |
 |---|---|
 | dataset/schema | `daily_bar_unadjusted` / `daily_bar_unadjusted.v1` |
-| symbols | `000001.SZ`, `600000.SH`（排序后冻结） |
-| target window | `2026-06-11..2026-08-09`，首尾均包含 |
-| upstream lookback | `2026-05-27..2026-08-09`，15 个自然日 |
-| provider/upstream | AKSHARE / EASTMONEY、TENCENT，异常时 SINA |
-| AKShare | `1.18.83` |
-| publish intent | `PUBLISH_AFTER_QUALITY` |
+| legacy import | 明确 import manifest ID/SHA 与发现、导入、隔离计数 |
+| securities | 实际支持并完成复核的规范代码集合 SHA；不得只写“全 A 股” |
+| historical coverage | 每证券实际最早/最晚日期和全局汇总，不使用估计截止日 |
+| incremental window | 历史 cutoff 后到授权日的明确目标窗口和 lookback |
+| sources | BaoStock、东财；异常时腾讯、仍异常时新浪；历史含 `XTQUANT_LEGACY` |
+| rule versions | 四源路由、单位、比较、质量、代码版本 |
+| network budget | 按来源和 chunk 的 planned/maximum invocation；应用层重试 0 |
 | data root | `E:\QuantKingV3Data` |
-| application retry | 0 |
+| publish intent | `PUBLISH_AFTER_QUALITY` |
 
-目标窗口故意复用 K1 已验证的两只沪深证券和 60 个自然日，既能覆盖两个交易所和腾讯
-`000xxx.SZ` 特殊成交量单位，又不把首个 Stage 1 版本冒充全市场研究数据。
+若全量复核仍有大量未解决冲突，R2 可以发布明确的已复核子集，但必须满足以下两点：范围由
+manifest 精确列出，且所有排除项在迁移报告中逐类守恒。不得把子集称为全市场全历史。
 
-## 网络预算
+## 实现与执行步骤
 
-生产 chunk 固定为每次 1 个证券、最多 31 个自然日。正常 A/B 路径各为 4 次 AKShare
-函数调用，共 8 次；C 只在异常时调用，最多再 4 次。必须在代码中加入先计划后执行的预算
-守卫：
+### 1. 离线预检
 
-- 总 AKShare endpoint invocation 最多 12 次；
-- C 的全部受影响 span 先计算并分块，若预计超过剩余 4 次预算，则在首次 C 调用前以
-  `NETWORK_BUDGET_EXCEEDED` 失败；
-- 应用层零自动重试，失败后不得在同一授权下重跑；
-- 锁定源码下，东财每次至多 1 个 HTTP 请求，腾讯至多 3 个，新浪至多 2 个，因此整个
-  任务预计原始 HTTP 上限为 24；package contract 变化必须在联网前阻断。
+- `scripts/quality.ps1` 完整离线通过，所有真实 marker 排除。
+- dry-run 只读输出 K3 产物、输入指纹、证券集合 SHA、历史/增量 coverage、A/B chunks、C/D
+  最大异常 chunks、调用预算和目标目录；零网络、零新数据库/Raw。
+- 正式数据根中的首次失败、Stage 0 acceptance/validation 和 K3 导入证据均保留；出现未知
+  数据、悬挂迁移或数据库 revision 不一致即停止。
+- release verifier 先对 K3 import manifest 和所有拟复用 Raw 做只读复验。
 
-预算统计、实际 endpoint 调用和实际 upstream 请求数必须写入 Job 日志和最终验收报告。
+### 2. 创建唯一 R2 Job
 
-## 实现任务
+- idempotency key 必须绑定全部冻结输入，不能复用首次失败 key。
+- 由正式 Web/CLI 共用的 `EodCommandService` enqueue，并由正式 Worker 执行；不允许测试 fake、
+  直接适配器调用或人工写数据库绕过 Job。
+- 历史已复核对象按 manifest 合并；增量范围正常调用 BaoStock A 与东财 B，异常范围才逐级
+  调腾讯 C、新浪 D。
+- 所有调用在网络前完成预算 preflight；预算不足、单源失败或质量失败按合同停止/仲裁，应用层
+  不自动重试，不在同一授权下扩大范围。
+- 成功只产生一个最终候选和一个 `PUBLISHED DatasetVersion`；失败保留现场并收束候选，不能
+  发布半成品。
 
-### 1. 让生产范围显式可执行
+### 3. 独立只读复验
 
-- 在严格配置合同加入 `[eod]`，默认且唯一首发 scope 为上述两个 symbol；拒绝空、重复、
-  非规范代码、非 K1 单位白名单代码和未知字段。
-- `EodExecutionConfig.production` 从已验证设置构建 scope；冻结 config manifest 和输入指纹
-  必须包含精确 scope，不能从数据库或“latest”动态选择。
-- CLI 的 `eod-enqueue` 增加显式 `--start-date/--end-date`，保留单日 `--trade-date` 兼容；
-  两种形式互斥。Web/API 继续调用同一个 `EodCommandService`。
-- runtime import、CLI `--help` 和 enqueue 阶段不得访问网络或创建 Raw。
+`scripts/verify_s1_08_release.py --version-id <explicit-id>` 只接受当前 data root 的规范 ID，
+拒绝 `latest`、路径或 SQL，并至少复验：
 
-### 2. 固化有界网络与预检
+- 数据库 revision、Job/Version 终态、manifest/`COMPLETE`、文件集合与内容 SHA；
+- import manifest、旧源相对路径/SHA、发现/导入/隔离计数守恒和旧根只读证明；
+- 证券集合 SHA、每证券 coverage、主键唯一、确定排序、OHLC、`pre_close`、非负量额和最终
+  QualityRun `PASSED`；
+- 每个已发布行的两源共识、实际差值、规则版本和选择来源；未复核/冲突行不在版本中；
+- 全部实际 BaoStock/AKShare Raw、未调用 C/D 不存在伪 batch、预算 planned/actual 守恒；
+- DifferenceReport、ResolutionRun/Decision、默认/例外/冲突、失败候选和发布血缘；
+- DataCenter 以显式 version 有界展示覆盖、来源、质量、差异、迁移缺口与预览，且不泄露绝对
+  路径或供应商载荷；
+- verifier 以只读方式运行，正式数据根前后文件集合、mtime、大小和 SHA 不变。
 
-- 在 source port/ingestion 边界实现 endpoint invocation 预算，而不是只在脚本中计数。
-- 新增只读 dry-run 计划，输出 scope、target/upstream window、A/B chunk、最大 C chunk、
-  版本/规则和目标 data root；dry-run 不创建数据库、不写目录、不导入调用 AKShare。
-- 联网前核实数据根仍无 `metadata/raw/artifacts/warehouse`；若出现未知业务数据则停止，不
-  自动迁移、覆盖或清理。
-- 首次创建 `metadata/quantking.db` 时升级到唯一 head `20260810_0014`；迁移失败保留现场，
-  不继续采集。
+### 4. 幂等、恢复和 Web
 
-### 3. 执行唯一正式 Job
+- 同一 idempotency key 重复 enqueue 返回原 Job，零网络、零新版本。
+- 新 key 但相同冻结输入只在深验完整 `PUBLISHED` manifest 后复用同一 version，零网络。
+- 中断 Job 标记 `INTERRUPTED`；用户另行授权的新 Job 才能重试，不续跑旧 Job。
+- DataCenter 同时显示历史导入覆盖、服务源覆盖、未复核/冲突计数和实际来源健康，不把
+  “有 Raw”展示为“已发布”。
 
-1. 保存 dry-run 输出和数据根预检清单。
-2. 使用稳定 idempotency key `s1-08-first-release-20260611-20260809-v1` enqueue。
-3. 由正式 Worker 执行一次；不得用测试 fake 或直接调用适配器绕过 Job。
-4. A/B 正常一致时 C 必须为 0；如触发 C，只允许任务实际计算出的受影响范围且受预算约束。
-5. 成功时只发布一个最终 `DatasetVersion`；失败时保留 Raw、日志和失败候选，不修改为成功。
+## Stage 1 最终验收
 
-### 4. 独立复验
+必须全部满足：
 
-新增只读 `scripts/verify_s1_08_release.py --version-id <explicit-id>`。脚本只接受当前 data root
-中的显式 ID，不接受 `latest` 或任意路径，至少复验：
+- 至少一个明确证券集合和日期范围的未复权日线版本处于 `PUBLISHED`。
+- 旧项目全部候选文件均被发现、导入或以明确读取/语义原因隔离，计数和字节守恒；旧项目未
+  被修改，未启动 XTQuant/QMT。
+- 发布版本中每一行至少有两个独立来源在冻结规则内一致；容差没有掩盖缺行、复权/单位不明
+  或质量失败。
+- BaoStock+东财正常路径以及腾讯/新浪逐级异常路径有真实或明确范围证据，调用和失败受预算
+  约束；新浪不承担常态全量抓取。
+- Raw、导入、质量、Difference、Resolution、Warehouse 和 Job 血缘可由独立 verifier 重建。
+- 两种幂等路径零网络且不产生新版本；失败批次不污染已发布版本。
+- 北交所、退市、复权、公司行动、历史 ST/停牌和动态股票池中仍未覆盖的内容逐项列出，禁止
+  宣称 Stage 2 研究就绪。
+- 真实运行后再次完成锁文件、Ruff、format、mypy、全部离线 pytest、前端 typecheck/unit/
+  build、Playwright、Markdown 和 `git diff --check`。
+- 新建 `docs/stage1/S1-08_ACCEPTANCE.md`，记录实际版本 ID、coverage、来源/迁移计数、质量门和
+  保留缺口。只有主 agent 独立复验通过，才能声明 Stage 1 完成。
 
-- 数据库 revision、Job 终态、DatasetVersion 为 `PUBLISHED`；
-- manifest/`COMPLETE`、内容 SHA、文件集合和数据库交叉绑定；
-- scope、target window、实际 coverage、row count、唯一键和固定排序；
-- OHLC、`pre_close`、非负量额、单位和最终质量 `PASSED`；
-- 全部实际 Raw batch、provider/upstream/endpoint、15 日 lookback 和 Job 绑定；
-- DifferenceReport、ResolutionRun、默认决定、例外/冲突、C 实际范围；
-- 无冲突行进入发布版本，无 BUILDING/VALIDATED 悬挂候选；
-- DataCenter 对显式 version 的版本、批次、质量、差异、resolution 和分页预览可读。
+## 授权边界
 
-验收脚本输出规范 JSON 到控制台；只有经用户授权后才可把最终报告写入正式 data root。
+当前决定只授权修改任务卡和文档，不自动授权：
 
-### 5. 幂等与 Web 验收
+- 安装 BaoStock 或连接 BaoStock/AKShare；
+- 读取 `E:\QuantKing` 或写 `E:\QuantKingV3Data`；
+- 执行 K3/S1-08 真实探针、全量复核或失败重试；
+- 访问 F 盘、启动 QMT/旧项目/券商客户端；
+- 开始 Stage 2。
 
-- 同一 idempotency key 重复 enqueue：返回原 Job，`created=false`，零网络、零新版本。
-- 使用新 idempotency key 但完全相同冻结输入创建新 Job：Worker 严格复验并复用同一个
-  PUBLISHED version，零 upstream 调用。
-- DataCenter Web 必须通过显式版本展示 coverage、来源批次、质量、DifferenceReport、
-  resolution 摘要/例外/冲突和预览；浏览器不加载完整原始表或绝对路径。
-
-## 验收与交付
-
-功能验收必须同时满足：
-
-- 唯一正式 Job 成功，或严格复用 Job 成功；至少一个明确范围版本处于 `PUBLISHED`。
-- 两只证券的实际交易日数据全部位于目标窗口；不要求周末产生行，也不预设 row count。
-- 每个发布行至少有两个 upstream 零容差一致；无共识即整项不通过。
-- Raw、质量、Difference、Resolution、Warehouse 和 Job 血缘完整可重建。
-- 两种幂等路径均为零网络且不产生新发布版本。
-- DataCenter API/Web 对真实版本可查询，失败和缺口明确展示。
-- 北交所、退市、复权、公司行动、历史 ST/停牌和动态股票池继续列为未覆盖，禁止宣称
-  Stage 2 研究就绪。
-
-代码变更后先完成全部离线质量门，再申请真实授权；真实运行结束后再重跑不访问网络的
-完整质量门。最终创建 `docs/stage1/S1-08_ACCEPTANCE.md`，更新本目录 README、
-`docs/ROADMAP.md` 和根 README。只有主 agent 独立复验全部通过，才可声明 Stage 1 完成。
-
-## 固定质量门
-
-- `uv lock --check` 与 frozen sync；
-- Ruff lint/format、mypy、架构边界；
-- 全部离线 pytest（排除所有 real marker）；
-- frontend typecheck、unit、production build、关键 Playwright；
-- Markdown links、`git diff --check`；
-- S1-08 dry-run/预算/真实 verifier 的正负合同；
-- 历史迁移可从空库升级到 0014，历史迁移字节不改。
-
-## 建议授权原文
-
-> 授权执行 S1-08：允许在 `E:\QuantKingV3Data` 保留既有 acceptance/validation 内容并创建
-> metadata、Raw、artifact、日志和 Warehouse；允许仅对 `000001.SZ`、`600000.SH` 执行
-> `2026-06-11..2026-08-09` 目标窗口及固定 15 日 lookback 的 AKShare 东财/腾讯/异常时新浪
-> 日线调用；AKShare endpoint invocation 总计最多 12 次、锁定源码预计 HTTP 总计最多
-> 24 次、应用层零重试。失败后停止并报告，不自动重跑或扩大范围；不访问旧项目或 F 盘，
-> 不启动 QMT，不连接券商，不开始 Stage 2。
-
-## 明确不在范围
-
-- 清理或迁移既有 Stage 0/S1-07B 验收证据；
-- 全市场、全历史、北交所、退市证券或其他 symbol；
-- 复权、公司行动、交易状态、动态股票池、指数成分；
-- F 盘备份或恢复演练；
-- 调度器、自动重试、人工 override、券商接口；
-- Stage 2 及以后工作。
+实际执行必须在 dry-run 后由用户按固定源根、目标根、证券/日期、调用预算、写入字节和零重试
+条件重新授权。

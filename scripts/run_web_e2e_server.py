@@ -13,7 +13,9 @@ from unittest.mock import patch
 import pyarrow as pa
 import uvicorn
 
+from quantking.common.config import AppSettings
 from quantking.common.ids import EntityId, new_entity_id
+from quantking.common.paths import RuntimePaths
 from quantking.common.time import TradingDate, utc_now
 from quantking.data.adapters.canonical_schema import canonical_schema
 from quantking.data.adapters.persistence.sqlite import (
@@ -386,7 +388,27 @@ def main() -> int:
         )
         eod = EodCommandService(
             jobs,
-            config=EodExecutionConfig.production(code_version="playwright"),
+            config=EodExecutionConfig.production(
+                code_version="playwright",
+                settings=AppSettings(
+                    paths=RuntimePaths(
+                        code_root=Path.cwd().resolve(),
+                        data_root=data_root.resolve(),
+                        offsite_backup_root=(
+                            data_root.parent / f"{data_root.name}-offsite"
+                        ).resolve(),
+                    ),
+                    web_host="127.0.0.1",
+                    web_port=args.port,
+                    sqlite_busy_timeout_ms=250,
+                    sqlite_max_attempts=7,
+                    sqlite_retry_base_delay_ms=10,
+                    sqlite_retry_cap_delay_ms=160,
+                    sqlite_retry_jitter_ratio=0.0,
+                    job_heartbeat_min_interval_ms=1000,
+                    job_progress_min_interval_ms=250,
+                ),
+            ),
             base_resolver=_BaseResolver(),
         )
         app = create_app(

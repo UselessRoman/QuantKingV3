@@ -27,6 +27,7 @@ from quantking.data.models import (
 
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _MANAGED_RELATIVE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./=-]*\Z")
+S108_DAILY_RULE_VERSION = "quality-rules.daily-bar-first-release.v1"
 
 
 def _sha256(value: str, *, field_name: str) -> str:
@@ -194,7 +195,7 @@ class QualityRequest:
         if self.empty_result is not None and not isinstance(self.empty_result, EmptyResultInfo):
             raise TypeError("empty_result must be an EmptyResultInfo or None")
         # Dataset-specific required reference data.
-        required = _required_reference_data(self.dataset)
+        required = _required_reference_data(self.dataset, self.rule_version)
         missing = required - set(self.reference_data)
         if missing:
             raise ValueError(
@@ -234,8 +235,12 @@ class QualityRequest:
         }
 
 
-def _required_reference_data(dataset: DatasetKind) -> frozenset[str]:
+def _required_reference_data(dataset: DatasetKind, rule_version: str) -> frozenset[str]:
     """Return the reference data keys required for the dataset's blocking rules."""
+    if rule_version == S108_DAILY_RULE_VERSION:
+        if dataset is not DatasetKind.DAILY_BAR_UNADJUSTED:
+            raise ValueError("S1-08 daily rule version supports daily_bar_unadjusted only")
+        return frozenset()
     if dataset is DatasetKind.DAILY_BAR_UNADJUSTED:
         return frozenset({"exchange_calendar"})
     if dataset is DatasetKind.ADJUSTMENT_FACTOR:
@@ -362,6 +367,7 @@ class QualityRunArtifact:
 
 
 __all__: tuple[str, ...] = (
+    "S108_DAILY_RULE_VERSION",
     "QualityOutcomeResult",
     "QualityRequest",
     "QualityRunArtifact",

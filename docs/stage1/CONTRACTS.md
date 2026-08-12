@@ -1,9 +1,11 @@
 # Stage 1 当前合同
 
-本文是 Stage 1 当前数据、质量、来源和发布合同的唯一入口。发生冲突时，仍以
+本文是 Stage 1 当前接受的数据、质量、来源和发布合同入口。发生冲突时，仍以
 `docs/DECISIONS.md`、`docs/IMPLEMENTATION_PLAN.md` 和 `docs/TECHNICAL_STANDARDS.md`
 为准。S1-01～S1-06 的验收报告只证明历史交付范围，K1/K2 已接受的简化合同覆盖其中
 冲突的 XTQuant、assessment、`SourceOverride` 和旧 EOD evidence 描述。
+[S1-07K3](S1-07K3_TASK.md) 的 BaoStock 与旧数据受管迁移已离线实现；未完成的真实实测和旧根迁移
+不得由合成证据替代。
 
 ## 范围
 
@@ -17,15 +19,19 @@
 
 ## 固定来源
 
-| 角色 | provider | upstream | AKShare 1.18.83 endpoint | 调用时机 |
-|---|---|---|---|---|
-| A | AKSHARE | EASTMONEY | `stock_zh_a_hist` | 每次 |
-| B | AKSHARE | TENCENT | `stock_zh_a_hist_tx` | 每次 |
-| C | AKSHARE | SINA | `stock_zh_a_daily` | 仅 A/B 异常 |
+| 角色 | provider / upstream | 接口 | 调用时机 |
+|---|---|---|---|
+| A | BAOSTOCK / BAOSTOCK | `query_history_k_data_plus` | 正常 EOD 每次 |
+| B | AKSHARE / EASTMONEY | `stock_zh_a_hist` | 正常 EOD 每次 |
+| C | AKSHARE / TENCENT | `stock_zh_a_hist_tx` | A/B 异常时 |
+| D | AKSHARE / SINA | `stock_zh_a_daily` | 仍无两源一致时 |
+| X | XTQUANT_LEGACY / XTQUANT | 受管导入对象 | 仅旧历史迁移 |
 
-每个 Raw 批次必须分别记录 provider、upstream、endpoint、AKShare 版本、采集时间、目标范围、
-实际上游范围、请求参数、row count、内容 SHA 和 Job。不得把三个 upstream 合并为一个来源，
-也不得恢复 `PRIMARY/FALLBACK` 审批、source×dataset 能力矩阵或静默替换。
+每个 Raw/导入批次必须分别记录 provider、upstream、endpoint/导入格式、库版本、采集或导入
+时间、目标范围、实际范围、请求参数或源文件 SHA、row count、内容 SHA 和 Job。不得把三个
+AKShare upstream 合并为一个来源，也不得恢复 `PRIMARY/FALLBACK` 审批、source×dataset
+能力矩阵或静默替换。BaoStock 包版本、返回单位和不复权语义由 K3 实测后冻结；未知版本或
+字段合同稳定拒绝。
 
 冻结单位策略为 `akshare-1.18.83-returned-units.v1`：东财成交量为手，新浪为股；腾讯
 `000xxx.SZ` 为手，其余已验证沪深白名单代码段为股；三者成交额均为元。Raw 数值原样保存，
@@ -35,9 +41,13 @@ Canonical 标准化层才把手乘 100。未知 AKShare 版本或代码段稳定
 `pre_close` 后再裁回目标窗口。Raw manifest 同时绑定 target/upstream 窗口和
 `lookback_days=15`。空结果、网络失败、限流、schema 漂移和合法非交易日必须分开建模。
 
+旧 XTQuant 文件必须先逐文件复制为受管不可变导入对象，源根前后只读指纹一致；转换层明确
+记录原字段、单位、复权和日期语义。未确认、未复核或 BaoStock 不支持的证券/日期保留为
+迁移缺口，不静默丢弃，也不进入发布候选。
+
 ## 质量与仲裁
 
-每个 upstream 的 Canonical 候选先独立检查：
+每个来源的 Canonical 候选先独立检查：
 
 - schema、类型、主键唯一和固定排序；
 - `low <= open/close <= high`；
@@ -45,17 +55,23 @@ Canonical 标准化层才把手乘 100。未知 AKShare 版本或代码段稳定
 - 请求范围、日期覆盖、空结果语义和内容 SHA；
 - 单源 `QualityRun` 必须为 `PASSED` 才能参与比较。
 
-跨源阈值固定为 `comparison-thresholds.daily-bar-unadjusted.k1.v1`；OHLC、`pre_close`、
-成交量和成交额的 absolute/relative 容差均为 0。
+历史阈值 `comparison-thresholds.daily-bar-unadjusted.k1.v1` 对全部字段零容差，只绑定首次
+失败 Job，不得修改。K3 必须用 BaoStock、旧 XTQuant 和 AKShare 代表性实测形成新的不可变
+规则版本；OHLC/`pre_close` 默认仍为零容差，量额若采用容差必须使用十进制定点比较、记录
+实际差值和阈值，并覆盖边界正负测试，不得通过修改 Raw 或 Canonical 舍入来制造一致。
 
-1. A/B 都通过且逐行一致时选择 A，C 零调用。
+1. EOD 的 A/B 都通过且一致时选择 A，C/D 零调用。
 2. A/B 任一调用失败、质量失败、缺行或字段分歧时，只为受影响证券/日期范围调用 C。
-3. AB、AC、BC 任意两源一致即可形成决定；在一致集合内按 A、B、C 选择。
-4. 无两源一致时写冲突并阻止发布；不得制造不存在的交易日或伪造缺失行。
-5. 合法三方空结果可以形成零行共识；调用/质量失败不能冒充合法空。
+3. 调用 C 后仍无任意两源一致，才允许对剩余受影响范围调用 D。
+4. 任意两个独立来源一致即可形成决定；在一致集合内按 A、B、C、D 选择。
+5. 历史导入先比较 X 与 A；一致时可选择 X。分歧时按 B、C、D 逐级仲裁，未获两源支持的
+   X 行不得发布。
+6. 无两源一致时写冲突并阻止发布；不得制造不存在的交易日或伪造缺失行。
+7. 合法多方空结果可以形成零行共识；调用/质量失败不能冒充合法空。
 
 不可变 `ResolutionRun`/`ResolutionDecision` 使用版本级默认摘要加行级例外和冲突，绑定
-Job、输入指纹、全部实际 Raw batch/content SHA、DifferenceReport、规则版本和 C 请求范围。
+Job、输入指纹、全部实际 Raw/import batch/content SHA、DifferenceReport、规则版本和 C/D
+请求范围。
 SQLite 只保存摘要、相对路径、SHA 和计数；行级 artifact 使用规范 JSON Lines。
 
 ## 发布、恢复与查询

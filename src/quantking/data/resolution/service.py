@@ -286,6 +286,29 @@ class SourceResolutionService:
             a.status not in _USABLE_CALL_STATUSES or b.status not in _USABLE_CALL_STATUSES
         )
         if global_ab_failure:
+            planned_c_requests = tuple(
+                CRequestTrace(
+                    symbol=symbol,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                    trigger_reason="AB_SOURCE_UNAVAILABLE",
+                )
+                for symbol in request.symbols
+            )
+        else:
+            planned_c_requests = tuple(
+                CRequestTrace(
+                    symbol=span_keys[0].symbol,
+                    start_date=span_keys[0].trade_date,
+                    end_date=span_keys[-1].trade_date,
+                    trigger_reason="+".join(sorted({affected[item] for item in span_keys})),
+                )
+                for span_keys in _affected_spans(observed_keys, frozenset(affected))
+            )
+        preflight_c = getattr(self._sources, "preflight_c_requests", None)
+        if callable(preflight_c):
+            preflight_c(planned_c_requests)
+        if global_ab_failure:
             full_c: dict[str, tuple[SourceCandidate, CRequestTrace]] = {}
             for symbol in request.symbols:
                 trigger = "AB_SOURCE_UNAVAILABLE"

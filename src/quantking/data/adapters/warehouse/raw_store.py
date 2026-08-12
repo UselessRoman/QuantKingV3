@@ -83,6 +83,7 @@ _FAILURE_PARAM_KEYS = frozenset(
         "upstream",
         "endpoint",
         "akshare_version",
+        "baostock_version",
     }
 )
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")

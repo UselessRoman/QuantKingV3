@@ -221,16 +221,19 @@ def _batch_domain(row: IngestionBatchRow) -> IngestionBatch:
         )
         for item in raw_manifest
     )
+    request_params = _load_mapping(row.request_params_json)
+    provider = DataProvider(request_params["provider"])
+    version_key = "baostock_version" if provider is DataProvider.BAOSTOCK else "akshare_version"
     return IngestionBatch(
         batch_id=parse_entity_id(row.batch_id),
-        provider=DataProvider(_load_mapping(row.request_params_json)["provider"]),
+        provider=provider,
         upstream=DataUpstream(row.source),
-        endpoint=_load_mapping(row.request_params_json)["endpoint"],
-        library_version=_load_mapping(row.request_params_json)["akshare_version"],
+        endpoint=request_params["endpoint"],
+        library_version=request_params[version_key],
         dataset=DatasetKind(row.dataset),
         status=IngestionBatchStatus(row.status),
         adapter_version=row.adapter_version,
-        request_params=_load_mapping(row.request_params_json),
+        request_params=request_params,
         request_params_json=row.request_params_json,
         started_at=UtcTimestamp.from_iso(row.started_at),
         ended_at=_timestamp(row.ended_at),
@@ -1154,6 +1157,17 @@ class DataRepository:
             select(ResolutionRunRow).where(ResolutionRunRow.created_job_id == job_id)
         )
         return None if row is None else _resolution_domain(row)
+
+    def find_resolution_runs_by_candidate_version_id(
+        self, version_id: str
+    ) -> list[ResolutionRunRecord]:
+        rows = self._session.scalars(
+            select(ResolutionRunRow)
+            .where(ResolutionRunRow.candidate_version_id == version_id)
+            .order_by(ResolutionRunRow.created_at, ResolutionRunRow.run_id)
+            .limit(2)
+        )
+        return [_resolution_domain(row) for row in rows]
 
     def list_resolution_runs_page(
         self,

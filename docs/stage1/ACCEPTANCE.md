@@ -1,6 +1,7 @@
 # Stage 1 验收矩阵
 
-Stage 1 尚未完成。S1-01～S1-06 的历史主验收继续有效；旧 S1-07 只证明离线框架曾通过测试，真实数据运行数为 0，现已退役，不能作为 AKShare 能力证据。
+Stage 1 尚未完成。S1-01～S1-06、K1、K2 的历史主验收继续有效；这些证据只证明当时的
+AKShare 三源范围，不证明 2026-08-12 接受的 BaoStock、四源路由或旧数据迁移已经实现。
 
 ## 已完成
 
@@ -12,6 +13,8 @@ Stage 1 尚未完成。S1-01～S1-06 的历史主验收继续有效；旧 S1-07 
 | S1-04 | 已主验收 | [验收记录](S1-04_ACCEPTANCE.md) |
 | S1-05 | 已主验收 | [验收记录](S1-05_ACCEPTANCE.md) |
 | S1-06 | 已主验收 | [验收记录](S1-06_ACCEPTANCE.md) |
+| S1-07K3 | 离线实现完成；真实验收阻断 | [任务卡](S1-07K3_TASK.md)；代表性四源实测与旧根迁移待授权 |
+| S1-08R2 | 被 K3 阻断 | [任务卡](S1-08_TASK.md)；首次失败证据已保留 |
 
 ## S1-07K1 验收
 
@@ -38,7 +41,8 @@ Stage 1 尚未完成。S1-01～S1-06 的历史主验收继续有效；旧 S1-07 
 - R1 marker 的 4 个阻断已由 D1 两组东财 complete 消解；腾讯/Sina 与东财六组共同构成 K1 真实功能证据。
 - R1 后完整 `scripts/quality.ps1` 已通过：918 passed、2 skipped、3 deselected；Ruff、format、mypy、架构、Markdown、前端和 E2E 均通过。
 - 原三源、R1、R2 和 D1 真实授权均已消耗，禁止重跑。D1 后完整质量门 935 passed，当前质量证据完整。
-- K1 已提交为 `f98f1d9 feat(data): complete S1-07K1 AKShare integration`；当前未提交工作树只包含 K2 交付。
+- K1 已提交为 `f98f1d9 feat(data): complete S1-07K1 AKShare integration`；该条只记录 K1
+  验收时的提交边界，不描述当前工作树。
 
 ## S1-07K2 验收
 
@@ -64,14 +68,44 @@ Stage 1 尚未完成。S1-01～S1-06 的历史主验收继续有效；旧 S1-07 
 - 固化 `scripts/quality.ps1` 在共享 `E:\Apps` UV cache 的 Windows ACL 处被环境阻断；上述独立验收使用仓库忽略的 `.uv-cache` 逐项执行了同等门禁。该环境限制不掩盖测试失败。
 - K2 未运行真实网络、未写正式数据根。Stage 1 仍须完成 S1-08 才能最终验收。
 
+## S1-07K3 验收状态
+
+状态：离线实现完成，真实验收阻断，尚未提交。
+
+- `baostock==0.9.3` 已精确锁定；适配器通过独立子进程硬超时、稳定错误、分页计数、Raw 原字段、
+  官方 `preclose` 保留及 Canonical 前序未复权 close 派生合同。
+- 固定来源为 BaoStock A、东财 B、腾讯 C、新浪 D；正常 A/B、逐级 C/D、无共识隔离和四源
+  endpoint/protocol/HTTP 预算均有离线回归，XTQuant 只允许 `DATA_ONLY` 导入。
+- 旧日线 inventory/managed import/verifier 已在 `tmp_path` 合成 Parquet 上验证，不读取旧根、
+  不创建 Warehouse/PUBLISHED；实际 5,208 候选文件清单、pilot、full 迁移仍未授权。
+- 默认正式 EOD、K3 Resolution artifact、DataCenter 安全 lineage 和 immutable read-only release
+  verifier 已通过合成端到端；K2 三源 frozen/artifact 兼容回归保留。
+- 唯一真实 marker 中 BaoStock/`000001.SZ` 成功，随后东财发生网络失败并立即停止；总计只执行
+  2/8 计划 endpoint、零重试，其余未调用。该结果不足以形成代表性阈值，K3 candidate 继续
+  inactive，生产仍使用历史零容差并 fail closed。
+
+K3 只有在代表性四源实测、旧根只读清单/受管迁移、完整质量门和独立提交均完成后才能主验收；
+当前不得执行 S1-08R2。
+
 ## Stage 1 最终完成条件
 
 执行边界见 [S1-08 任务卡](S1-08_TASK.md)。
 
+S1-08 离线实现已完成，首次真实授权也已执行，但唯一正式 Job
+`job:4c7c9ecf-ca97-425a-88f1-cd24d7e7c7b5` 因 `RESOLUTION_BLOCKED` 失败：实际使用
+东财/腾讯/新浪各 4 次 endpoint、零应用重试；82 个决定中 80 个因成交量/成交额舍入差无法
+满足冻结零容差而冲突。失败候选已收束为 `FAILED`，没有真实发布 DatasetVersion，也没有
+`S1-08_ACCEPTANCE.md`。本次授权已经结束，交易日历成员关系与按交易所的预期交易日完整性
+仍未覆盖。随后接受的 BaoStock+AKShare 三源与旧 XTQuant `DATA_ONLY` 路线见
+[S1-07K3 任务卡](S1-07K3_TASK.md)；离线代码已实现但真实验收仍阻断。以下最终条件均未满足，不得
+以 Raw、旧文件存在或合成证据代替。
+
 - 产生至少一个明确证券范围、日期范围的已发布未复权日线 DatasetVersion。
 - 重跑幂等；失败批次不污染已发布版本。
 - 数据满足唯一键、排序、OHLC、非负量额、覆盖和交易日检查。
-- A/B/C 的实际覆盖、差异、限流和失败情况有报告。
+- BaoStock、东财、腾讯、新浪的实际覆盖、差异、预算/失败情况有报告。
+- 旧项目日线候选全部被发现、受管导入或明确隔离；旧根未修改，每个发布历史行有独立来源
+  复核，迁移计数和字节守恒。
 - 已知缺口明确列出，不以合成测试或代码就绪冒充真实覆盖。
 - 数据中心可按显式版本查看来源、批次、质量、差异和失败。
 - Stage 1 最终验收记录、完整质量门和迁移检查通过。

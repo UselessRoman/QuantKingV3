@@ -27,6 +27,7 @@ from quantking.data.adapters.canonical_schema import (
 )
 from quantking.data.models import DatasetKind
 from quantking.data.quality.models import (
+    S108_DAILY_RULE_VERSION,
     QualityOutcomeResult,
     QualityRequest,
     RuleOutcomeStatus,
@@ -154,6 +155,39 @@ def _evaluate_primary_key_uniqueness(
         "primary_key_uniqueness",
         summary=f"{duplicates} duplicate primary key row(s) on {pk}",
         affected=duplicates,
+    )
+
+
+def _evaluate_expected_scope_presence(
+    *,
+    request: QualityRequest,
+    table: pa.Table,
+    reference_tables: Mapping[str, pa.Table],
+) -> QualityOutcomeResult:
+    del reference_tables
+    if table.num_rows == 0 and request.empty_result is not None:
+        return _passed(
+            "expected_scope_presence",
+            summary="legal empty result carries no security rows",
+        )
+    if "code" not in table.column_names:
+        return _failed(
+            "expected_scope_presence",
+            summary="candidate has no code column",
+            affected=1,
+        )
+    actual = {str(item) for item in table.column("code").to_pylist() if item is not None}
+    expected = set(request.expected_securities)
+    mismatch = expected ^ actual
+    if not mismatch:
+        return _passed(
+            "expected_scope_presence",
+            summary="candidate security scope exactly matches the frozen request",
+        )
+    return _failed(
+        "expected_scope_presence",
+        summary="candidate security scope does not match the frozen request",
+        affected=len(mismatch),
     )
 
 
@@ -590,9 +624,36 @@ def default_rule_set() -> QualityRuleSet:
     return QualityRuleSet(rule_version=RULE_VERSION, rules=rules)
 
 
+def s108_daily_rule_set() -> QualityRuleSet:
+    """Return the first-release daily rules without an unavailable calendar dependency."""
+    selected = {
+        "schema_conformance",
+        "primary_key_uniqueness",
+        "ohlc_consistency",
+        "positive_prices",
+        "non_negative_volume_amount",
+        "coverage_window",
+    }
+    rules = tuple(rule for rule in default_rule_set().rules if rule.code in selected)
+    if {rule.code for rule in rules} != selected:
+        raise RuntimeError("S1-08 daily quality catalogue is incomplete")
+    scope_rule = QualityRule(
+        code="expected_scope_presence",
+        applies_to=frozenset({DatasetKind.DAILY_BAR_UNADJUSTED}),
+        requires_reference=frozenset(),
+        blocking=True,
+        evaluate=_evaluate_expected_scope_presence,
+    )
+    return QualityRuleSet(
+        rule_version=S108_DAILY_RULE_VERSION,
+        rules=(rules[0], rules[1], scope_rule, *rules[2:]),
+    )
+
+
 __all__: tuple[str, ...] = (
     "RULE_VERSION",
     "QualityRule",
     "QualityRuleSet",
     "default_rule_set",
+    "s108_daily_rule_set",
 )

@@ -19,8 +19,11 @@ from quantking.data.center import (
 from quantking.data.models import (
     DataProvider,
     DatasetKind,
+    DatasetVersionStatus,
     DataUpstream,
     IngestionBatch,
+    IngestionBatchStatus,
+    QualityRunStatus,
 )
 from quantking.jobs.models import JobStatus
 
@@ -287,3 +290,127 @@ def test_same_report_sha_cannot_mask_different_artifact_lineage() -> None:
 
     with pytest.raises(InvalidDataCenterQueryError, match=r"credentials|lineage"):
         service.get_difference_report(str(report_id))
+
+
+def test_legacy_distinct_published_versions_remain_readable() -> None:
+    report_id = new_entity_id("data_diff")
+    primary_version_id = new_entity_id("data_version")
+    fallback_version_id = new_entity_id("data_version")
+    primary_batch_id = new_entity_id("data_batch")
+    fallback_batch_id = new_entity_id("data_batch")
+    primary_quality_id = new_entity_id("data_quality")
+    fallback_quality_id = new_entity_id("data_quality")
+    created_at = UtcTimestamp(datetime(2026, 7, 1, tzinfo=UTC))
+    primary_sha = "1" * 64
+    fallback_sha = "2" * 64
+    report = SimpleNamespace(
+        report_id=report_id,
+        version_id=primary_version_id,
+        primary_source=DataUpstream.EASTMONEY,
+        fallback_source=DataUpstream.TENCENT,
+        created_at=created_at,
+        field_differences={"close": "1"},
+        total_compared=1,
+        total_differences=1,
+        report_relative_path=f"data-diff/{report_id}",
+        primary_batch_id=primary_batch_id,
+        fallback_batch_id=fallback_batch_id,
+        primary_version_id=primary_version_id,
+        fallback_version_id=fallback_version_id,
+        primary_content_sha256=primary_sha,
+        fallback_content_sha256=fallback_sha,
+        primary_quality_run_id=primary_quality_id,
+        fallback_quality_run_id=fallback_quality_id,
+        sample_spec_sha256="3" * 64,
+        threshold_rule_version="threshold.v1",
+        report_sha256="a" * 64,
+    )
+    verified = SimpleNamespace(
+        **{
+            **vars(report),
+            "dataset": DatasetKind.DAILY_BAR_UNADJUSTED.value,
+            "primary_source": DataUpstream.EASTMONEY.value,
+            "fallback_source": DataUpstream.TENCENT.value,
+            "row_differences": [],
+        }
+    )
+    versions = {
+        str(primary_version_id): SimpleNamespace(
+            version_id=primary_version_id,
+            status=DatasetVersionStatus.PUBLISHED,
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            schema_version="daily_bar_unadjusted.v1",
+            rule_version="quality-rules.v1",
+            content_sha256=primary_sha,
+            quality_run_id=primary_quality_id,
+            input_batch_ids=(primary_batch_id,),
+        ),
+        str(fallback_version_id): SimpleNamespace(
+            version_id=fallback_version_id,
+            status=DatasetVersionStatus.PUBLISHED,
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            schema_version="daily_bar_unadjusted.v1",
+            rule_version="quality-rules.v1",
+            content_sha256=fallback_sha,
+            quality_run_id=fallback_quality_id,
+            input_batch_ids=(fallback_batch_id,),
+        ),
+    }
+    qualities = {
+        str(primary_quality_id): SimpleNamespace(
+            run_id=primary_quality_id,
+            version_id=primary_version_id,
+            status=QualityRunStatus.PASSED,
+            schema_version="daily_bar_unadjusted.v1",
+            rule_version="quality-rules.v1",
+            content_sha256=primary_sha,
+        ),
+        str(fallback_quality_id): SimpleNamespace(
+            run_id=fallback_quality_id,
+            version_id=fallback_version_id,
+            status=QualityRunStatus.PASSED,
+            schema_version="daily_bar_unadjusted.v1",
+            rule_version="quality-rules.v1",
+            content_sha256=fallback_sha,
+        ),
+    }
+    batches = {
+        str(primary_batch_id): SimpleNamespace(
+            batch_id=primary_batch_id,
+            upstream=DataUpstream.EASTMONEY,
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            status=IngestionBatchStatus.SUCCEEDED,
+        ),
+        str(fallback_batch_id): SimpleNamespace(
+            batch_id=fallback_batch_id,
+            upstream=DataUpstream.TENCENT,
+            dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+            status=IngestionBatchStatus.SUCCEEDED,
+        ),
+    }
+    repository = SimpleNamespace(
+        get_difference_report=lambda requested: report,
+        get_version=lambda requested: versions[requested],
+        get_quality_run=lambda requested: qualities[requested],
+        get_batch=lambda requested: batches[requested],
+    )
+
+    class _VerifiedPreview(_Preview):
+        def __init__(self) -> None:
+            self.verified_ids: list[str] = []
+
+        def verify_manifest_by_id(self, **request: object) -> None:
+            self.verified_ids.append(str(request["version_id"]))
+
+    preview = _VerifiedPreview()
+    service = DataCenterQueryService(
+        data_uow_factory=lambda: _Uow(repository),
+        preview=preview,
+        difference_verifier=_Verifier(verified),
+        jobs=_Jobs(),
+    )
+
+    result = service.get_difference_report(str(report_id))
+
+    assert result["report_id"] == str(report_id)
+    assert preview.verified_ids == [str(primary_version_id), str(fallback_version_id)]

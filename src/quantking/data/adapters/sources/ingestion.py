@@ -1,4 +1,4 @@
-"""AKShare Raw-bound daily-bar ingestion orchestration."""
+"""Provider-neutral Raw-bound daily-bar ingestion orchestration."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from quantking.common.errors import InvalidIdError
 from quantking.common.time import UtcTimestamp
 from quantking.data.adapters.canonical_schema import canonical_schema, ensure_sorted
 from quantking.data.adapters.persistence.sqlite import DataSqliteUnitOfWorkFactory
+from quantking.data.adapters.sources.budget import NetworkBudgetExceededError
 from quantking.data.adapters.sources.contracts import (
     SourceAdapterError,
     SourceErrorCode,
@@ -22,7 +23,7 @@ from quantking.data.adapters.sources.contracts import (
     SupplierResponseContract,
     classify_source_error,
 )
-from quantking.data.adapters.sources.normalization import normalize_akshare_response
+from quantking.data.adapters.sources.normalization import normalize_market_data_response
 from quantking.data.adapters.sources.request_window import (
     AKSHARE_LOOKBACK_DAYS,
     fixed_akshare_request_window,
@@ -64,6 +65,9 @@ class MarketDataGateway(Protocol):
     """Narrow provider port consumed by the ingestion service."""
 
     @property
+    def provider(self) -> DataProvider: ...
+
+    @property
     def upstream(self) -> DataUpstream: ...
 
     @property
@@ -93,7 +97,7 @@ class AkshareIngestionService:
         uow_factory: DataSqliteUnitOfWorkFactory,
         clock: Callable[[], UtcTimestamp],
     ) -> None:
-        for attribute in ("fetch", "library_version", "upstream", "endpoint"):
+        for attribute in ("fetch", "library_version", "provider", "upstream", "endpoint"):
             if not hasattr(gateway, attribute):
                 raise TypeError(f"gateway must provide {attribute}")
         self._gateway = gateway
@@ -110,6 +114,7 @@ class AkshareIngestionService:
         checkpoint: Callable[[], None] | None = None,
         job_run_id: str | None = None,
         code_version: str = "s1-07k1",
+        invocation_guard: Callable[[DataUpstream], None] | None = None,
     ) -> IngestionOutcome:
         validate_incremental_plan(plan)
         if not isinstance(code_version, str) or not code_version.strip():
@@ -123,7 +128,7 @@ class AkshareIngestionService:
             raise classify_source_error(error) from error
         running = IngestionBatch.running(
             batch_id=plan.batch_id,
-            provider=DataProvider.AKSHARE,
+            provider=self._gateway.provider,
             upstream=self._gateway.upstream,
             endpoint=self._gateway.endpoint,
             library_version=library_version,
@@ -131,10 +136,10 @@ class AkshareIngestionService:
             adapter_version=plan.adapter_version,
             request_params={
                 **dict(plan.request_params),
-                "provider": DataProvider.AKSHARE.value,
+                "provider": self._gateway.provider.value,
                 "upstream": self._gateway.upstream.value,
                 "endpoint": self._gateway.endpoint,
-                "akshare_version": library_version,
+                self._library_version_key(self._gateway.provider): library_version,
             },
             started_at=started_at,
             job_run_id=job_run_id,
@@ -152,8 +157,22 @@ class AkshareIngestionService:
             for chunk in plan.chunks:
                 if checkpoint is not None:
                     checkpoint()
+                if invocation_guard is not None:
+                    invocation_guard(self._gateway.upstream)
                 response = self._validate_response(self._gateway.fetch(chunk), chunk)
                 responses.append(response)
+                if not response.complete and self._gateway.provider is DataProvider.BAOSTOCK:
+                    try:
+                        partial_code = SourceErrorCode(str(response.partial_reason))
+                    except ValueError:
+                        partial_code = SourceErrorCode.INTERNAL_PROVIDER
+                    return self._finish_failed(
+                        running,
+                        plan,
+                        SourceAdapterError(partial_code),
+                        responses=tuple(responses),
+                        code_version=code_version,
+                    )
                 if checkpoint is not None:
                     checkpoint()
         except JobCancelledAtCheckpoint:
@@ -164,6 +183,8 @@ class AkshareIngestionService:
                 responses=tuple(responses),
                 code_version=code_version,
             )
+            raise
+        except NetworkBudgetExceededError:
             raise
         except Exception as error:
             mapped = classify_source_error(error)
@@ -211,7 +232,7 @@ class AkshareIngestionService:
             if rebuilt != responses:
                 raise SourceAdapterError(SourceErrorCode.PARSE)
             tables = tuple(
-                normalize_akshare_response(plan.dataset, response, empty_result=empty_result)
+                normalize_market_data_response(plan.dataset, response, empty_result=empty_result)
                 for response in rebuilt
             )
             candidate = ensure_sorted(plan.dataset.value, pa.concat_tables(tables))
@@ -348,9 +369,7 @@ class AkshareIngestionService:
                         }
                     ),
                     manifest_files=manifest_files,
-                    failure=self._failure_info(
-                        SourceAdapterError(SourceErrorCode.PARTIAL_RESPONSE)
-                    ),
+                    failure=self._failure_info(error),
                 )
                 self._save_terminal(partial)
                 return IngestionOutcome(partial, None, raw_directory)
@@ -370,7 +389,7 @@ class AkshareIngestionService:
                         "provider": running.provider.value,
                         "upstream": running.upstream.value,
                         "endpoint": running.endpoint,
-                        "akshare_version": running.library_version,
+                        self._library_version_key(running.provider): running.library_version,
                     },
                     error_code=error.code.value,
                     failed_at=self._safe_now(running).to_iso(),
@@ -468,7 +487,7 @@ class AkshareIngestionService:
             "provider": running.provider.value,
             "upstream": running.upstream.value,
             "endpoint": running.endpoint,
-            "akshare_version": running.library_version,
+            AkshareIngestionService._library_version_key(running.provider): running.library_version,
             "fetched_at": fetched_at,
             "request_start": target_start,
             "request_end": target_end,
@@ -499,12 +518,17 @@ class AkshareIngestionService:
         contract: SupplierResponseContract,
         error: SourceAdapterError,
     ) -> SupplierResponse:
+        partial_code = (
+            SourceErrorCode.BAOSTOCK_PARTIAL_RESPONSE.value
+            if contract.lineage.provider is DataProvider.BAOSTOCK
+            else SourceErrorCode.PARTIAL_RESPONSE.value
+        )
         return SupplierResponse.create_bound(
             chunk=chunk,
             records=(),
             contract=contract,
             complete=False,
-            partial_reason=SourceErrorCode.PARTIAL_RESPONSE.value,
+            partial_reason=partial_code,
             provider_payload={
                 "error_code": error.code.value,
                 "request_sha256": chunk.request_sha256,
@@ -583,5 +607,21 @@ class AkshareIngestionService:
             retryable=error.retryable,
         )
 
+    @staticmethod
+    def _library_version_key(provider: DataProvider) -> str:
+        if provider is DataProvider.AKSHARE:
+            return "akshare_version"
+        if provider is DataProvider.BAOSTOCK:
+            return "baostock_version"
+        raise SourceAdapterError(SourceErrorCode.REQUEST_REJECTED)
 
-__all__ = ["AkshareIngestionService", "IngestionOutcome", "MarketDataGateway"]
+
+MarketDataIngestionService = AkshareIngestionService
+
+
+__all__ = [
+    "AkshareIngestionService",
+    "IngestionOutcome",
+    "MarketDataGateway",
+    "MarketDataIngestionService",
+]

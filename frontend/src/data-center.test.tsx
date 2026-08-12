@@ -80,6 +80,15 @@ describe("Stage 1 data center", () => {
       if (path.includes("/preview")) {
         return { items: [{ exchange: "SZ", trade_date: "2026-07-28" }], next_cursor: null };
       }
+      if (path.endsWith("/lineage")) {
+        return {
+          version: { version_id: versionId },
+          source_batches: [],
+          quality_runs: [],
+          difference_reports: [],
+          resolution: { run_id: "data_resolution:1" },
+        };
+      }
       if (path.endsWith("/versions")) {
         return { items: [{ version_id: versionId, dataset: "exchange_calendar", status: "PUBLISHED" }], next_cursor: null };
       }
@@ -88,7 +97,7 @@ describe("Stage 1 data center", () => {
     render(<App api={api({ getData })} eventSourceFactory={() => new SilentEventSource()} />);
     fireEvent.click(screen.getByRole("button", { name: "版本" }));
     fireEvent.click(await screen.findByRole("button", { name: "显式预览" }));
-    expect(await screen.findAllByText(versionId)).toHaveLength(2);
+    expect(await screen.findAllByText(versionId)).toHaveLength(3);
     expect(getData).toHaveBeenCalledWith(
       `/api/data/versions/${encodeURIComponent(versionId)}/preview?limit=50`,
     );
@@ -177,14 +186,20 @@ describe("Stage 1 data center", () => {
       if (path.includes("/preview")) {
         return { items: [{ trade_date: "2026-07-28" }], next_cursor: "preview-next" };
       }
-      if (path === `/api/data/versions/${encodeURIComponent(versionId)}`) {
+      if (path === `/api/data/versions/${encodeURIComponent(versionId)}/lineage`) {
         return {
-          version_id: versionId,
-          parent_version_id: "data_version:parent",
-          input_batch_ids: ["data_batch:primary"],
-          quality_run_id: "data_quality:passed",
-          schema_version: "daily-bar.v1",
-          rule_version: "quality.v1",
+          version: {
+            version_id: versionId,
+            parent_version_id: "data_version:parent",
+            input_batch_ids: ["data_batch:primary"],
+            quality_run_id: "data_quality:passed",
+            schema_version: "daily-bar.v1",
+            rule_version: "quality.v1",
+          },
+          source_batches: [{ batch_id: "data_batch:primary", upstream: "EASTMONEY" }],
+          quality_runs: [{ run_id: "data_quality:passed", status: "PASSED" }],
+          difference_reports: [{ report_id: "data_diff:bound" }],
+          resolution: { run_id: "data_resolution:bound", status: "PUBLISHED" },
         };
       }
       if (path.endsWith("/versions")) {
@@ -196,7 +211,10 @@ describe("Stage 1 data center", () => {
     fireEvent.click(screen.getByRole("button", { name: "版本" }));
     fireEvent.click(await screen.findByRole("button", { name: "显式预览" }));
     expect(await screen.findByText("data_version:parent")).toBeInTheDocument();
-    expect(screen.getByText(/data_batch:primary/)).toBeInTheDocument();
+    expect(screen.getAllByText(/data_batch:primary/)).toHaveLength(2);
+    expect(screen.getByText("EASTMONEY")).toBeInTheDocument();
+    expect(screen.getByText("data_diff:bound")).toBeInTheDocument();
+    expect(screen.getByText("data_resolution:bound")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "预览下一页" }));
     expect(await screen.findByText("2026-07-29")).toBeInTheDocument();
     expect(getData).toHaveBeenCalledWith(expect.stringContaining("cursor=preview-next"));

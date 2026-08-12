@@ -45,6 +45,9 @@ from quantking.jobs.models import FailureInfo, JobRun, JobStatus
 DEFAULT_PAGE_LIMIT = 50
 MAX_PAGE_LIMIT = 100
 MAX_PREVIEW_LIMIT = 200
+MAX_RELEASE_BATCHES = 6
+MAX_RELEASE_QUALITY_RUNS = 7
+MAX_RELEASE_DIFFERENCE_REPORTS = 9
 
 
 class InvalidDataCenterQueryError(ValueError):
@@ -67,6 +70,9 @@ class DataRepositoryPort(Protocol):
     def get_quality_run(self, run_id: str) -> QualityRun: ...
     def get_difference_report(self, report_id: str) -> DifferenceReport: ...
     def get_resolution_run(self, run_id: str) -> ResolutionRunRecord: ...
+    def find_resolution_runs_by_candidate_version_id(
+        self, version_id: str
+    ) -> list[ResolutionRunRecord]: ...
     def count_failed_entities(self) -> int: ...
 
     def list_batches_page(
@@ -425,7 +431,6 @@ def _resolution(item: ResolutionRunRecord) -> Mapping[str, object]:
         "rule_version": item.rule_version,
         "threshold_rule_version": item.threshold_rule_version,
         "input_fingerprint": item.input_fingerprint,
-        "artifact_relative_path": item.artifact_relative_path,
         "manifest_sha256": item.manifest_sha256,
         "total_decisions": item.total_decisions,
         "default_decision_count": item.default_decision_count,
@@ -658,6 +663,70 @@ class DataCenterQueryService:
         with self._uow_factory() as uow:
             return _version(uow.data.get_version(version_id))
 
+    def get_version_lineage(self, version_id: str) -> Mapping[str, object]:
+        """Return one bounded, verified and path-free release lineage projection."""
+        try:
+            parsed = parse_entity_id(version_id)
+        except InvalidIdError as error:
+            raise InvalidDataCenterQueryError("version_id is invalid") from error
+        if parsed.namespace != "data_version" or str(parsed) != version_id:
+            raise InvalidDataCenterQueryError("version_id is invalid")
+        with self._uow_factory() as uow:
+            version = uow.data.get_version(version_id)
+            if len(version.input_batch_ids) > MAX_RELEASE_BATCHES:
+                raise DataCenterReadIntegrityError("version batch lineage exceeds S1-08 bounds")
+            batches = [uow.data.get_batch(str(item)) for item in version.input_batch_ids]
+            quality = uow.data.list_quality_runs_page(
+                version_id=version_id,
+                status=None,
+                before=None,
+                limit=MAX_RELEASE_QUALITY_RUNS + 1,
+            )
+            reports = uow.data.list_difference_reports_page(
+                version_id=version_id,
+                primary_source=None,
+                before=None,
+                limit=MAX_RELEASE_DIFFERENCE_REPORTS + 1,
+            )
+            resolutions = uow.data.find_resolution_runs_by_candidate_version_id(version_id)
+        if version.status is not DatasetVersionStatus.PUBLISHED:
+            raise DataCenterReadIntegrityError("version lineage requires a PUBLISHED version")
+        if (
+            len(quality) > MAX_RELEASE_QUALITY_RUNS
+            or len(reports) > MAX_RELEASE_DIFFERENCE_REPORTS
+            or len(resolutions) != 1
+        ):
+            raise DataCenterReadIntegrityError("version lineage exceeds its bounded contract")
+        if {item.batch_id for item in batches} != set(version.input_batch_ids):
+            raise DataCenterReadIntegrityError("version batch lineage is incomplete")
+        try:
+            self._preview.verify_manifest_by_id(
+                version_id=version_id,
+                dataset=version.dataset.value,
+            )
+        except (ManifestIntegrityError, IncompatibleInputError, ValueError) as error:
+            raise DataCenterReadIntegrityError("version published manifest is invalid") from error
+        verified_reports = [
+            self._load_verified_difference(str(item.report_id))[0] for item in reports
+        ]
+        resolution, resolution_artifact = self._load_verified_resolution(str(resolutions[0].run_id))
+        if resolution.candidate_version_id != version.version_id:
+            raise DataCenterReadIntegrityError("resolution candidate does not match version")
+        artifact_report_ids = resolution_artifact.summary.get("difference_report_ids")
+        if not isinstance(artifact_report_ids, list) or set(artifact_report_ids) != {
+            str(item.report_id) for item in verified_reports
+        }:
+            raise DataCenterReadIntegrityError(
+                "resolution and version difference report lineage do not match"
+            )
+        return {
+            "version": _version(version),
+            "source_batches": [_batch(item) for item in batches],
+            "quality_runs": [_quality(item, details=True) for item in quality],
+            "difference_reports": [_report(item) for item in verified_reports],
+            "resolution": _resolution(resolution),
+        }
+
     def preview(
         self,
         *,
@@ -886,8 +955,14 @@ class DataCenterQueryService:
             fallback_quality = uow.data.get_quality_run(str(report.fallback_quality_run_id))
             primary_batch = uow.data.get_batch(str(report.primary_batch_id))
             fallback_batch = uow.data.get_batch(str(report.fallback_batch_id))
+            shared_candidate = report.primary_version_id == report.fallback_version_id
+            final_quality = (
+                uow.data.get_quality_run(str(primary_version.quality_run_id))
+                if shared_candidate and primary_version.quality_run_id is not None
+                else None
+            )
 
-        for side, version, quality, batch, expected_source, expected_batch, content_sha in (
+        sides = (
             (
                 "primary",
                 primary_version,
@@ -906,12 +981,28 @@ class DataCenterQueryService:
                 report.fallback_batch_id,
                 report.fallback_content_sha256,
             ),
-        ):
+        )
+        if shared_candidate:
+            valid_final = (
+                primary_version.version_id == fallback_version.version_id
+                and primary_version.status is DatasetVersionStatus.PUBLISHED
+                and primary_version.dataset.value == verified.dataset
+                and final_quality is not None
+                and final_quality.run_id == primary_version.quality_run_id
+                and final_quality.status is QualityRunStatus.PASSED
+                and final_quality.version_id == primary_version.version_id
+                and final_quality.schema_version == primary_version.schema_version
+                and final_quality.rule_version == primary_version.rule_version
+                and final_quality.content_sha256 == primary_version.content_sha256
+            )
+            if not valid_final:
+                raise DataCenterReadIntegrityError(
+                    "difference report shared candidate final lineage is invalid"
+                )
+        for side, version, quality, batch, expected_source, expected_batch, content_sha in sides:
             valid = (
                 version.status is DatasetVersionStatus.PUBLISHED
                 and version.dataset.value == verified.dataset
-                and version.content_sha256 == content_sha
-                and version.quality_run_id == quality.run_id
                 and quality.run_id
                 == (
                     report.primary_quality_run_id
@@ -922,26 +1013,34 @@ class DataCenterQueryService:
                 and quality.version_id == version.version_id
                 and quality.schema_version == version.schema_version
                 and quality.rule_version == version.rule_version
-                and quality.content_sha256 == version.content_sha256
+                and quality.content_sha256 == content_sha
                 and batch.batch_id == expected_batch
                 and batch.upstream is expected_source
                 and batch.dataset is version.dataset
                 and batch.status in {IngestionBatchStatus.SUCCEEDED, IngestionBatchStatus.PARTIAL}
                 and expected_batch in version.input_batch_ids
+                and (
+                    shared_candidate
+                    or (
+                        version.content_sha256 == content_sha
+                        and version.quality_run_id == quality.run_id
+                    )
+                )
             )
             if not valid:
                 raise DataCenterReadIntegrityError(
                     f"difference report {side} version or quality lineage is invalid"
                 )
-            try:
-                self._preview.verify_manifest_by_id(
-                    version_id=str(version.version_id),
-                    dataset=version.dataset.value,
-                )
-            except (ManifestIntegrityError, IncompatibleInputError, ValueError) as error:
-                raise DataCenterReadIntegrityError(
-                    f"difference report {side} published manifest is invalid"
-                ) from error
+            if not shared_candidate or side == "primary":
+                try:
+                    self._preview.verify_manifest_by_id(
+                        version_id=str(version.version_id),
+                        dataset=version.dataset.value,
+                    )
+                except (ManifestIntegrityError, IncompatibleInputError, ValueError) as error:
+                    raise DataCenterReadIntegrityError(
+                        f"difference report {side} published manifest is invalid"
+                    ) from error
         return report, verified
 
     def difference_rows(self, *, report_id: str, cursor: str | None, limit: int) -> DataCenterPage:

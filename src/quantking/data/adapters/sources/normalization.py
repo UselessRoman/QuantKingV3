@@ -90,7 +90,7 @@ def _row(record: Mapping[str, object], response: SupplierResponse) -> dict[str, 
     }
 
 
-def normalize_akshare_response(
+def normalize_market_data_response(
     dataset: DatasetKind,
     response: SupplierResponse,
     *,
@@ -143,4 +143,11 @@ def normalize_akshare_response(
     return table
 
 
-__all__ = ["normalize_akshare_response", "required_fields_for"]
+normalize_akshare_response = normalize_market_data_response
+
+
+__all__ = [
+    "normalize_akshare_response",
+    "normalize_market_data_response",
+    "required_fields_for",
+]

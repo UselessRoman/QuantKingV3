@@ -14,15 +14,17 @@
 
 ## 数据源
 
-| 角色 | provider | upstream | 接口 |
+| 角色 | provider | upstream | 接口/输入 |
 |---|---|---|---|
-| A 主来源 | AKSHARE | EASTMONEY | `stock_zh_a_hist` |
-| B 常态互验 | AKSHARE | TENCENT | `stock_zh_a_hist_tx` |
-| C 异常第三源 | AKSHARE | SINA | `stock_zh_a_daily` |
+| A 常态供数 | BAOSTOCK | BAOSTOCK | `query_history_k_data_plus` |
+| B 常态互验 | AKSHARE | EASTMONEY | `stock_zh_a_hist` |
+| C 异常仲裁 | AKSHARE | TENCENT | `stock_zh_a_hist_tx` |
+| D 最后仲裁 | AKSHARE | SINA | `stock_zh_a_daily` |
+| X 历史候选 | XTQUANT_LEGACY | XTQUANT | 受管 `DATA_ONLY` 导入对象 |
 
-AKShare 是统一依赖，不等于三个来源相同。必须记录实际 upstream；上游网页或接口变化属于可观测故障。
-
-来源合同只包含 `provider=AKSHARE`、三个 upstream、endpoint、库版本和最近运行结果。K1 不保留 `PRIMARY/FALLBACK` 候选审批、`PRODUCTION_READY`、稳定运行次数或 source×dataset 能力矩阵。
+必须记录实际 provider/upstream；BaoStock 服务故障与 AKShare 的网页/API/库变化分别建模。
+三个 AKShare upstream 不得合并，旧 XTQuant 也不得冒充当前可调用服务。来源合同保持固定且
+最小，不恢复候选审批、`PRODUCTION_READY` 或 source×dataset 能力矩阵。
 
 ## 分层
 
@@ -56,19 +58,22 @@ Research         复权、股票池、因子、标签和 Qlib 派生视图
 - 日期范围、交易日和空结果语义。
 - 覆盖、新鲜度和上游 schema 漂移。
 
-## 三源仲裁
+## 多源仲裁
 
-1. 每次正常任务采集 A 和 B。
+1. 每次正常任务采集 BaoStock A 和东财 B。
 2. A/B 都成功并在字段阈值内一致时选择 A。
-3. A/B 任一失败、缺行、质量失败或分歧时采集 C。
-4. 至少两源一致才可选择；从一致集合按 A、B、C 优先级选择。
-5. 无两源一致时隔离并报告。
+3. A/B 任一失败、缺行、质量失败或分歧时，对受影响范围采集腾讯 C。
+4. 仍无两源一致时才对剩余范围采集新浪 D。
+5. 至少两源一致才可选择；从一致集合按 A、B、C、D 优先级选择。
+6. 历史导入的 X 先与 A 比较，分歧时按 B/C/D 逐级仲裁。
+7. 无两源一致时隔离并报告。
 
 允许逐证券/交易日选源。每个决定至少记录 `selected_upstream`、参与比较的来源、规则版本、决定原因和差异报告标识；它属于正常 `ResolutionDecision`，不是 `SourceOverride` 或静默补洞。
 
 K2 可以在版本级记录共同默认决定，并只为例外证券/交易日保存行级决定，避免为完全一致的普通行重复存储相同审计文本。
 
-价格精度、成交量和成交额单位及容差先由 K1 真实小样本确认，再由 K2 冻结。不得在未实测时猜测。
+BaoStock 与旧 XTQuant 的价格、`pre_close`、成交量、成交额、复权和停牌语义必须由 K3 实测；
+新量额容差也由代表性样本形成版本化合同。不得在未实测时猜测或覆盖历史零容差失败证据。
 
 ## 发布
 

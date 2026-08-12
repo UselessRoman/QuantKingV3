@@ -43,6 +43,19 @@ test("数据中心显式版本、血缘、EOD 入队取消与 SSE 重连", async
       await route.fulfill({ json: { items: [{ run_id: FIXED_RESOLUTION_ID, status: "BLOCKED", conflict_count: 1 }], next_cursor: null } });
     }
   });
+  await page.route("**/api/data/versions/*/lineage", async (route) => {
+    const segments = new URL(route.request().url()).pathname.split("/");
+    const versionId = decodeURIComponent(segments[segments.length - 2] ?? "");
+    await route.fulfill({
+      json: {
+        version: { version_id: versionId, status: "PUBLISHED" },
+        source_batches: [{ batch_id: "data_batch:e2e", upstream: "EASTMONEY" }],
+        quality_runs: [{ run_id: "data_quality:e2e", status: "PASSED" }],
+        difference_reports: [{ report_id: "data_diff:e2e" }],
+        resolution: { run_id: "data_resolution:e2e", status: "PUBLISHED" },
+      },
+    });
+  });
 
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "QuantKing 数据中心" })).toBeVisible();
@@ -52,6 +65,7 @@ test("数据中心显式版本、血缘、EOD 入队取消与 SSE 重连", async
   await expect(page.getByRole("cell", { name: "PUBLISHED" }).first()).toBeVisible();
   await expect(page.getByText("2026-07-15").first()).toBeVisible();
   await page.getByRole("button", { name: "显式预览" }).first().click();
+  await expect(page.getByLabel("Version 完整血缘")).toBeVisible();
   await expect(page.getByText("版本预览")).toBeVisible();
   await expect(page.getByText("2026-07-28").first()).toBeVisible();
 

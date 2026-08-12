@@ -15,6 +15,7 @@ from quantking.common.paths import RuntimePaths
 _EXPECTED_KEYS: Mapping[str, frozenset[str]] = {
     "paths": frozenset({"code_root", "data_root", "offsite_backup_root"}),
     "web": frozenset({"host", "port"}),
+    "eod": frozenset({"symbols"}),
     "sqlite": frozenset(
         {
             "busy_timeout_ms",
@@ -27,6 +28,17 @@ _EXPECTED_KEYS: Mapping[str, frozenset[str]] = {
         }
     ),
 }
+S108_FIRST_RELEASE_SYMBOLS = ("000001.SZ", "600000.SH")
+_RESERVED_PROCESS_KEYS = frozenset(
+    {
+        "QUANTKING_TOOLCHAIN_ROOT",
+        "QUANTKING_UV_EXECUTABLE",
+        "QUANTKING_PYTHON_EXECUTABLE",
+        "QUANTKING_NODE_EXECUTABLE",
+        "QUANTKING_NPM_EXECUTABLE",
+        "QUANTKING_UV_CACHE_DIR",
+    }
+)
 _ENV_FIELDS: Mapping[str, tuple[str, str]] = {
     "QUANTKING_CODE_ROOT": ("paths", "code_root"),
     "QUANTKING_DATA_ROOT": ("paths", "data_root"),
@@ -57,6 +69,7 @@ class AppSettings:
     sqlite_retry_jitter_ratio: float
     job_heartbeat_min_interval_ms: int
     job_progress_min_interval_ms: int
+    eod_symbols: tuple[str, ...] = S108_FIRST_RELEASE_SYMBOLS
 
     def __post_init__(self) -> None:
         if not isinstance(self.paths, RuntimePaths):
@@ -114,6 +127,15 @@ class AppSettings:
                 "job_progress_min_interval_ms must be between 1 and 60000",
                 context={"field": "job_progress_min_interval_ms"},
             )
+        if not isinstance(self.eod_symbols, tuple):
+            raise ConfigurationError(
+                "eod_symbols must be a tuple", context={"field": "eod_symbols"}
+            )
+        if self.eod_symbols != S108_FIRST_RELEASE_SYMBOLS:
+            raise ConfigurationError(
+                "eod_symbols must equal the fixed S1-08 first-release scope",
+                context={"field": "eod_symbols"},
+            )
 
 
 def _validate_document(document: dict[str, Any]) -> None:
@@ -146,14 +168,14 @@ def _validate_document(document: dict[str, Any]) -> None:
 
 def _apply_environment(document: dict[str, Any], environ: Mapping[str, str]) -> None:
     prefixed_keys = {key for key in environ if key.startswith("QUANTKING_")}
-    unknown = prefixed_keys - set(_ENV_FIELDS)
+    unknown = prefixed_keys - set(_ENV_FIELDS) - _RESERVED_PROCESS_KEYS
     if unknown:
         raise ConfigurationError(
             "environment contains unknown QUANTKING_ keys",
             context={"keys": ",".join(sorted(unknown))},
         )
 
-    for key in prefixed_keys:
+    for key in prefixed_keys - _RESERVED_PROCESS_KEYS:
         value = environ[key]
         if not isinstance(value, str) or not value.strip():
             raise ConfigurationError("environment override must not be empty", context={"key": key})
@@ -183,6 +205,21 @@ def _number(value: object, *, field: str) -> float:
     if isinstance(value, (int, float, str)):
         return float(value)
     raise ValueError(f"{field} must be a number")
+
+
+def _symbols(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("eod.symbols must be a non-empty array")
+    if any(not isinstance(item, str) or not item for item in value):
+        raise ValueError("eod.symbols must contain non-empty text")
+    result = tuple(value)
+    if len(set(result)) != len(result):
+        raise ValueError("eod.symbols must not contain duplicates")
+    if result != tuple(sorted(result)):
+        raise ValueError("eod.symbols must use canonical sorting")
+    if result != S108_FIRST_RELEASE_SYMBOLS:
+        raise ValueError("eod.symbols must equal the fixed S1-08 first-release scope")
+    return result
 
 
 def load_settings(default_config: Path, *, environ: Mapping[str, str] | None = None) -> AppSettings:
@@ -237,6 +274,7 @@ def load_settings(default_config: Path, *, environ: Mapping[str, str] | None = N
                 document["sqlite"]["progress_min_interval_ms"],
                 field="job_progress_min_interval_ms",
             ),
+            eod_symbols=_symbols(document["eod"]["symbols"]),
         )
     except InvalidPathError as error:
         raise ConfigurationError("runtime path configuration is invalid") from error

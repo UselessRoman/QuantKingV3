@@ -126,6 +126,10 @@ def create_api_router(
         def data_version(version_id: str) -> object:
             return data_center_port.get_version(version_id)
 
+        @router.get("/data/versions/{version_id}/lineage")
+        def data_version_lineage(version_id: str) -> object:
+            return data_center_port.get_version_lineage(version_id)
+
         @router.get("/data/versions/{version_id}/preview")
         def data_preview(
             version_id: str,

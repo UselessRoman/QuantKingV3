@@ -9,6 +9,9 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Protocol
 
+from quantking.common.config import AppSettings
+from quantking.data.adapters.sources.baostock import BAOSTOCK_UNIT_POLICY_VERSION
+from quantking.data.adapters.sources.baostock_worker import BAOSTOCK_DISTRIBUTION_VERSION
 from quantking.data.eod.contracts import (
     EOD_CONFIG_SCHEMA,
     EOD_JOB_TYPE,
@@ -23,12 +26,18 @@ from quantking.data.eod.contracts import (
 )
 from quantking.data.eod.frozen import FrozenEodCommandError, parse_frozen_eod_command
 from quantking.data.models import DatasetKind
+from quantking.data.quality.models import S108_DAILY_RULE_VERSION
+from quantking.data.resolution.models import (
+    K2_RESOLUTION_RULE_VERSION,
+    K3_RESOLUTION_RULE_VERSION,
+)
 from quantking.data.schemas import descriptor_for
 from quantking.jobs.models import JobStatus
 from quantking.jobs.services import CreateJob, JobService
 
 _SAFE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _SAFE_IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,24 +47,82 @@ class EodExecutionConfig:
     code_version: str
     adapter_version: str
     rule_version: str
-    lookback_days: int
+    resolution_rule_version: str
+    source_route_version: str
+    baostock_version: str
+    baostock_unit_policy_version: str
+    planner_lookback_days: int
+    adapter_context_lookback_days: int
     max_days_per_chunk: int
     max_items_per_chunk: int
+    endpoint_invocation_limit: int
+    c_endpoint_invocation_limit: int
+    d_endpoint_invocation_limit: int
+    estimated_http_request_limit: int
+    estimated_baostock_protocol_message_limit: int
+    legacy_import_manifest_sha256: str | None
     datasets: Mapping[str, EodDatasetConfig]
 
     def __post_init__(self) -> None:
-        for field in ("code_version", "adapter_version", "rule_version"):
+        for field in (
+            "code_version",
+            "adapter_version",
+            "rule_version",
+            "resolution_rule_version",
+            "source_route_version",
+            "baostock_version",
+            "baostock_unit_policy_version",
+        ):
             value = getattr(self, field)
             if not isinstance(value, str) or _SAFE_VERSION.fullmatch(value) is None:
                 raise ValueError(f"{field} must be a safe stable identifier")
-        for field in ("lookback_days", "max_days_per_chunk", "max_items_per_chunk"):
+        for field in (
+            "planner_lookback_days",
+            "adapter_context_lookback_days",
+            "max_days_per_chunk",
+            "max_items_per_chunk",
+            "endpoint_invocation_limit",
+            "c_endpoint_invocation_limit",
+            "d_endpoint_invocation_limit",
+            "estimated_http_request_limit",
+            "estimated_baostock_protocol_message_limit",
+        ):
             value = getattr(self, field)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"{field} must be an integer")
-        if self.lookback_days < 0:
-            raise ValueError("lookback_days must be non-negative")
+        if self.planner_lookback_days != 0:
+            raise ValueError("planner_lookback_days must remain zero")
+        if self.adapter_context_lookback_days != 15:
+            raise ValueError("adapter_context_lookback_days must equal 15")
         if self.max_days_per_chunk <= 0 or self.max_items_per_chunk <= 0:
             raise ValueError("chunk sizes must be positive")
+        if self.max_days_per_chunk != 31 or self.max_items_per_chunk != 1:
+            raise ValueError("S1-08 chunk sizes must equal 31 days and one symbol")
+        if self.resolution_rule_version == K2_RESOLUTION_RULE_VERSION:
+            if (
+                self.endpoint_invocation_limit != 12
+                or self.c_endpoint_invocation_limit != 4
+                or self.d_endpoint_invocation_limit != 0
+                or self.estimated_http_request_limit != 24
+                or self.estimated_baostock_protocol_message_limit != 0
+            ):
+                raise ValueError("K2 compatibility budget must remain 12/4/0/24/0")
+        elif self.resolution_rule_version == K3_RESOLUTION_RULE_VERSION:
+            if (
+                self.endpoint_invocation_limit != 16
+                or self.c_endpoint_invocation_limit != 4
+                or self.d_endpoint_invocation_limit != 4
+                or self.estimated_http_request_limit != 24
+                or self.estimated_baostock_protocol_message_limit != 12
+            ):
+                raise ValueError("S1-07K3 network budget must remain 16/4/4/24/12")
+        else:
+            raise ValueError("resolution_rule_version is unsupported")
+        if self.legacy_import_manifest_sha256 is not None and (
+            not isinstance(self.legacy_import_manifest_sha256, str)
+            or _SHA256.fullmatch(self.legacy_import_manifest_sha256) is None
+        ):
+            raise ValueError("legacy_import_manifest_sha256 must be lowercase SHA-256 or None")
         normalized: dict[str, EodDatasetConfig] = {}
         for key, config in self.datasets.items():
             DatasetKind(key)
@@ -67,17 +134,32 @@ class EodExecutionConfig:
         object.__setattr__(self, "datasets", MappingProxyType(dict(sorted(normalized.items()))))
 
     @classmethod
-    def production(cls, *, code_version: str) -> EodExecutionConfig:
-        """K1 production composition exposes only unadjusted daily bars."""
+    def production(cls, *, code_version: str, settings: AppSettings) -> EodExecutionConfig:
+        """Freeze the only S1-08 production scope from validated application settings."""
+        if not isinstance(settings, AppSettings):
+            raise TypeError("settings must be AppSettings")
         return cls(
             code_version=code_version,
-            adapter_version="akshare-daily-bar.v1",
-            rule_version="quality-rules.v1",
-            lookback_days=0,
+            adapter_version="baostock-akshare-daily-bar.k3.v1",
+            rule_version=S108_DAILY_RULE_VERSION,
+            resolution_rule_version=K3_RESOLUTION_RULE_VERSION,
+            source_route_version="BAO-EAST-TX-SINA.k3.v1",
+            baostock_version=BAOSTOCK_DISTRIBUTION_VERSION,
+            baostock_unit_policy_version=BAOSTOCK_UNIT_POLICY_VERSION,
+            planner_lookback_days=0,
+            adapter_context_lookback_days=15,
             max_days_per_chunk=31,
             max_items_per_chunk=1,
+            endpoint_invocation_limit=16,
+            c_endpoint_invocation_limit=4,
+            d_endpoint_invocation_limit=4,
+            estimated_http_request_limit=24,
+            estimated_baostock_protocol_message_limit=12,
+            legacy_import_manifest_sha256=None,
             datasets={
-                DatasetKind.DAILY_BAR_UNADJUSTED.value: EodDatasetConfig(scope=()),
+                DatasetKind.DAILY_BAR_UNADJUSTED.value: EodDatasetConfig(
+                    scope=settings.eod_symbols
+                ),
             },
         )
 
@@ -95,9 +177,22 @@ class EodExecutionConfig:
             "code_version": self.code_version,
             "adapter_version": self.adapter_version,
             "rule_version": self.rule_version,
-            "lookback_days": self.lookback_days,
+            "resolution_rule_version": self.resolution_rule_version,
+            "source_route_version": self.source_route_version,
+            "baostock_version": self.baostock_version,
+            "baostock_unit_policy_version": self.baostock_unit_policy_version,
+            "planner_lookback_days": self.planner_lookback_days,
+            "adapter_context_lookback_days": self.adapter_context_lookback_days,
             "max_days_per_chunk": self.max_days_per_chunk,
             "max_items_per_chunk": self.max_items_per_chunk,
+            "endpoint_invocation_limit": self.endpoint_invocation_limit,
+            "c_endpoint_invocation_limit": self.c_endpoint_invocation_limit,
+            "d_endpoint_invocation_limit": self.d_endpoint_invocation_limit,
+            "estimated_http_request_limit": self.estimated_http_request_limit,
+            "estimated_baostock_protocol_message_limit": (
+                self.estimated_baostock_protocol_message_limit
+            ),
+            "legacy_import_manifest_sha256": self.legacy_import_manifest_sha256,
             "datasets": {
                 key: replace(
                     self.datasets[key],
@@ -192,8 +287,12 @@ class EodCommandService:
         config_sha = sha256_text(config_json)
         version_manifest = {
             "adapter_version": self._config.adapter_version,
+            "baostock_unit_policy_version": self._config.baostock_unit_policy_version,
+            "baostock_version": self._config.baostock_version,
             "code_version": self._config.code_version,
+            "resolution_rule_version": self._config.resolution_rule_version,
             "rule_version": self._config.rule_version,
+            "source_route_version": self._config.source_route_version,
             "schema_versions_sha256": sha256_text(
                 canonical_json(
                     {key: descriptor_for(key).schema_version for key in request.datasets}

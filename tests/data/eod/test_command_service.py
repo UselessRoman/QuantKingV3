@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+from tests.helpers import app_settings
 
 from quantking.common.errors import IdempotencyConflictError
 from quantking.data.eod.contracts import EodPublishIntent, EodRunRequest
@@ -25,7 +26,9 @@ def _service(tmp_path: Path) -> tuple[EodCommandService, JobService]:
     return (
         EodCommandService(
             jobs,
-            config=EodExecutionConfig.production(code_version="test-code"),
+            config=EodExecutionConfig.production(
+                code_version="test-code", settings=app_settings(tmp_path)
+            ),
         ),
         jobs,
     )
@@ -98,7 +101,7 @@ def test_enqueue_rejects_unsafe_idempotency_keys(tmp_path: Path, key: str) -> No
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("lookback_days", True),
+        ("planner_lookback_days", True),
         ("max_days_per_chunk", True),
         ("max_items_per_chunk", True),
     ],
@@ -108,9 +111,20 @@ def test_execution_config_rejects_bool_integer_fields(field: str, value: bool) -
         "code_version": "test-code",
         "adapter_version": "test-adapter",
         "rule_version": "test-rules",
-        "lookback_days": 0,
+        "resolution_rule_version": "source-resolution.daily-bar-unadjusted.k3.v1",
+        "source_route_version": "test-route",
+        "baostock_version": "0.9.3",
+        "baostock_unit_policy_version": "test-baostock-units",
+        "planner_lookback_days": 0,
+        "adapter_context_lookback_days": 15,
         "max_days_per_chunk": 1,
         "max_items_per_chunk": 1,
+        "endpoint_invocation_limit": 16,
+        "c_endpoint_invocation_limit": 4,
+        "d_endpoint_invocation_limit": 4,
+        "estimated_http_request_limit": 24,
+        "estimated_baostock_protocol_message_limit": 12,
+        "legacy_import_manifest_sha256": None,
         "datasets": {},
     }
     arguments[field] = value
@@ -185,7 +199,9 @@ def test_retry_rejects_changed_request_or_execution_versions(tmp_path: Path) -> 
 
     changed = EodCommandService(
         jobs,
-        config=EodExecutionConfig.production(code_version="changed-code"),
+        config=EodExecutionConfig.production(
+            code_version="changed-code", settings=app_settings(tmp_path)
+        ),
     )
     with pytest.raises(ValueError, match="exactly match"):
         changed.enqueue(

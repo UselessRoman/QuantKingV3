@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 
+from quantking.data.adapters.sources.units import upstream_unit_policy_version
 from quantking.data.adapters.warehouse.manifest import (
     WAREHOUSE_COMPLETE_FILENAME,
     WAREHOUSE_MANIFEST_FILENAME,
@@ -27,6 +28,7 @@ from quantking.data.adapters.warehouse.manifest import (
     path_safe_id,
 )
 from quantking.data.comparison.comparator import CrossSourceComparisonOutcome
+from quantking.data.comparison.thresholds import uses_decimal_evidence
 
 _DATA_DIFF_SUBDIR = "data-diff"
 _ROW_DIFFERENCES_FILENAME = "row_differences.json"
@@ -70,11 +72,17 @@ def _manifest_payload(outcome: CrossSourceComparisonOutcome) -> dict[str, object
         list(outcome.sample_spec), ensure_ascii=False, separators=(",", ":"), sort_keys=True
     ).encode("utf-8")
     shared_candidate = outcome.primary_version_id == outcome.fallback_version_id
+    if uses_decimal_evidence(outcome.threshold_rule_version) and not shared_candidate:
+        raise ValueError("K3 decimal evidence requires a shared resolution candidate")
     payload: dict[str, object] = {
         "manifest_schema_version": (
-            "difference-report-manifest.k2.v2"
-            if shared_candidate
-            else "difference-report-manifest.v1"
+            "difference-report-manifest.k3.v3"
+            if uses_decimal_evidence(outcome.threshold_rule_version)
+            else (
+                "difference-report-manifest.k2.v2"
+                if shared_candidate
+                else "difference-report-manifest.v1"
+            )
         ),
         "report_id": str(outcome.report_id),
         "dataset": outcome.dataset.value,
@@ -123,11 +131,17 @@ def _manifest_payload(outcome: CrossSourceComparisonOutcome) -> dict[str, object
                 "reason": outcome.fallback_empty_result.reason,
             }
         )
+    if uses_decimal_evidence(outcome.threshold_rule_version):
+        payload["unit_policy_versions"] = {
+            "primary": upstream_unit_policy_version(outcome.primary_source),
+            "fallback": upstream_unit_policy_version(outcome.fallback_source),
+        }
     return payload
 
 
 def _row_differences_bytes(outcome: CrossSourceComparisonOutcome) -> bytes:
-    payload = [diff.to_dict() for diff in outcome.row_differences]
+    decimal_strings = uses_decimal_evidence(outcome.threshold_rule_version)
+    payload = [diff.to_dict(decimal_strings=decimal_strings) for diff in outcome.row_differences]
     return _canonical_json({"rows": payload}).encode("utf-8")
 
 

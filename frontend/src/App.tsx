@@ -200,15 +200,27 @@ function FilterBar({
   );
 }
 
-function VersionLineage({ value }: { value: Record<string, unknown> }) {
+interface VersionReleaseLineage {
+  version: Record<string, unknown>;
+  source_batches: Record<string, unknown>[];
+  quality_runs: Record<string, unknown>[];
+  difference_reports: Record<string, unknown>[];
+  resolution: Record<string, unknown>;
+}
+
+function VersionLineage({ value }: { value: VersionReleaseLineage }) {
   return (
     <div className="lineage-detail" aria-label="Version 完整血缘">
       <h3>Version 血缘</h3>
       <dl>
         {["version_id", "parent_version_id", "input_batch_ids", "coverage", "coverage_start", "coverage_end", "quality_run_id", "schema_version", "rule_version", "content_sha256"].map((key) => (
-          <div key={key}><dt>{key}</dt><dd>{displayValue(key, value[key])}</dd></div>
+          <div key={key}><dt>{key}</dt><dd>{displayValue(key, value.version[key])}</dd></div>
         ))}
       </dl>
+      <h4>来源批次</h4><DataTable rows={value.source_batches} />
+      <h4>质量运行</h4><DataTable rows={value.quality_runs} />
+      <h4>差异报告</h4><DataTable rows={value.difference_reports} />
+      <h4>仲裁摘要</h4><DataTable rows={[value.resolution]} />
     </div>
   );
 }
@@ -257,7 +269,7 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
   const [jobError, setJobError] = useState<string | null>(null);
   const [stream, dispatch] = useReducer(streamReducer, initialStreamState);
   const cursorRef = useRef(0);
-  const [versionDetail, setVersionDetail] = useState<Record<string, unknown> | null>(null);
+  const [versionDetail, setVersionDetail] = useState<VersionReleaseLineage | null>(null);
   const [preview, setPreview] = useState<{
     versionId: string;
     rows: Record<string, unknown>[];
@@ -273,8 +285,8 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
   } | null>(null);
   const [differenceReport, setDifferenceReport] = useState<Record<string, unknown> | null>(null);
   const [detail, setDetail] = useState<{ title: string; rows: Record<string, unknown>[] } | null>(null);
-  const [startDate, setStartDate] = useState("2026-07-28");
-  const [endDate, setEndDate] = useState("2026-07-28");
+  const [startDate, setStartDate] = useState("2026-06-11");
+  const [endDate, setEndDate] = useState("2026-08-09");
   const [selected, setSelected] = useState<string[]>([...datasets]);
   const [baseMode, setBaseMode] = useState<"root" | "mapping">("root");
   const [baseVersions, setBaseVersions] = useState<Record<string, string>>({});
@@ -447,8 +459,8 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
     setDataState("loading");
     try {
       const detailResult = await api.getData(
-        `/api/data/versions/${encodeURIComponent(versionId)}`,
-      ) as Record<string, unknown>;
+        `/api/data/versions/${encodeURIComponent(versionId)}/lineage`,
+      ) as VersionReleaseLineage;
       setVersionDetail(detailResult);
       await loadPreviewPage(versionId);
       setDataState("ready");
@@ -731,6 +743,7 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
                   {baseMode === "mapping" && selected.map((dataset) => <label key={dataset}>{dataset}<input aria-label={`${dataset} version`} placeholder="data_version:…" value={baseVersions[dataset] ?? ""} onChange={(event) => setBaseVersions((value) => ({ ...value, [dataset]: event.target.value }))} /></label>)}
                 </fieldset>
                 <p className="notice">发布意图固定为 <code>PUBLISH_AFTER_QUALITY</code>；POST 只入队，不启动 Worker。</p>
+                <p className="notice">首发 scope 由服务端固定为 <code>000001.SZ</code>、<code>600000.SH</code>，浏览器不能提交或扩大证券范围。</p>
                 <button type="submit">入队 EOD</button>
               </form>
               {eodMessage && <p role="status">{eodMessage}</p>}

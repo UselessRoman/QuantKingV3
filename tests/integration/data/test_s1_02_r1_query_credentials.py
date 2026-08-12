@@ -157,10 +157,14 @@ def _make_passed_quality_run(
     )
     from quantking.data.quality.rules import default_rule_set
 
+    # This legacy credential test always evaluates the historical v1 rules.
+    # Some negative cases deliberately persist a different candidate rule
+    # version afterward so the query boundary can reject manifest drift.
+    rule_set = default_rule_set()
     request = QualityRequest(
         dataset=version.dataset,
         version_id=version.version_id,
-        rule_version=version.rule_version,
+        rule_version=rule_set.rule_version,
         schema_version=version.schema_version,
         code_version=version.code_version,
         content_sha256=_compute_content_sha(table),
@@ -178,7 +182,7 @@ def _make_passed_quality_run(
         },
         empty_result=None,
     )
-    engine = QualityEngine(rule_set=default_rule_set())
+    engine = QualityEngine(rule_set=rule_set)
     outcome = engine.execute(
         request=request,
         table=table,

@@ -28,7 +28,7 @@ from quantking.data.adapters.sources.registry import SourceSpec, source_spec
 from quantking.data.adapters.sources.request_window import AkshareRequestWindow
 from quantking.data.adapters.sources.units import resolve_returned_units
 from quantking.data.incremental import FetchChunk, validate_fetch_chunk
-from quantking.data.models import DataUpstream
+from quantking.data.models import DataProvider, DataUpstream
 
 
 class DataFrameLike(Protocol):
@@ -357,6 +357,10 @@ class AkshareMarketDataGateway:
         if not isinstance(adapter, AkshareDailyBarAdapter):
             raise TypeError("adapter must be an AkshareDailyBarAdapter")
         self.adapter = adapter
+
+    @property
+    def provider(self) -> DataProvider:
+        return DataProvider.AKSHARE
 
     @property
     def upstream(self) -> DataUpstream:

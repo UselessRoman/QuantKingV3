@@ -307,9 +307,11 @@ class TestDirectConstructionConsistency:
 
     def test_k1_upstreams_are_fixed_and_distinct(self) -> None:
         assert tuple(DataUpstream) == (
+            DataUpstream.BAOSTOCK,
             DataUpstream.EASTMONEY,
             DataUpstream.TENCENT,
             DataUpstream.SINA,
+            DataUpstream.XTQUANT,
         )
 
 

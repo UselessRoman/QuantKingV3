@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+from tests.helpers import app_settings
 
 from quantking.cli.eod import run_cli
 from quantking.data.eod.contracts import EodBaseVersion
@@ -31,7 +34,9 @@ def _ports(tmp_path: Path) -> tuple[EodCommandService, JobService, NoWorker]:
     jobs = JobService(SqliteUnitOfWorkFactory(create_sqlite_engine(database, busy_timeout_ms=250)))
     command = EodCommandService(
         jobs,
-        config=EodExecutionConfig.production(code_version="test-code"),
+        config=EodExecutionConfig.production(
+            code_version="test-code", settings=app_settings(tmp_path)
+        ),
     )
     return command, jobs, NoWorker()
 
@@ -83,12 +88,14 @@ def test_cli_freezes_controlled_exact_base_mapping(tmp_path: Path) -> None:
         def resolve(self, *, dataset: str, version_id: str, scope: tuple[str, ...]):
             assert dataset == base.dataset
             assert version_id == base.version_id
-            assert scope == ()
+            assert scope == ("000001.SZ", "600000.SH")
             return base
 
     command = EodCommandService(
         jobs,
-        config=EodExecutionConfig.production(code_version="test-code"),
+        config=EodExecutionConfig.production(
+            code_version="test-code", settings=app_settings(tmp_path)
+        ),
         base_resolver=Resolver(),
     )
     output = io.StringIO()
@@ -122,6 +129,14 @@ def test_cli_invalid_or_forbidden_inputs_return_stable_nonzero_error(tmp_path: P
     command, jobs, worker = _ports(tmp_path)
     for argv in (
         ["eod-enqueue", "--trade-date", "latest"],
+        ["eod-enqueue", "--start-date", "2026-06-11"],
+        [
+            "eod-enqueue",
+            "--trade-date",
+            "2026-06-11",
+            "--end-date",
+            "2026-06-12",
+        ],
         [
             "eod-enqueue",
             "--trade-date",
@@ -157,6 +172,96 @@ def test_module_entrypoint_help_is_available_without_runtime_side_effects() -> N
     assert completed.returncode == 0
     assert "usage:" in completed.stdout
     assert "eod-enqueue" in completed.stdout
+    assert "eod-dry-run" in completed.stdout
+
+
+def test_cli_range_and_trade_date_freeze_the_same_request_shape(tmp_path: Path) -> None:
+    command, jobs, worker = _ports(tmp_path)
+    common = [
+        "--datasets",
+        "daily_bar_unadjusted",
+        "--publish-intent",
+        "PUBLISH_AFTER_QUALITY",
+    ]
+    day_output = io.StringIO()
+    range_output = io.StringIO()
+
+    assert (
+        run_cli(
+            [
+                "eod-enqueue",
+                "--trade-date",
+                "2026-07-15",
+                "--idempotency-key",
+                "day-key",
+                *common,
+            ],
+            eod_commands=command,
+            worker=worker,
+            jobs=jobs,
+            stdout=day_output,
+        )
+        == 0
+    )
+    assert (
+        run_cli(
+            [
+                "eod-enqueue",
+                "--start-date",
+                "2026-07-15",
+                "--end-date",
+                "2026-07-15",
+                "--idempotency-key",
+                "range-key",
+                *common,
+            ],
+            eod_commands=command,
+            worker=worker,
+            jobs=jobs,
+            stdout=range_output,
+        )
+        == 0
+    )
+    day = jobs.get_job(json.loads(day_output.getvalue())["job_id"])
+    ranged = jobs.get_job(json.loads(range_output.getvalue())["job_id"])
+    assert day.input_manifest["request_json"] == ranged.input_manifest["request_json"]
+    assert day.config_manifest["config_json"] == ranged.config_manifest["config_json"]
+
+
+def test_dry_run_subprocess_is_read_only_and_reports_fixed_budget(tmp_path: Path) -> None:
+    data_root = tmp_path / "must-not-exist"
+    environment = dict(os.environ)
+    environment["QUANTKING_DATA_ROOT"] = str(data_root.resolve())
+    environment["QUANTKING_OFFSITE_BACKUP_ROOT"] = str((tmp_path / "offsite").resolve())
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "quantking.cli.eod", "eod-dry-run"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=environment,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 0
+    assert payload["scope"] == ["000001.SZ", "600000.SH"]
+    assert payload["planner_lookback_days"] == 0
+    assert payload["adapter_context_lookback_days"] == 15
+    assert len(payload["a_chunks"]) == len(payload["b_chunks"]) == 4
+    assert len(payload["max_c_chunks"]) == 4
+    assert len(payload["max_d_chunks"]) == 4
+    assert payload["network_budget"] == {
+        "a_baostock_endpoint_invocations": 4,
+        "application_retries": 0,
+        "b_eastmoney_endpoint_invocations": 4,
+        "estimated_max_akshare_http_requests": 24,
+        "estimated_max_baostock_protocol_messages": 12,
+        "max_c_endpoint_invocations": 4,
+        "max_d_endpoint_invocations": 4,
+        "max_endpoint_invocations": 16,
+    }
+    assert not data_root.exists()
 
 
 def test_internal_type_error_is_runtime_failure_not_argument_error(tmp_path: Path) -> None:

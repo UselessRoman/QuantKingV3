@@ -11,6 +11,7 @@ requires-python = "==3.12.13"
 dependencies = [
     "akshare==1.18.83",
     "alembic>=1.15,<2",
+    "baostock==0.9.3",
     "backtrader==1.9.78.123",
     "duckdb>=1.2,<2",
     "fastapi>=0.115,<1",
@@ -24,6 +25,7 @@ dependencies = [
 
 [project.scripts]
 quantking-data = "quantking.cli.eod:main"
+quantking-legacy-import = "quantking.cli.legacy_import:main"
 quantking-web = "quantking.web.main:main"
 
 [dependency-groups]
@@ -44,6 +46,7 @@ testpaths = ["tests"]
 markers = [
     "real_external: accesses an explicitly authorized external validation target",
     "real_akshare: accesses real AKShare upstream services",
+    "real_k3_sources: accesses the fixed BaoStock and AKShare K3 probe targets",
     "real_legacy_data: reads the authorized legacy-data root",
     "real_backup: writes a real data or backup root",
 ]

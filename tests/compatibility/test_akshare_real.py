@@ -15,6 +15,7 @@ from quantking.data.adapters.sources.akshare import (
 )
 from quantking.data.adapters.sources.contracts import SourceAdapterError
 from quantking.data.adapters.sources.parameters import DailyBarRequest
+from quantking.data.adapters.sources.registry import AKSHARE_RUNTIME_UPSTREAMS
 from quantking.data.models import DataUpstream
 
 _PRICE_FIELDS = ("open", "high", "low", "close", "pre_close")
@@ -117,7 +118,7 @@ def _probe_failures(
     errors: Mapping[tuple[DataUpstream, str], str],
 ) -> tuple[str, ...]:
     failures: list[str] = []
-    for upstream in DataUpstream:
+    for upstream in AKSHARE_RUNTIME_UPSTREAMS:
         for symbol in _SYMBOLS:
             key = (upstream, symbol)
             if key in errors:
@@ -239,7 +240,7 @@ def test_probe_failure_aggregation_is_stable_and_does_not_hide_partial_failures(
         records=({**dict(one_row.records[0]), "date": "2026-08-06"},),
     )
     complete_results: dict[tuple[DataUpstream, str], _ProbeResult] = {
-        (upstream, symbol): one_row for upstream in DataUpstream for symbol in _SYMBOLS
+        (upstream, symbol): one_row for upstream in AKSHARE_RUNTIME_UPSTREAMS for symbol in _SYMBOLS
     }
     complete_results[(DataUpstream.TENCENT, "000001.SZ")] = different_date
     assert _probe_failures(complete_results, {}) == ("AB_NO_COMMON_DATES:000001.SZ",)
@@ -261,7 +262,7 @@ def test_fixed_akshare_daily_bar_probe() -> None:
     start, end = _probe_window(date.today())
     results: dict[tuple[DataUpstream, str], AkshareEndpointResponse] = {}
     errors: dict[tuple[DataUpstream, str], str] = {}
-    for upstream in DataUpstream:
+    for upstream in AKSHARE_RUNTIME_UPSTREAMS:
         adapter = AkshareDailyBarAdapter(upstream)
         for symbol in _SYMBOLS:
             try:

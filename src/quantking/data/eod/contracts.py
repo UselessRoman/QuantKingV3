@@ -17,7 +17,8 @@ from quantking.data.models import DatasetKind
 EOD_JOB_TYPE = "data.eod.v1"
 EOD_REQUEST_SCHEMA = "eod-request.v1"
 EOD_REQUEST_MANIFEST_SCHEMA = "eod-request-manifest.v1"
-EOD_CONFIG_SCHEMA = "eod-execution-config.v1"
+LEGACY_EOD_CONFIG_SCHEMA = "eod-execution-config.v2"
+EOD_CONFIG_SCHEMA = "eod-execution-config.v3"
 
 _DATASET_ORDER = (
     DatasetKind.EXCHANGE_CALENDAR,
@@ -460,6 +461,7 @@ __all__ = [
     "EOD_JOB_TYPE",
     "EOD_REQUEST_MANIFEST_SCHEMA",
     "EOD_REQUEST_SCHEMA",
+    "LEGACY_EOD_CONFIG_SCHEMA",
     "EodBaseVersion",
     "EodDatasetConfig",
     "EodPublishIntent",

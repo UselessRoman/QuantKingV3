@@ -16,6 +16,7 @@ from quantking.data.adapters.sources.contracts import (
     SourceErrorCode,
     SupplierResponse,
 )
+from quantking.data.adapters.sources.registry import AKSHARE_RUNTIME_UPSTREAMS
 from quantking.data.incremental import FetchChunk
 from quantking.data.models import (
     DatasetKind,
@@ -44,7 +45,7 @@ def _chunk(
     )
 
 
-@pytest.mark.parametrize("upstream", tuple(DataUpstream))
+@pytest.mark.parametrize("upstream", AKSHARE_RUNTIME_UPSTREAMS)
 def test_gateway_maps_all_upstreams_to_same_sorted_canonical_schema(
     upstream: DataUpstream,
 ) -> None:

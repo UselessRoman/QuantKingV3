@@ -13,7 +13,6 @@ from quantking.common.time import UtcTimestamp
 from quantking.data.comparison.thresholds import THRESHOLD_RULE_VERSION, default_thresholds
 from quantking.data.models import DatasetKind, DataUpstream
 from quantking.data.resolution import (
-    RESOLUTION_RULE_VERSION,
     CRequestTrace,
     ResolutionArtifactVerificationError,
     ResolutionArtifactVerifier,
@@ -27,6 +26,7 @@ from quantking.data.resolution import (
     ResolutionSourceStatus,
     verify_resolution_artifact,
 )
+from quantking.data.resolution.models import K2_RESOLUTION_RULE_VERSION
 
 _SHA_A = "a" * 64
 _SHA_B = "b" * 64
@@ -63,12 +63,16 @@ def _run() -> ResolutionRun:
         symbol="600000.SH",
         trade_date=date(2026, 8, 7),
         source_bindings=(a, b, c),
-        compared_upstreams=tuple(DataUpstream),
+        compared_upstreams=(
+            DataUpstream.EASTMONEY,
+            DataUpstream.TENCENT,
+            DataUpstream.SINA,
+        ),
         agreeing_upstreams=(DataUpstream.EASTMONEY, DataUpstream.SINA),
         selected_upstream=DataUpstream.EASTMONEY,
         selected_row_present=True,
         reason_code=ResolutionReasonCode.AC_AGREE_A_SELECTED,
-        rule_version=RESOLUTION_RULE_VERSION,
+        rule_version=K2_RESOLUTION_RULE_VERSION,
         difference_report_ids=reports,
         created_job_id=job,  # type: ignore[arg-type]
         created_at=created,
@@ -83,12 +87,16 @@ def _run() -> ResolutionRun:
         symbol="600000.SH",
         trade_date=date(2026, 8, 8),
         source_bindings=(a, b, c),
-        compared_upstreams=tuple(DataUpstream),
+        compared_upstreams=(
+            DataUpstream.EASTMONEY,
+            DataUpstream.TENCENT,
+            DataUpstream.SINA,
+        ),
         agreeing_upstreams=(),
         selected_upstream=None,
         selected_row_present=None,
         reason_code=ResolutionReasonCode.NO_TWO_SOURCE_CONSENSUS,
-        rule_version=RESOLUTION_RULE_VERSION,
+        rule_version=K2_RESOLUTION_RULE_VERSION,
         difference_report_ids=reports,
         created_job_id=job,  # type: ignore[arg-type]
         created_at=created,
@@ -104,7 +112,7 @@ def _run() -> ResolutionRun:
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         created_job_id=job,  # type: ignore[arg-type]
         created_at=created,
-        rule_version=RESOLUTION_RULE_VERSION,
+        rule_version=K2_RESOLUTION_RULE_VERSION,
         threshold_rule_version=THRESHOLD_RULE_VERSION,
         input_fingerprint="f" * 64,
         candidate_version_id=None,
@@ -316,7 +324,7 @@ def test_run_rejects_unbound_duplicate_or_cross_job_decisions() -> None:
             run,
             exceptions=(replace(decision, created_job_id=_id("job", 99)),),
         )
-    with pytest.raises(ValueError, match="absent from run inputs"):
+    with pytest.raises(ValueError, match=r"exceptional source|absent from run inputs"):
         replace(run, input_bindings=run.input_bindings[:2])
     duplicate = replace(
         run.conflicts[0],

@@ -11,6 +11,7 @@ from quantking.data.adapters.sources.contracts import (
     VolumeUnit,
 )
 from quantking.data.adapters.sources.parameters import DailyBarRequest
+from quantking.data.adapters.sources.registry import AKSHARE_RUNTIME_UPSTREAMS
 from quantking.data.adapters.sources.units import (
     AKSHARE_UNIT_POLICY_VERSION,
     resolve_returned_units,
@@ -68,7 +69,7 @@ def test_tencent_frozen_policy_preserves_000_sz_lots_only(symbol: str) -> None:
     ),
 )
 def test_non_k1_code_segments_are_rejected_and_never_assigned_units(symbol: str) -> None:
-    for upstream in DataUpstream:
+    for upstream in AKSHARE_RUNTIME_UPSTREAMS:
         resolved = resolve_returned_units(upstream, symbol, "1.18.83")
         assert resolved.volume_unit is VolumeUnit.UNVERIFIED
         assert resolved.amount_unit is AmountUnit.UNVERIFIED
@@ -80,7 +81,7 @@ def test_non_k1_code_segments_are_rejected_and_never_assigned_units(symbol: str)
 
 
 def test_unverified_package_version_never_reuses_the_frozen_policy() -> None:
-    for upstream in DataUpstream:
+    for upstream in AKSHARE_RUNTIME_UPSTREAMS:
         resolved = resolve_returned_units(upstream, "600000.SH", "1.18.84")
         assert resolved.volume_unit is VolumeUnit.UNVERIFIED
         assert resolved.amount_unit is AmountUnit.UNVERIFIED

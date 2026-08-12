@@ -32,14 +32,18 @@ class DataProvider(StrEnum):
     """In-process market-data access library."""
 
     AKSHARE = "AKSHARE"
+    BAOSTOCK = "BAOSTOCK"
+    XTQUANT_LEGACY = "XTQUANT_LEGACY"
 
 
 class DataUpstream(StrEnum):
     """Actual remote upstream reached through the provider library."""
 
+    BAOSTOCK = "BAOSTOCK"
     EASTMONEY = "EASTMONEY"
     TENCENT = "TENCENT"
     SINA = "SINA"
+    XTQUANT = "XTQUANT"
 
 
 class BatchFailureKind(StrEnum):

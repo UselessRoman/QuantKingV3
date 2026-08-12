@@ -15,10 +15,13 @@ from quantking.data.adapters.warehouse.manifest import path_safe_id
 from quantking.data.comparison.thresholds import THRESHOLD_RULE_VERSION
 from quantking.data.models import DatasetKind, DataUpstream
 from quantking.data.resolution.models import (
+    K2_RESOLUTION_RULE_VERSION,
+    K3_RESOLUTION_RULE_VERSION,
     CRequestTrace,
     ResolutionDecision,
     ResolutionDefaultSummary,
     ResolutionReasonCode,
+    ResolutionRequestTrace,
     ResolutionRun,
     ResolutionRunBlocker,
     ResolutionRunRecord,
@@ -26,13 +29,33 @@ from quantking.data.resolution.models import (
     ResolutionSourceStatus,
 )
 
-_SCHEMA_VERSION = "resolution-artifact.v1"
+_K2_SCHEMA_VERSION = "resolution-artifact.v1"
+_K3_SCHEMA_VERSION = "resolution-artifact.v2"
 _SUMMARY = "summary.json"
 _EXCEPTIONS = "exceptions.jsonl"
 _CONFLICTS = "conflicts.jsonl"
 _MANIFEST = "manifest.json"
 _COMPLETE = "COMPLETE"
 _FILES = (_SUMMARY, _EXCEPTIONS, _CONFLICTS)
+_MANIFEST_FIELDS = {
+    "schema_version",
+    "run_id",
+    "dataset",
+    "created_job_id",
+    "created_at",
+    "rule_version",
+    "threshold_rule_version",
+    "input_fingerprint",
+    "candidate_version_id",
+    "status",
+    "total_decisions",
+    "default_decision_count",
+    "exception_count",
+    "conflict_count",
+    "blocker_count",
+    "files",
+    "manifest_sha256",
+}
 
 
 class ResolutionArtifactConflictError(Exception):
@@ -86,7 +109,7 @@ def _file_entry(payload: bytes, *, row_count: int) -> dict[str, object]:
 
 def _manifest_payload(run: ResolutionRun, files: dict[str, bytes]) -> dict[str, object]:
     return {
-        "schema_version": _SCHEMA_VERSION,
+        "schema_version": _schema_for_rule(run.rule_version),
         "run_id": str(run.run_id),
         "dataset": run.dataset.value,
         "created_job_id": str(run.created_job_id),
@@ -117,6 +140,14 @@ def _manifest_payload(run: ResolutionRun, files: dict[str, bytes]) -> dict[str, 
             for name in _FILES
         },
     }
+
+
+def _schema_for_rule(rule_version: str) -> str:
+    if rule_version == K2_RESOLUTION_RULE_VERSION:
+        return _K2_SCHEMA_VERSION
+    if rule_version == K3_RESOLUTION_RULE_VERSION:
+        return _K3_SCHEMA_VERSION
+    raise ValueError("resolution rule version is unsupported")
 
 
 def _signed_manifest(payload: dict[str, object]) -> tuple[bytes, str]:
@@ -270,8 +301,13 @@ def _source_binding(value: object) -> ResolutionSourceBinding:
         raise ResolutionArtifactVerificationError("source binding is invalid") from error
 
 
-def _decision(value: dict[str, object]) -> ResolutionDecision:
-    expected = {
+def _decision(
+    value: dict[str, object],
+    *,
+    schema_version: str,
+    manifest_rule_version: str,
+) -> ResolutionDecision:
+    common = {
         "symbol",
         "trade_date",
         "source_bindings",
@@ -285,15 +321,16 @@ def _decision(value: dict[str, object]) -> ResolutionDecision:
         "difference_report_ids",
         "created_job_id",
         "created_at",
-        "c_request",
     }
+    expected = common | (
+        {"c_request"} if schema_version == _K2_SCHEMA_VERSION else {"request_traces"}
+    )
     if set(value) != expected:
         raise ResolutionArtifactVerificationError("decision fields are invalid")
     bindings = value["source_bindings"]
     compared = value["compared_upstreams"]
     agreeing = value["agreeing_upstreams"]
     report_ids = value["difference_report_ids"]
-    c_request = value["c_request"]
     selected_row_present = value["selected_row_present"]
     if (
         not isinstance(bindings, list)
@@ -303,11 +340,44 @@ def _decision(value: dict[str, object]) -> ResolutionDecision:
         or (selected_row_present is not None and not isinstance(selected_row_present, bool))
     ):
         raise ResolutionArtifactVerificationError("decision collections are invalid")
-    if c_request is not None and (
-        not isinstance(c_request, dict)
-        or set(c_request) != {"symbol", "start_date", "end_date", "trigger_reason"}
-    ):
-        raise ResolutionArtifactVerificationError("C request fields are invalid")
+    c_request = value.get("c_request")
+    trace_values = value.get("request_traces", [])
+    legacy_trace: dict[str, object] | None = None
+    if schema_version == _K2_SCHEMA_VERSION:
+        if c_request is not None and (
+            not isinstance(c_request, dict)
+            or set(c_request) != {"symbol", "start_date", "end_date", "trigger_reason"}
+        ):
+            raise ResolutionArtifactVerificationError("C request fields are invalid")
+        if isinstance(c_request, dict):
+            legacy_trace = c_request
+        request_traces: tuple[ResolutionRequestTrace, ...] = ()
+    else:
+        if not isinstance(trace_values, list):
+            raise ResolutionArtifactVerificationError("request traces are invalid")
+        parsed_traces: list[ResolutionRequestTrace] = []
+        for trace in trace_values:
+            if not isinstance(trace, dict) or set(trace) != {
+                "upstream",
+                "symbol",
+                "start_date",
+                "end_date",
+                "trigger_reason",
+            }:
+                raise ResolutionArtifactVerificationError("request trace fields are invalid")
+            try:
+                parsed_traces.append(
+                    ResolutionRequestTrace(
+                        upstream=DataUpstream(str(trace["upstream"])),
+                        symbol=str(trace["symbol"]),
+                        start_date=date.fromisoformat(str(trace["start_date"])),
+                        end_date=date.fromisoformat(str(trace["end_date"])),
+                        trigger_reason=str(trace["trigger_reason"]),
+                    )
+                )
+            except (TypeError, ValueError) as error:
+                raise ResolutionArtifactVerificationError("request trace is invalid") from error
+        request_traces = tuple(parsed_traces)
     try:
         result = ResolutionDecision(
             symbol=str(value["symbol"]),
@@ -328,19 +398,22 @@ def _decision(value: dict[str, object]) -> ResolutionDecision:
             created_at=UtcTimestamp.from_iso(str(value["created_at"])),
             c_request=(
                 None
-                if c_request is None
+                if legacy_trace is None
                 else CRequestTrace(
-                    symbol=str(c_request["symbol"]),
-                    start_date=date.fromisoformat(str(c_request["start_date"])),
-                    end_date=date.fromisoformat(str(c_request["end_date"])),
-                    trigger_reason=str(c_request["trigger_reason"]),
+                    symbol=str(legacy_trace["symbol"]),
+                    start_date=date.fromisoformat(str(legacy_trace["start_date"])),
+                    end_date=date.fromisoformat(str(legacy_trace["end_date"])),
+                    trigger_reason=str(legacy_trace["trigger_reason"]),
                 )
             ),
+            request_traces=request_traces,
         )
     except (TypeError, ValueError) as error:
         raise ResolutionArtifactVerificationError("decision is invalid") from error
     if value["threshold_rule_version"] != THRESHOLD_RULE_VERSION:
         raise ResolutionArtifactVerificationError("threshold rule version is invalid")
+    if result.rule_version != manifest_rule_version:
+        raise ResolutionArtifactVerificationError("decision rule does not match manifest")
     if result.to_dict() != value:
         raise ResolutionArtifactVerificationError("decision is not canonical")
     return result
@@ -473,11 +546,23 @@ def verify_resolution_artifact(
     if actual_files != {*_FILES, _MANIFEST, _COMPLETE}:
         raise ResolutionArtifactVerificationError("resolution artifact file set is invalid")
     manifest, manifest_bytes = _plain_json(resolved / _MANIFEST)
+    if set(manifest) != _MANIFEST_FIELDS:
+        raise ResolutionArtifactVerificationError("resolution manifest fields are invalid")
     embedded = manifest.get("manifest_sha256")
     unsigned = dict(manifest)
     unsigned.pop("manifest_sha256", None)
     if not isinstance(embedded, str) or _sha(_canonical(unsigned)) != embedded:
         raise ResolutionArtifactVerificationError("resolution manifest SHA is invalid")
+    schema_version = manifest.get("schema_version")
+    rule_version = manifest.get("rule_version")
+    if not isinstance(schema_version, str) or not isinstance(rule_version, str):
+        raise ResolutionArtifactVerificationError("resolution schema/rule is invalid")
+    try:
+        expected_schema = _schema_for_rule(rule_version)
+    except ValueError as error:
+        raise ResolutionArtifactVerificationError("resolution schema/rule is invalid") from error
+    if schema_version != expected_schema:
+        raise ResolutionArtifactVerificationError("resolution schema/rule is invalid")
     complete, _ = _plain_json(resolved / _COMPLETE)
     if complete != {"manifest_sha256": embedded}:
         raise ResolutionArtifactVerificationError("COMPLETE does not bind the manifest")
@@ -495,8 +580,22 @@ def verify_resolution_artifact(
     for name, (payload, rows) in payloads.items():
         if file_entries[name] != {"sha256": _sha(payload), "size": len(payload), "row_count": rows}:
             raise ResolutionArtifactVerificationError("resolution file binding is invalid")
-    exceptions = tuple(_decision(value) for value in exception_values)
-    conflicts = tuple(_decision(value) for value in conflict_values)
+    exceptions = tuple(
+        _decision(
+            value,
+            schema_version=schema_version,
+            manifest_rule_version=rule_version,
+        )
+        for value in exception_values
+    )
+    conflicts = tuple(
+        _decision(
+            value,
+            schema_version=schema_version,
+            manifest_rule_version=rule_version,
+        )
+        for value in conflict_values
+    )
     if any(item.conflict for item in exceptions) or any(not item.conflict for item in conflicts):
         raise ResolutionArtifactVerificationError("decision classification is invalid")
     if tuple(sorted(exceptions, key=lambda item: (item.symbol, item.trade_date))) != exceptions:

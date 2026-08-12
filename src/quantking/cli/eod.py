@@ -7,6 +7,7 @@ import json
 import sys
 from collections.abc import Sequence
 from datetime import date
+from pathlib import Path
 from typing import NoReturn, Protocol, TextIO
 
 from quantking.common.errors import QuantKingError
@@ -46,8 +47,12 @@ class _Parser(argparse.ArgumentParser):
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="quantking-data", add_help=True)
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("eod-dry-run")
     enqueue = commands.add_parser("eod-enqueue")
-    enqueue.add_argument("--trade-date", required=True)
+    dates = enqueue.add_mutually_exclusive_group(required=True)
+    dates.add_argument("--trade-date")
+    dates.add_argument("--start-date")
+    enqueue.add_argument("--end-date")
     enqueue.add_argument("--datasets", nargs="+", required=True)
     enqueue.add_argument(
         "--base-version",
@@ -138,12 +143,21 @@ def run_cli(
     if arguments.command == "eod-enqueue":
         try:
             try:
-                trade_date = date.fromisoformat(arguments.trade_date)
+                if arguments.trade_date is not None:
+                    if arguments.end_date is not None:
+                        raise _ArgumentError
+                    start_date = date.fromisoformat(arguments.trade_date)
+                    end_date = start_date
+                else:
+                    if arguments.start_date is None or arguments.end_date is None:
+                        raise _ArgumentError
+                    start_date = date.fromisoformat(arguments.start_date)
+                    end_date = date.fromisoformat(arguments.end_date)
             except ValueError as error:
                 raise _ArgumentError from error
             request = EodRunRequest(
-                start_date=trade_date,
-                end_date=trade_date,
+                start_date=start_date,
+                end_date=end_date,
                 datasets=tuple(arguments.datasets),
                 publish_intent=EodPublishIntent(arguments.publish_intent),
                 base_versions=_base_versions(arguments.base_version),
@@ -247,6 +261,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     if any(item in {"-h", "--help"} for item in arguments):
         _parser().parse_args(list(arguments))
         return 0
+    if arguments and arguments[0] == "eod-dry-run":
+        try:
+            _parser().parse_args(list(arguments))
+            from quantking.common.config import load_settings
+            from quantking.data.eod.release import build_s108_dry_run
+
+            repository_root = Path(__file__).resolve().parents[3]
+            settings = load_settings(repository_root / "configs" / "default.toml")
+            _write(
+                sys.stdout,
+                build_s108_dry_run(settings, code_version="s1-08.v1"),
+            )
+            return 0
+        except Exception:
+            _write(
+                sys.stdout,
+                {
+                    "error": {
+                        "code": "DRY_RUN_FAILED",
+                        "message": "The S1-08 dry-run plan could not be produced.",
+                    }
+                },
+            )
+            return 1
     try:
         from quantking.common.time import UtcTimestamp, utc_now
         from quantking.runtime import (

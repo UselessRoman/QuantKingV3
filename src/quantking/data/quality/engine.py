@@ -94,6 +94,8 @@ class QualityEngine:
             raise TypeError("table must be a pyarrow.Table")
         if not isinstance(reference_tables, Mapping):
             raise TypeError("reference_tables must be a mapping")
+        if request.rule_version != self._rule_set.rule_version:
+            raise ValueError("quality request rule_version does not match the engine rule set")
         started_at = utc_now()
         actual_content_sha = canonical_content_sha256(
             request.dataset,

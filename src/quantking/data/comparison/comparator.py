@@ -27,6 +27,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
 
@@ -35,7 +36,14 @@ import pyarrow as pa
 from quantking.common.ids import EntityId
 from quantking.common.time import UtcTimestamp
 from quantking.data.adapters.canonical_schema import canonical_schema, validate_table
-from quantking.data.comparison.thresholds import ThresholdSet, ThresholdSpec
+from quantking.data.comparison.thresholds import (
+    ThresholdSet,
+    ThresholdSpec,
+    canonical_decimal,
+    decimal_difference,
+    decimal_from_number,
+    uses_decimal_evidence,
+)
 from quantking.data.models import DatasetKind, DataUpstream, EmptyResultInfo
 from quantking.data.schemas import descriptor_for
 
@@ -68,8 +76,8 @@ class RowDifference:
     classification: str
     primary_value: Any
     fallback_value: Any
-    absolute_difference: float | None
-    relative_difference: float | None
+    absolute_difference: Decimal | None
+    relative_difference: Decimal | None
     threshold: ThresholdSpec | None
 
     def __post_init__(self) -> None:
@@ -84,26 +92,76 @@ class RowDifference:
         ):
             raise ValueError(f"invalid classification: {self.classification!r}")
         object.__setattr__(self, "primary_key", MappingProxyType(dict(self.primary_key)))
+        for field_name in ("absolute_difference", "relative_difference"):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, Decimal):
+                raise TypeError(f"{field_name} must be a Decimal or None")
+            if value is not None and (not value.is_finite() or value < 0):
+                raise ValueError(f"{field_name} must be a non-negative finite Decimal")
+        if self.threshold is not None and not isinstance(self.threshold, ThresholdSpec):
+            raise TypeError("threshold must be a ThresholdSpec or None")
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, decimal_strings: bool = False) -> dict[str, Any]:
         """Serialize to a JSON-friendly dict for the artifact manifest."""
+        absolute: str | float | None
+        relative: str | float | None
+        if decimal_strings:
+            absolute = (
+                None
+                if self.absolute_difference is None
+                else canonical_decimal(self.absolute_difference)
+            )
+            relative = (
+                None
+                if self.relative_difference is None
+                else canonical_decimal(self.relative_difference)
+            )
+        else:
+            absolute, relative = self._legacy_float_evidence()
         return {
             "primary_key": {k: _json_value(v) for k, v in self.primary_key.items()},
             "field": self.field,
             "classification": self.classification,
             "primary_value": _json_value(self.primary_value),
             "fallback_value": _json_value(self.fallback_value),
-            "absolute_difference": self.absolute_difference,
-            "relative_difference": self.relative_difference,
+            "absolute_difference": absolute,
+            "relative_difference": relative,
             "threshold": (
                 {
-                    "absolute": self.threshold.absolute,
-                    "relative": self.threshold.relative,
+                    "absolute": (
+                        canonical_decimal(self.threshold.absolute)
+                        if decimal_strings
+                        else float(self.threshold.absolute)
+                    ),
+                    "relative": (
+                        canonical_decimal(self.threshold.relative)
+                        if decimal_strings
+                        else float(self.threshold.relative)
+                    ),
                 }
                 if self.threshold is not None
                 else None
             ),
         }
+
+    def _legacy_float_evidence(self) -> tuple[float | None, float | None]:
+        """Reproduce historical k1.v1 JSON numbers for byte-identical rebuilds."""
+        if self.absolute_difference is None:
+            return None, None
+        if (
+            isinstance(self.primary_value, bool)
+            or isinstance(self.fallback_value, bool)
+            or not isinstance(self.primary_value, (int, float))
+            or not isinstance(self.fallback_value, (int, float))
+        ):
+            return float(self.absolute_difference), (
+                None if self.relative_difference is None else float(self.relative_difference)
+            )
+        difference = abs(float(self.primary_value) - float(self.fallback_value))
+        if self.relative_difference is None:
+            return difference, None
+        base = max(abs(float(self.primary_value)), abs(float(self.fallback_value)), 1e-12)
+        return difference, difference / base
 
 
 def _json_value(value: Any) -> Any:
@@ -112,6 +170,8 @@ def _json_value(value: Any) -> Any:
         return None
     if isinstance(value, (str, int, float, bool)):
         return value
+    if isinstance(value, Decimal):
+        return canonical_decimal(value)
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, datetime):
@@ -597,12 +657,13 @@ def _compare_field(
             )
         return None
     if isinstance(primary_value, (int, float)) and isinstance(fallback_value, (int, float)):
+        primary_decimal = decimal_from_number(primary_value, field="primary_value")
+        fallback_decimal = decimal_from_number(fallback_value, field="fallback_value")
         spec = thresholds.get(field_name)
         if spec is not None:
-            if not spec.exceeds(float(primary_value), float(fallback_value)):
+            if not spec.exceeds(primary_decimal, fallback_decimal):
                 return None
-            diff = abs(float(primary_value) - float(fallback_value))
-            base = max(abs(float(primary_value)), abs(float(fallback_value)), 1e-12)
+            diff, relative_difference = decimal_difference(primary_decimal, fallback_decimal)
             return RowDifference(
                 primary_key=key_dict,
                 field=field_name,
@@ -610,18 +671,18 @@ def _compare_field(
                 primary_value=primary_value,
                 fallback_value=fallback_value,
                 absolute_difference=diff,
-                relative_difference=diff / base,
+                relative_difference=relative_difference,
                 threshold=spec,
             )
         # No threshold: exact equality.
-        if float(primary_value) != float(fallback_value):
+        if primary_decimal != fallback_decimal:
             return RowDifference(
                 primary_key=key_dict,
                 field=field_name,
                 classification=RowClassification.BOTH,
                 primary_value=primary_value,
                 fallback_value=fallback_value,
-                absolute_difference=abs(float(primary_value) - float(fallback_value)),
+                absolute_difference=abs(primary_decimal - fallback_decimal),
                 relative_difference=None,
                 threshold=None,
             )
@@ -673,7 +734,10 @@ def _compute_report_sha256(
         "total_compared": total_compared,
         "total_differences": total_differences,
         "field_differences": dict(field_differences),
-        "row_differences": [d.to_dict() for d in row_differences],
+        "row_differences": [
+            d.to_dict(decimal_strings=uses_decimal_evidence(request.thresholds.rule_version))
+            for d in row_differences
+        ],
     }
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

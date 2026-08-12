@@ -17,7 +17,6 @@ from quantking.data.adapters.persistence.sqlite import (
 from quantking.data.comparison.thresholds import THRESHOLD_RULE_VERSION
 from quantking.data.models import DatasetKind, DatasetVersion, DataUpstream
 from quantking.data.resolution import (
-    RESOLUTION_RULE_VERSION,
     CRequestTrace,
     ResolutionArtifactWriter,
     ResolutionDecision,
@@ -28,6 +27,11 @@ from quantking.data.resolution import (
     ResolutionSourceStatus,
     VerifiedResolutionArtifact,
     verify_resolution_artifact,
+)
+from quantking.data.resolution.models import (
+    K2_RESOLUTION_RULE_VERSION,
+    K3_RESOLUTION_RULE_VERSION,
+    ResolutionRequestTrace,
 )
 from quantking.jobs.adapters.persistence.sqlite import initialize_database
 
@@ -102,12 +106,16 @@ def _run(
                 symbol="600000.SH",
                 trade_date=date(2026, 8, 7),
                 source_bindings=(a, b, c),
-                compared_upstreams=tuple(DataUpstream),
+                compared_upstreams=(
+                    DataUpstream.EASTMONEY,
+                    DataUpstream.TENCENT,
+                    DataUpstream.SINA,
+                ),
                 agreeing_upstreams=(),
                 selected_upstream=None,
                 selected_row_present=None,
                 reason_code=ResolutionReasonCode.NO_TWO_SOURCE_CONSENSUS,
-                rule_version=RESOLUTION_RULE_VERSION,
+                rule_version=K2_RESOLUTION_RULE_VERSION,
                 difference_report_ids=reports,
                 created_job_id=job,
                 created_at=UtcTimestamp.from_iso(created_at),
@@ -130,7 +138,7 @@ def _run(
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         created_job_id=job,
         created_at=UtcTimestamp.from_iso(created_at),
-        rule_version=RESOLUTION_RULE_VERSION,
+        rule_version=K2_RESOLUTION_RULE_VERSION,
         threshold_rule_version=THRESHOLD_RULE_VERSION,
         input_fingerprint=fingerprint,
         candidate_version_id=candidate,
@@ -151,6 +159,68 @@ def _run(
         run_blockers=(),
         exceptions=(),
         conflicts=conflict_decisions,
+    )
+
+
+def _k3_run(*, job: EntityId) -> ResolutionRun:
+    bindings = (
+        _binding(DataUpstream.BAOSTOCK, ResolutionSourceStatus.AVAILABLE, 201, "1"),
+        _binding(DataUpstream.EASTMONEY, ResolutionSourceStatus.AVAILABLE, 202, "2"),
+        _binding(DataUpstream.TENCENT, ResolutionSourceStatus.AVAILABLE, 203, "3"),
+        _binding(DataUpstream.SINA, ResolutionSourceStatus.AVAILABLE, 204, "4"),
+    )
+    reports = tuple(_id("data_diff", suffix) for suffix in range(401, 407))
+    created_at = UtcTimestamp.from_iso("2026-08-10T00:20:00Z")
+    decision = ResolutionDecision(
+        symbol="600000.SH",
+        trade_date=date(2026, 8, 7),
+        source_bindings=bindings,
+        compared_upstreams=(
+            DataUpstream.BAOSTOCK,
+            DataUpstream.EASTMONEY,
+            DataUpstream.TENCENT,
+            DataUpstream.SINA,
+        ),
+        agreeing_upstreams=(),
+        selected_upstream=None,
+        selected_row_present=None,
+        reason_code=ResolutionReasonCode.NO_TWO_SOURCE_CONSENSUS,
+        rule_version=K3_RESOLUTION_RULE_VERSION,
+        difference_report_ids=reports,
+        created_job_id=job,
+        created_at=created_at,
+        request_traces=(
+            ResolutionRequestTrace(
+                upstream=DataUpstream.TENCENT,
+                symbol="600000.SH",
+                start_date=date(2026, 8, 7),
+                end_date=date(2026, 8, 7),
+                trigger_reason="AB_AFFECTED_RANGE",
+            ),
+            ResolutionRequestTrace(
+                upstream=DataUpstream.SINA,
+                symbol="600000.SH",
+                start_date=date(2026, 8, 7),
+                end_date=date(2026, 8, 7),
+                trigger_reason="ABC_NO_CONSENSUS",
+            ),
+        ),
+    )
+    return ResolutionRun(
+        run_id=_id("data_resolution", 20),
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        created_job_id=job,
+        created_at=created_at,
+        rule_version=K3_RESOLUTION_RULE_VERSION,
+        threshold_rule_version=THRESHOLD_RULE_VERSION,
+        input_fingerprint="8" * 64,
+        candidate_version_id=None,
+        input_bindings=bindings,
+        difference_report_ids=reports,
+        default_summary=None,
+        run_blockers=(),
+        exceptions=(),
+        conflicts=(decision,),
     )
 
 
@@ -194,6 +264,28 @@ def test_resolution_repository_roundtrip_idempotency_and_immutability(
         uow.data.save_resolution_run(
             run,
             replace(verified, manifest_sha256="d" * 64),
+        )
+
+
+def test_k3_resolution_repository_roundtrip_uses_v2_without_schema_change(
+    repository: tuple[DataSqliteUnitOfWorkFactory, Path, Path],
+) -> None:
+    factory, database, artifacts = repository
+    run = _k3_run(job=_job(database, 20))
+    verified = _verified(run, artifacts)
+    assert verified.summary["rule_version"] == K3_RESOLUTION_RULE_VERSION
+
+    with factory() as uow:
+        record = uow.data.save_resolution_run(run, verified)
+        uow.commit()
+    with factory() as uow:
+        assert uow.data.save_resolution_run(run, verified) == record
+        assert uow.data.get_resolution_run(str(run.run_id)) == record
+        uow.commit()
+    with factory() as uow, pytest.raises(InvalidDataTransitionError, match="immutable"):
+        uow.data.save_resolution_run(
+            run,
+            replace(verified, manifest_sha256="7" * 64),
         )
 
 

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from tests.helpers import app_settings
 
 from quantking.cli.eod import run_cli
 from quantking.data.eod.contracts import EodRunRequest
@@ -14,10 +15,10 @@ from quantking.jobs.services import JobService
 from quantking.web.app import create_app
 
 
-def _command(jobs: JobService) -> EodCommandService:
+def _command(jobs: JobService, root: Path) -> EodCommandService:
     return EodCommandService(
         jobs,
-        config=EodExecutionConfig.production(code_version="test-code"),
+        config=EodExecutionConfig.production(code_version="test-code", settings=app_settings(root)),
     )
 
 
@@ -33,8 +34,9 @@ def _body(*, day: str = "2026-07-15") -> dict[str, object]:
 
 def test_post_enqueues_only_returns_202_and_idempotently_replays(
     job_service: JobService,
+    tmp_path: Path,
 ) -> None:
-    command = _command(job_service)
+    command = _command(job_service, tmp_path)
     app = create_app(
         job_service,
         eod_command_port=command,
@@ -63,8 +65,9 @@ def test_post_enqueues_only_returns_202_and_idempotently_replays(
 
 def test_post_rejects_missing_key_unknown_fields_and_conflicting_replay(
     job_service: JobService,
+    tmp_path: Path,
 ) -> None:
-    command = _command(job_service)
+    command = _command(job_service, tmp_path)
     app = create_app(job_service, eod_command_port=command)
     with TestClient(app) as client:
         missing = client.post("/api/data/eod-runs", json=_body())
@@ -94,8 +97,9 @@ def test_post_rejects_missing_key_unknown_fields_and_conflicting_replay(
 
 def test_post_maps_domain_validation_to_stable_sanitized_400(
     job_service: JobService,
+    tmp_path: Path,
 ) -> None:
-    command = _command(job_service)
+    command = _command(job_service, tmp_path)
     app = create_app(job_service, eod_command_port=command)
     with TestClient(app) as client:
         inverted = client.post(
@@ -130,8 +134,8 @@ def test_post_maps_domain_validation_to_stable_sanitized_400(
         assert "E:\\" not in response.text
 
 
-def test_cancel_requires_and_checks_row_version(job_service: JobService) -> None:
-    command = _command(job_service)
+def test_cancel_requires_and_checks_row_version(job_service: JobService, tmp_path: Path) -> None:
+    command = _command(job_service, tmp_path)
     created = command.enqueue(
         EodRunRequest.from_dict(
             {
@@ -172,8 +176,7 @@ def test_route_does_not_touch_gateway_or_worker(
     job_service: JobService,
     tmp_path: Path,
 ) -> None:
-    del tmp_path
-    command = _command(job_service)
+    command = _command(job_service, tmp_path)
     with TestClient(create_app(job_service, eod_command_port=command)) as client:
         response = client.post(
             "/api/data/eod-runs",
@@ -186,8 +189,9 @@ def test_route_does_not_touch_gateway_or_worker(
 
 def test_cancel_returns_conflict_inside_non_cancellable_phase(
     job_service: JobService,
+    tmp_path: Path,
 ) -> None:
-    command = _command(job_service)
+    command = _command(job_service, tmp_path)
     created = command.enqueue(
         EodRunRequest.from_dict(
             {
@@ -223,8 +227,9 @@ def test_cancel_returns_conflict_inside_non_cancellable_phase(
 
 def test_cli_and_api_freeze_identical_request_manifests(
     job_service: JobService,
+    tmp_path: Path,
 ) -> None:
-    command = _command(job_service)
+    command = _command(job_service, tmp_path)
     output = io.StringIO()
 
     assert (

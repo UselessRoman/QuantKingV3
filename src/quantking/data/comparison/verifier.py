@@ -12,33 +12,53 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, cast
 
 from quantking.common.ids import EntityId, parse_entity_id
 from quantking.common.time import UtcTimestamp
+from quantking.data.adapters.sources.units import upstream_unit_policy_version
 from quantking.data.adapters.warehouse.manifest import (
     WAREHOUSE_COMPLETE_FILENAME,
     WAREHOUSE_MANIFEST_FILENAME,
     compute_sha256,
 )
 from quantking.data.comparison.comparator import RowClassification
-from quantking.data.comparison.thresholds import THRESHOLD_RULE_VERSION
-from quantking.data.models import EmptyResultInfo, LegalEmptyClassification
+from quantking.data.comparison.thresholds import (
+    K3_CANDIDATE_RULE_VERSION,
+    THRESHOLD_RULE_VERSION,
+    canonical_decimal,
+    decimal_difference,
+    default_thresholds,
+    k3_evidence_candidate_thresholds,
+)
+from quantking.data.models import (
+    DatasetKind,
+    DataUpstream,
+    EmptyResultInfo,
+    LegalEmptyClassification,
+)
 from quantking.data.schemas import canonical_code_pattern, descriptor_for
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
 _ROW_DIFFERENCES_FILENAME = "row_differences.json"
 _MANIFEST_SCHEMA_VERSION = "difference-report-manifest.v1"
 _K2_MANIFEST_SCHEMA_VERSION = "difference-report-manifest.k2.v2"
+_K3_MANIFEST_SCHEMA_VERSION = "difference-report-manifest.k3.v3"
 _K2_BINDING_MODE = "SHARED_RESOLUTION_CANDIDATE"
 
 
 class DifferenceReportVerificationError(Exception):
     """Raised when a DifferenceReport artifact fails structural verification."""
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON number")
 
 
 @dataclass(frozen=True)
@@ -132,8 +152,11 @@ class DifferenceReportVerifier:
 
         try:
             manifest_bytes = manifest_path.read_bytes()
-            manifest = json.loads(manifest_bytes.decode("utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            manifest = json.loads(
+                manifest_bytes.decode("utf-8"),
+                parse_constant=_reject_json_constant,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as error:
             raise DifferenceReportVerificationError("manifest.json is not valid JSON") from error
 
         if not isinstance(manifest, dict):
@@ -205,8 +228,11 @@ class DifferenceReportVerifier:
 
         try:
             row_differences_bytes = row_differences_path.read_bytes()
-            row_differences_payload = json.loads(row_differences_bytes.decode("utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            row_differences_payload = json.loads(
+                row_differences_bytes.decode("utf-8"),
+                parse_constant=_reject_json_constant,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as error:
             raise DifferenceReportVerificationError(
                 "row_differences.json is not valid JSON"
             ) from error
@@ -312,7 +338,10 @@ class DifferenceReportVerifier:
             "total_differences",
         }
         manifest_schema_version = manifest.get("manifest_schema_version")
-        if manifest_schema_version == _K2_MANIFEST_SCHEMA_VERSION:
+        if manifest_schema_version in {
+            _K2_MANIFEST_SCHEMA_VERSION,
+            _K3_MANIFEST_SCHEMA_VERSION,
+        }:
             required.update(
                 {
                     "binding_mode",
@@ -321,22 +350,50 @@ class DifferenceReportVerifier:
                     "fallback_empty_result",
                 }
             )
+        if manifest_schema_version == _K3_MANIFEST_SCHEMA_VERSION:
+            required.add("unit_policy_versions")
         if set(manifest) != required:
             raise DifferenceReportVerificationError("manifest fields do not match schema")
         if manifest_schema_version not in {
             _MANIFEST_SCHEMA_VERSION,
             _K2_MANIFEST_SCHEMA_VERSION,
+            _K3_MANIFEST_SCHEMA_VERSION,
         }:
             raise DifferenceReportVerificationError("manifest schema version is unsupported")
-        if manifest_schema_version == _K2_MANIFEST_SCHEMA_VERSION and (
+        if manifest_schema_version == _K3_MANIFEST_SCHEMA_VERSION:
+            try:
+                primary_upstream = DataUpstream(str(manifest["primary_source"]))
+                fallback_upstream = DataUpstream(str(manifest["fallback_source"]))
+                expected_unit_policies = {
+                    "primary": upstream_unit_policy_version(primary_upstream),
+                    "fallback": upstream_unit_policy_version(fallback_upstream),
+                }
+            except (TypeError, ValueError) as error:
+                raise DifferenceReportVerificationError(
+                    "K3 unit policy source binding is invalid"
+                ) from error
+            if manifest["unit_policy_versions"] != expected_unit_policies:
+                raise DifferenceReportVerificationError("K3 unit policy binding is invalid")
+        if manifest_schema_version in {
+            _K2_MANIFEST_SCHEMA_VERSION,
+            _K3_MANIFEST_SCHEMA_VERSION,
+        } and (
             manifest["binding_mode"] != _K2_BINDING_MODE
             or manifest["primary_version_id"] != manifest["fallback_version_id"]
             or manifest["dataset"] != "daily_bar_unadjusted"
-            or manifest["threshold_rule_version"] != THRESHOLD_RULE_VERSION
+            or manifest["threshold_rule_version"]
+            != (
+                K3_CANDIDATE_RULE_VERSION
+                if manifest_schema_version == _K3_MANIFEST_SCHEMA_VERSION
+                else THRESHOLD_RULE_VERSION
+            )
         ):
             raise DifferenceReportVerificationError("K2 shared candidate binding is invalid")
         comparison_keys = manifest.get("comparison_primary_keys")
-        if manifest_schema_version == _K2_MANIFEST_SCHEMA_VERSION and (
+        if manifest_schema_version in {
+            _K2_MANIFEST_SCHEMA_VERSION,
+            _K3_MANIFEST_SCHEMA_VERSION,
+        } and (
             not isinstance(comparison_keys, list)
             or any(
                 not isinstance(key, list)
@@ -346,7 +403,10 @@ class DifferenceReportVerifier:
             )
         ):
             raise DifferenceReportVerificationError("K2 comparison scope is invalid")
-        if manifest_schema_version == _K2_MANIFEST_SCHEMA_VERSION:
+        if manifest_schema_version in {
+            _K2_MANIFEST_SCHEMA_VERSION,
+            _K3_MANIFEST_SCHEMA_VERSION,
+        }:
             comparison_keys = cast(list[list[str]], comparison_keys)
             normalized_scope: list[tuple[str, str]] = []
             for key in comparison_keys:
@@ -440,7 +500,8 @@ class DifferenceReportVerifier:
         previous_sort: tuple[tuple[str, ...], str] | None = None
         units: list[VerifiedDifferenceUnit] = []
         comparison_scope = None
-        if manifest.get("manifest_schema_version") == _K2_MANIFEST_SCHEMA_VERSION:
+        manifest_schema = manifest.get("manifest_schema_version")
+        if manifest_schema in {_K2_MANIFEST_SCHEMA_VERSION, _K3_MANIFEST_SCHEMA_VERSION}:
             comparison_keys = cast(list[list[str]], manifest["comparison_primary_keys"])
             comparison_scope = {(item[0], item[1]) for item in comparison_keys}
         for row in rows:
@@ -476,6 +537,11 @@ class DifferenceReportVerifier:
                     raise DifferenceReportVerificationError("row evidence field is invalid")
             elif field:
                 raise DifferenceReportVerificationError("row-level difference must not carry field")
+            _verify_numeric_evidence(
+                row,
+                decimal_strings=manifest_schema == _K3_MANIFEST_SCHEMA_VERSION,
+                threshold_rule_version=str(manifest["threshold_rule_version"]),
+            )
             sort_key = (tuple(pk[name] for name in descriptor.primary_key), field)
             if previous_sort is not None and sort_key < previous_sort:
                 raise DifferenceReportVerificationError("row evidence is not in stable order")
@@ -514,7 +580,10 @@ def _compute_report_sha_from_manifest(manifest: dict[str, object], rows: list[ob
         "threshold_rule_version": manifest["threshold_rule_version"],
         "sample_spec": manifest["sample_spec"],
     }
-    if manifest.get("manifest_schema_version") == _K2_MANIFEST_SCHEMA_VERSION:
+    if manifest.get("manifest_schema_version") in {
+        _K2_MANIFEST_SCHEMA_VERSION,
+        _K3_MANIFEST_SCHEMA_VERSION,
+    }:
         request["comparison_primary_keys"] = manifest["comparison_primary_keys"]
         request["primary_empty_result"] = manifest["primary_empty_result"]
         request["fallback_empty_result"] = manifest["fallback_empty_result"]
@@ -548,3 +617,108 @@ def _empty_result_payload(value: object) -> dict[str, str] | None:
     if empty.classification is not LegalEmptyClassification.NO_TRADING_SESSION:
         raise DifferenceReportVerificationError("K2 empty result must be NO_TRADING_SESSION")
     return {"classification": classification, "reason": reason}
+
+
+def _evidence_decimal(value: object) -> Decimal:
+    if not isinstance(value, str) or not value:
+        raise DifferenceReportVerificationError(
+            "K3 numeric evidence must be a canonical decimal string"
+        )
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as error:
+        raise DifferenceReportVerificationError(
+            "K3 numeric evidence must be a canonical decimal string"
+        ) from error
+    if not parsed.is_finite() or parsed < 0 or canonical_decimal(parsed) != value:
+        raise DifferenceReportVerificationError(
+            "K3 numeric evidence must be a canonical decimal string"
+        )
+    return parsed
+
+
+def _legacy_number(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise DifferenceReportVerificationError("legacy numeric evidence is invalid")
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise DifferenceReportVerificationError("legacy numeric evidence is invalid")
+    return result
+
+
+def _verify_numeric_evidence(
+    row: dict[str, object],
+    *,
+    decimal_strings: bool,
+    threshold_rule_version: str,
+) -> None:
+    classification = row["classification"]
+    field = row["field"]
+    primary = row["primary_value"]
+    fallback = row["fallback_value"]
+    absolute = row["absolute_difference"]
+    relative = row["relative_difference"]
+    threshold = row["threshold"]
+    if classification != RowClassification.BOTH or not field:
+        if any(value is not None for value in (primary, fallback, absolute, relative, threshold)):
+            raise DifferenceReportVerificationError("row-level difference evidence is invalid")
+        return
+    if primary is None or fallback is None:
+        if absolute is not None or relative is not None or threshold is not None:
+            raise DifferenceReportVerificationError("null difference evidence is invalid")
+        return
+    numeric = (
+        not isinstance(primary, bool)
+        and not isinstance(fallback, bool)
+        and isinstance(primary, (int, float))
+        and isinstance(fallback, (int, float))
+    )
+    if not numeric:
+        if absolute is not None or relative is not None or threshold is not None:
+            raise DifferenceReportVerificationError("non-numeric difference evidence is invalid")
+        if primary == fallback:
+            raise DifferenceReportVerificationError("equal values cannot be difference evidence")
+        return
+    if not isinstance(threshold, dict) or set(threshold) != {"absolute", "relative"}:
+        raise DifferenceReportVerificationError("numeric threshold evidence is invalid")
+    frozen = (
+        k3_evidence_candidate_thresholds()
+        if threshold_rule_version == K3_CANDIDATE_RULE_VERSION
+        else default_thresholds()
+    )
+    if frozen.rule_version != threshold_rule_version:
+        raise DifferenceReportVerificationError("threshold rule version is unsupported")
+    expected_threshold = frozen.for_dataset(DatasetKind.DAILY_BAR_UNADJUSTED).get(str(field))
+    if expected_threshold is None:
+        raise DifferenceReportVerificationError("numeric threshold evidence is invalid")
+    expected_absolute, expected_relative = decimal_difference(
+        cast(int | float, primary),
+        cast(int | float, fallback),
+    )
+    if expected_absolute == 0:
+        raise DifferenceReportVerificationError("equal values cannot be difference evidence")
+    if decimal_strings:
+        if (
+            _evidence_decimal(absolute) != expected_absolute
+            or _evidence_decimal(relative) != expected_relative
+        ):
+            raise DifferenceReportVerificationError("K3 numeric difference evidence mismatch")
+        if (
+            _evidence_decimal(threshold["absolute"]) != expected_threshold.absolute
+            or _evidence_decimal(threshold["relative"]) != expected_threshold.relative
+        ):
+            raise DifferenceReportVerificationError("K3 threshold evidence mismatch")
+        return
+    primary_float = float(cast(int | float, primary))
+    fallback_float = float(cast(int | float, fallback))
+    legacy_absolute = abs(primary_float - fallback_float)
+    legacy_base = max(abs(primary_float), abs(fallback_float), 1e-12)
+    if (
+        _legacy_number(absolute) != legacy_absolute
+        or _legacy_number(relative) != legacy_absolute / legacy_base
+    ):
+        raise DifferenceReportVerificationError("legacy numeric difference evidence mismatch")
+    if _legacy_number(threshold["absolute"]) != float(
+        expected_threshold.absolute
+    ) or _legacy_number(threshold["relative"]) != float(expected_threshold.relative):
+        raise DifferenceReportVerificationError("legacy threshold evidence mismatch")

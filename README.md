@@ -4,16 +4,16 @@ QuantKing V3 是单用户、本机运行的 A 股日频量化研究项目。当�
 
 ## 当前数据路线
 
-- 统一使用 AKShare。
-- A=东财、B=腾讯：每次日线更新互相校验。
-- C=新浪：A/B 任一失败、缺失或分歧时参与第三方判定。
-- 三个上游分别落 Raw；每个证券/交易日的最终选择来源和原因都可由 resolution 摘要与例外记录追溯。
-- K2 使用 `ResolutionDecision` 记录正常仲裁，不使用人工备用源审批状态机。
-- 无法得到两源一致时隔离，不发布。
-- 不依赖 XTQuant、MiniQMT、QMT 客户端、券商账号或密码。
+- 已接受 BaoStock 常态供数 + AKShare 东财常态互验；异常时依次调用腾讯、最后调用新浪。
+- 四个实际来源分别落 Raw；至少两个独立来源在冻结规则内一致才可发布。
+- 旧项目 XTQuant 日线只按 `DATA_ONLY` 受管导入，并逐行取得 BaoStock/AKShare 独立复核；
+  不恢复 XTQuant、MiniQMT 或 QMT 运行依赖。
+- 每个证券/交易日的选择来源和原因由 `ResolutionDecision` 追溯；无两源一致时隔离。
+- S1-07K3 的 BaoStock 适配器、四源仲裁、受管旧数据导入器、正式 EOD、DataCenter 与只读
+  verifier 已完成离线实现；旧根实际清单/导入和代表性四源实测尚未完成。
 
 ```text
-AKShare(Eastmoney/Tencent/Sina)
+BaoStock + AKShare(Eastmoney/Tencent/Sina) + XTQuant legacy DATA_ONLY
     → Raw
     → Canonical
     → 质量与跨源比较
@@ -32,8 +32,10 @@ AKShare(Eastmoney/Tencent/Sina)
 
 ## 状态
 
-Stage 0 已完成。Stage 1 的 S1-01～S1-06、K1 和 K2 已完成主验收；S1-08 任务已设计但
-尚未授权执行。Stage 1 尚未完成，Stage 2 未开始。
+Stage 0 已完成。Stage 1 的 S1-01～S1-06、K1 和 K2 已完成主验收；S1-08 首次正式 Job 因
+三源量额零容差被阻断，没有发布版本。K3 离线实现已完成；唯一四源真实 marker 在 BaoStock
+首调用成功后因东财网络失败按零重试规则停止，因此阈值候选仍未激活，旧根也未读取。
+Stage 1 尚未完成，Stage 2 未开始。
 
 - [总体架构](docs/ARCHITECTURE.md)
 - [架构决策](docs/DECISIONS.md)

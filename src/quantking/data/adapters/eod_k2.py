@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from collections.abc import Callable, Mapping
@@ -17,9 +16,17 @@ from quantking.common.ids import EntityId, new_entity_id, parse_entity_id
 from quantking.common.time import TradingDate, UtcTimestamp
 from quantking.data.adapters.canonical_schema import canonical_schema, ensure_sorted, validate_table
 from quantking.data.adapters.persistence.sqlite import DataSqliteUnitOfWorkFactory
-from quantking.data.adapters.resolution_sources import K2ResolutionSourcePort
+from quantking.data.adapters.resolution_sources import (
+    K2ResolutionSourcePort,
+    K3ResolutionSourcePort,
+)
+from quantking.data.adapters.sources.budget import EndpointInvocationBudget, K3EndpointBudget
 from quantking.data.adapters.sources.contracts import SourceAdapterError, SourceErrorCode
 from quantking.data.adapters.sources.ingestion import AkshareIngestionService
+from quantking.data.adapters.sources.registry import (
+    AKSHARE_RUNTIME_UPSTREAMS,
+    PRODUCTION_UPSTREAMS,
+)
 from quantking.data.adapters.warehouse.manifest import path_safe_id
 from quantking.data.adapters.warehouse.publish_coordinator import (
     CanonicalPublishCoordinator,
@@ -28,9 +35,9 @@ from quantking.data.adapters.warehouse.publish_coordinator import (
 )
 from quantking.data.adapters.warehouse.query import CanonicalQueryAdapter
 from quantking.data.adapters.warehouse.verifier import verify_raw_directory
-from quantking.data.comparison.thresholds import THRESHOLD_RULE_VERSION
 from quantking.data.comparison.verifier import DifferenceReportVerifier
-from quantking.data.eod.contracts import EOD_JOB_TYPE, EodReferenceVersion, canonical_json
+from quantking.data.eod.contracts import EOD_JOB_TYPE, EodReferenceVersion
+from quantking.data.eod.fingerprint import eod_input_fingerprint
 from quantking.data.eod.frozen import (
     FrozenEodCommand,
     FrozenEodCommandError,
@@ -64,7 +71,12 @@ from quantking.data.resolution.artifacts import (
     verify_resolution_artifact,
 )
 from quantking.data.resolution.differences import K2DifferenceArtifactRecorder
-from quantking.data.resolution.models import RESOLUTION_RULE_VERSION, ResolutionRunRecord
+from quantking.data.resolution.k3_service import K3SourceResolutionService
+from quantking.data.resolution.models import (
+    K2_RESOLUTION_RULE_VERSION,
+    K3_RESOLUTION_RULE_VERSION,
+    ResolutionRunRecord,
+)
 from quantking.data.resolution.service import ResolutionRequest, SourceResolutionService
 from quantking.jobs.jsonl import JsonLinesHandler
 from quantking.jobs.models import JobRun, JobStatus
@@ -98,32 +110,6 @@ def _reconstruct(job: JobRun) -> FrozenEodCommand:
         raise EodExecutionError("FROZEN_COMMAND_INVALID") from error
 
 
-def _input_fingerprint(command: FrozenEodCommand) -> str:
-    payload = {
-        "schema_version": "eod-input-fingerprint.k2.v1",
-        "request_sha256": command.request_sha256,
-        "config_sha256": command.config_sha256,
-        "code_version": command.code_version,
-        "adapter_version": command.adapter_version,
-        "quality_rule_version": command.rule_version,
-        "threshold_rule_version": THRESHOLD_RULE_VERSION,
-        "resolution_rule_version": RESOLUTION_RULE_VERSION,
-        "scope": [
-            {
-                "dataset": plan.dataset.value,
-                "symbols": list(plan.scope),
-                "start_date": command.request.start_date.isoformat(),
-                "end_date": command.request.end_date.isoformat(),
-                "base_version_id": (
-                    None if plan.base_version is None else plan.base_version.version_id
-                ),
-            }
-            for plan in command.datasets
-        ],
-    }
-    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
-
-
 class EodWorkerHandler:
     """Execute one daily-bar K2 command from frozen JobRun manifests."""
 
@@ -141,9 +127,13 @@ class EodWorkerHandler:
         log_root: Path | None = None,
         fault_injector: Callable[[str], None] | None = None,
     ) -> None:
-        if set(ingestions) != set(DataUpstream):
-            raise ValueError("EOD requires all three AKShare upstream ingestions")
+        ingestion_sources = set(ingestions)
+        if ingestion_sources != set(AKSHARE_RUNTIME_UPSTREAMS) and ingestion_sources != set(
+            PRODUCTION_UPSTREAMS
+        ):
+            raise ValueError("EOD requires the exact K2 or K3 upstream ingestions")
         self._ingestions = dict(ingestions)
+        self._k3 = ingestion_sources == set(PRODUCTION_UPSTREAMS)
         self._quality_runner = quality_runner
         self._quality_writer = quality_writer
         self._publish = publish_coordinator
@@ -166,10 +156,52 @@ class EodWorkerHandler:
         job = context.service.get_job(context.job_id)
         logger, handler = self._job_logger(job)
         candidate_id: EntityId | None = None
+        endpoint_budget: EndpointInvocationBudget | K3EndpointBudget | None = None
         try:
             command = _reconstruct(job)
+            if (self._k3 and command.resolution_rule_version != K3_RESOLUTION_RULE_VERSION) or (
+                not self._k3 and command.resolution_rule_version != K2_RESOLUTION_RULE_VERSION
+            ):
+                raise EodExecutionError("FROZEN_SOURCE_ROUTE_INVALID")
+            if self._k3:
+                endpoint_budget = K3EndpointBudget(
+                    per_source_limits={upstream: 4 for upstream in PRODUCTION_UPSTREAMS},
+                    total_limit=command.endpoint_invocation_limit,
+                )
+            else:
+                endpoint_budget = EndpointInvocationBudget(
+                    total_limit=command.endpoint_invocation_limit,
+                    c_limit=command.c_endpoint_invocation_limit,
+                )
+            budget_extra: dict[str, object] = {
+                "event": "network_budget_planned",
+                "job_id": context.job_id,
+                "endpoint_limit": command.endpoint_invocation_limit,
+                "application_retries": 0,
+            }
+            if self._k3:
+                budget_extra.update(
+                    {
+                        "tencent_endpoint_limit": command.c_endpoint_invocation_limit,
+                        "sina_endpoint_limit": command.d_endpoint_invocation_limit,
+                        "estimated_akshare_http_request_limit": (
+                            command.estimated_http_request_limit
+                        ),
+                        "estimated_baostock_protocol_message_limit": (
+                            command.estimated_baostock_protocol_message_limit
+                        ),
+                    }
+                )
+            else:
+                budget_extra.update(
+                    {
+                        "sina_endpoint_limit": command.c_endpoint_invocation_limit,
+                        "estimated_http_request_limit": command.estimated_http_request_limit,
+                    }
+                )
+            logger.info("EOD endpoint budget frozen", extra=budget_extra)
             plan = self._daily_plan(command)
-            fingerprint = _input_fingerprint(command)
+            fingerprint = eod_input_fingerprint(command)
             if self._reuse_published(context, fingerprint=fingerprint):
                 logger.info(
                     "EOD reused a strictly verified published version",
@@ -180,35 +212,62 @@ class EodWorkerHandler:
             candidate_id = new_entity_id("data_version")
             created_job_id = parse_entity_id(context.job_id)
             difference_recorder = K2DifferenceArtifactRecorder(artifacts_root=self._resolution_root)
-            source_port = K2ResolutionSourcePort(
-                ingestions=self._ingestions,
-                candidate_version_id=candidate_id,
+            resolution_request = ResolutionRequest(
                 created_job_id=created_job_id,
-                quality_runner=self._quality_runner,
-                quality_writer=self._quality_writer,
-                code_version=command.code_version,
-                adapter_version=command.adapter_version,
-                rule_version=command.rule_version,
-                reference_data=self._references(plan.references),
-                clock=self._clock,
-                checkpoint=lambda: self._source_checkpoint(context),
-                max_days_per_chunk=command.max_days_per_chunk,
-                max_items_per_chunk=command.max_items_per_chunk,
+                candidate_version_id=candidate_id,
+                created_at=self._clock(),
+                input_fingerprint=fingerprint,
+                symbols=plan.scope,
+                start_date=command.request.start_date,
+                end_date=command.request.end_date,
             )
-            resolution = SourceResolutionService(
-                sources=source_port,
-                differences=difference_recorder,
-            ).resolve(
-                ResolutionRequest(
-                    created_job_id=created_job_id,
+            source_port: K2ResolutionSourcePort
+            if self._k3:
+                if not isinstance(endpoint_budget, K3EndpointBudget):
+                    raise EodExecutionError("NETWORK_BUDGET_INVALID")
+                source_port = K3ResolutionSourcePort(
+                    ingestions=self._ingestions,
                     candidate_version_id=candidate_id,
-                    created_at=self._clock(),
-                    input_fingerprint=fingerprint,
-                    symbols=plan.scope,
-                    start_date=command.request.start_date,
-                    end_date=command.request.end_date,
+                    created_job_id=created_job_id,
+                    quality_runner=self._quality_runner,
+                    quality_writer=self._quality_writer,
+                    code_version=command.code_version,
+                    adapter_version=command.adapter_version,
+                    rule_version=command.rule_version,
+                    reference_data=self._references(plan.references),
+                    clock=self._clock,
+                    checkpoint=lambda: self._source_checkpoint(context),
+                    max_days_per_chunk=command.max_days_per_chunk,
+                    max_items_per_chunk=command.max_items_per_chunk,
+                    endpoint_budget=endpoint_budget,
                 )
-            )
+                resolution = K3SourceResolutionService(
+                    sources=source_port,
+                    differences=difference_recorder,
+                ).resolve(resolution_request)
+            else:
+                if not isinstance(endpoint_budget, EndpointInvocationBudget):
+                    raise EodExecutionError("NETWORK_BUDGET_INVALID")
+                source_port = K2ResolutionSourcePort(
+                    ingestions=self._ingestions,
+                    candidate_version_id=candidate_id,
+                    created_job_id=created_job_id,
+                    quality_runner=self._quality_runner,
+                    quality_writer=self._quality_writer,
+                    code_version=command.code_version,
+                    adapter_version=command.adapter_version,
+                    rule_version=command.rule_version,
+                    reference_data=self._references(plan.references),
+                    clock=self._clock,
+                    checkpoint=lambda: self._source_checkpoint(context),
+                    max_days_per_chunk=command.max_days_per_chunk,
+                    max_items_per_chunk=command.max_items_per_chunk,
+                    endpoint_budget=endpoint_budget,
+                )
+                resolution = SourceResolutionService(
+                    sources=source_port,
+                    differences=difference_recorder,
+                ).resolve(resolution_request)
             actual_batch_ids = tuple(
                 sorted(
                     {
@@ -319,11 +378,28 @@ class EodWorkerHandler:
                     "resolution_run_id": str(resolution.run.run_id),
                 },
             )
-        except BaseException:
+        except BaseException as error:
+            logger.error(
+                "EOD execution failed",
+                extra={
+                    "event": "eod_failed",
+                    "job_id": context.job_id,
+                    "error_code": getattr(error, "code", type(error).__name__),
+                },
+            )
             if candidate_id is not None:
                 self._fail_candidate_by_id(candidate_id, code="EOD_FAILED")
             raise
         finally:
+            if endpoint_budget is not None:
+                logger.info(
+                    "S1-08 endpoint budget summary",
+                    extra={
+                        "event": "network_budget_summary",
+                        "job_id": context.job_id,
+                        "network_budget": dict(endpoint_budget.summary()),
+                    },
+                )
             if handler is not None:
                 logger.removeHandler(handler)
                 handler.close()

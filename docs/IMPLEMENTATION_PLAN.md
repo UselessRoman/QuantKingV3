@@ -66,25 +66,29 @@
 
 - 首个发布范围聚焦沪深 A 股未复权日线 OHLCV 和成交额；其他数据集保留 schema 或列为缺口。
 - 生产 EOD 运行时只编排 `daily_bar_unadjusted`；不得遍历六类历史数据集或为未进入本阶段的数据建立来源能力状态机。
-- 使用 AKShare 分别接入东财、腾讯和新浪日线接口。
-- 正常任务采集东财(A)和腾讯(B)互验；异常时调用新浪(C)，至少两源一致才产生候选。
+- 使用 BaoStock 独立服务，并通过 AKShare 分别接入东财、腾讯和新浪日线接口。
+- 正常任务采集 BaoStock(A)与东财(B)互验；异常时依次调用腾讯(C)、新浪(D)，至少两个独立
+  来源在冻结规则内一致才产生候选。
 - K1 删除 XTQuant/QMT、旧来源枚举、`SourceCandidateAssessment` 和 24 单元 source×dataset 矩阵，建立 `provider + upstream` 的最小来源合同。
 - K2 使用 `ResolutionDecision` 表达正常仲裁，退役 `SourceOverride` 生产工作流及其 Web/API 状态。
 - 实现由 Web/CLI 手动触发的同一 EOD 应用服务和幂等入口；不实现内部调度器或 Windows 任务计划。
 - EOD 恢复只依赖冻结 Job、Raw/DatasetVersion manifest 和日志；中断后新建 Job 重试，以输入指纹复用完整发布，不扩展独立证据或多层 checkpoint 状态机。
 - 实现 Raw/Canonical 分层、批次、清单、校验和、质量规则和原子发布。
-- 实现三 upstream 差异报告、显式选源和冲突隔离。
+- 实现四来源差异报告、显式选源和冲突隔离；不得把三个 AKShare upstream 合并为一个来源。
 - 数据中心页面展示来源、版本、覆盖、质量、失败和差异。
-- 旧项目迁移不阻断首个日线版本；如未来迁移，仍只接受通过校验的 `DATA_ONLY`。
+- 将 Stage 0 清单中的旧项目 XTQuant 日线作为 `DATA_ONLY` 导入受管 Raw/staging，保留源 SHA
+  和只读证明；只有通过 Canonical 映射、单源质量及 BaoStock/AKShare 独立复核的行可进入
+  发布候选。旧项目代码、数据库、配置、日志和模型不随本任务迁移。
 
 ### 完成条件
 
 - 可构建并查询一个全量或明确范围的 Canonical `DatasetVersion`。
 - 重复任务幂等；失败批次不污染已发布版本。
-- 东财/腾讯/新浪的小样本与生产差异报告可复现。
+- BaoStock/东财/腾讯/新浪及旧 XTQuant 迁移样本的差异报告可复现。
 - 生产运行时和数据中心不再依赖 XTQuant、旧 source assessment 或 `SourceOverride` 状态机。
 - 北交所、退市/ST/停牌、复权和其他未覆盖范围有明确缺口报告。
 - 数据质量失败会阻止发布并在 Web 显示。
+- 旧根迁移前后指纹一致；导入可中断重跑、按内容幂等，且未复核数据不会被发布。
 
 ## Stage 2：Qlib 数据、因子与标签
 

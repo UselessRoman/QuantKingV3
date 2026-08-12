@@ -20,6 +20,7 @@ def _read(relative: str) -> str:
         "README.md",
         "CONTRACTS.md",
         "ACCEPTANCE.md",
+        "S1-07K3_TASK.md",
         "S1-08_TASK.md",
         "S1-01_ACCEPTANCE.md",
         "S1-02_ACCEPTANCE.md",
@@ -66,22 +67,27 @@ def test_current_status_records_commits_without_claiming_stage_completion() -> N
     assert "f98f1d9" in combined
     assert "0ebf84b" in combined
     assert "S1-08" in combined
-    assert "未授权执行" in combined
+    assert "S1-08 首次" in combined
+    assert "RESOLUTION_BLOCKED" in combined
+    assert "授权已结束" in combined or "授权已经结束" in combined
     assert "Stage 1 尚未完成" in combined
     assert "Stage 2 未开始" in combined
     assert "Stage 1 已完成验收" not in combined
 
 
-def test_single_contract_keeps_the_accepted_k1_k2_route() -> None:
+def test_single_contract_keeps_history_and_the_accepted_k3_route() -> None:
     text = _read("docs/stage1/CONTRACTS.md")
     for phrase in (
         "daily_bar_unadjusted.v1",
+        "query_history_k_data_plus",
         "stock_zh_a_hist",
         "stock_zh_a_hist_tx",
         "stock_zh_a_daily",
+        "BAOSTOCK",
         "EASTMONEY",
         "TENCENT",
         "SINA",
+        "XTQUANT_LEGACY",
         "lookback_days=15",
         "comparison-thresholds.daily-bar-unadjusted.k1.v1",
         "ResolutionDecision",
@@ -91,23 +97,44 @@ def test_single_contract_keeps_the_accepted_k1_k2_route() -> None:
         assert phrase in text
 
 
-def test_s1_08_is_fixed_bounded_and_not_yet_authorized() -> None:
+def test_s1_08_records_the_bounded_failed_formal_run_without_stage_completion() -> None:
     text = _read("docs/stage1/S1-08_TASK.md")
     for phrase in (
-        "任务设计完成",
-        "未授权执行",
+        "首次正式运行的不可变事实",
+        "RESOLUTION_BLOCKED",
+        "conflict 80",
+        "授权已消耗",
         "000001.SZ",
         "600000.SH",
         "2026-06-11..2026-08-09",
         "2026-05-27..2026-08-09",
-        "总 AKShare endpoint invocation 最多 12 次",
-        "HTTP 上限为 24",
-        "应用层零自动重试",
+        "共 12 次",
+        "HTTP 上界估算 24",
+        "应用层零重试",
         "E:\\QuantKingV3Data",
-        "不访问旧项目或 F 盘",
-        "不开始 Stage 2",
-        "86 files",
-        "231 files",
+        "S1-07K3",
+        "Stage 2 未开始",
+    ):
+        assert phrase in text
+
+
+def test_k3_task_freezes_baostock_four_sources_and_managed_legacy_import() -> None:
+    text = _read("docs/stage1/S1-07K3_TASK.md")
+    for phrase in (
+        "设计已确认",
+        "BAOSTOCK / BAOSTOCK",
+        "AKSHARE / EASTMONEY",
+        "AKSHARE / TENCENT",
+        "AKSHARE / SINA",
+        "XTQUANT_LEGACY / XTQUANT",
+        "5,208",
+        "527,708,270",
+        "DATA_ONLY",
+        "SHA-256",
+        "应用层默认零自动重试",
+        "旧根前后指纹一致",
+        "S1-08R2",
+        "不自动重跑",
     ):
         assert phrase in text
 

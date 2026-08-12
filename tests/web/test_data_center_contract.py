@@ -44,6 +44,15 @@ class _DataCenter:
             next_cursor=None,
         )
 
+    def get_version_lineage(self, version_id: str) -> dict[str, object]:
+        return {
+            "version": {"version_id": version_id, "status": "PUBLISHED"},
+            "source_batches": [{"batch_id": "data_batch:batch", "status": "SUCCEEDED"}],
+            "quality_runs": [{"run_id": "data_quality:quality", "status": "PASSED"}],
+            "difference_reports": [{"report_id": "data_diff:report"}],
+            "resolution": {"run_id": "data_resolution:resolution"},
+        }
+
 
 def test_data_center_routes_are_injected_without_source_readiness_api() -> None:
     app = create_app(_Jobs(), data_center_port=_DataCenter())
@@ -88,6 +97,28 @@ def test_resolution_routes_expose_bounded_list_detail_exceptions_and_conflicts()
     assert exceptions.json()["items"] == [{"kind": "exception"}]
     assert conflicts.status_code == 200
     assert conflicts.json()["items"] == [{"kind": "conflict"}]
+
+
+def test_explicit_version_lineage_route_preserves_safe_projection() -> None:
+    version_id = "data_version:00000000-0000-4000-8000-000000000006"
+    app = create_app(_Jobs(), data_center_port=_DataCenter())
+    with TestClient(app) as client:
+        response = client.get(f"/api/data/versions/{version_id}/lineage")
+
+    assert response.status_code == 200
+    assert response.json()["version"] == {
+        "version_id": version_id,
+        "status": "PUBLISHED",
+    }
+    serialized = response.text
+    for forbidden in (
+        "artifact_relative_path",
+        "request_params",
+        "provider_payload",
+        "data_root",
+        "E:\\secret",
+    ):
+        assert forbidden not in serialized
 
 
 def test_read_lineage_corruption_maps_to_stable_sanitized_409() -> None:
