@@ -1,0 +1,46 @@
+{
+  "akshare_failure_stable_code": "AKSHARE_NETWORK",
+  "akshare_failure_underlying": "requests.exceptions.ConnectionError: RemoteDisconnected('Remote end closed connection without response')",
+  "application_retries": 0,
+  "attempt_date": "2026-08-13",
+  "attempt_index": 2,
+  "diagnostics": {
+    "child_process_proxy_env": "none (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY unset)",
+    "dns_push2his_eastmoney_com": "140.207.67.156 (A record resolved)",
+    "tcp_443_push2his_eastmoney_com": "connected (IPv6 2402:4e00:1201:809:0:9eee:537e:ee22)",
+    "tcp_443_proxy_finance_qq_com": "connected",
+    "tcp_443_vip_stock_finance_sina_com_cn": "connected",
+    "failure_layer": "HTTP: remote accepted TCP/TLS then closed without any HTTP response",
+    "vendor_request_headers": "none custom; default python-requests User-Agent"
+  },
+  "elapsed_seconds": 5.68,
+  "invocations": [
+    {
+      "attempted": true,
+      "outcome": "SUCCEEDED",
+      "provider": "BAOSTOCK",
+      "role": "A",
+      "sequence": 1,
+      "symbol": "000001.SZ",
+      "upstream": "BAOSTOCK"
+    },
+    {
+      "attempted": true,
+      "outcome": "FAILED",
+      "provider": "AKSHARE",
+      "role": "B",
+      "sequence": 2,
+      "symbol": "000001.SZ",
+      "upstream": "EASTMONEY"
+    }
+  ],
+  "marker": "S1-07K3B-REPRESENTATIVE-REAL-PROBE-V2",
+  "not_called_invocation_count": 22,
+  "plan_reference": "k3b_representative_probe_attempt_2026-08-13.json",
+  "representative_evidence_sufficient": false,
+  "schema_version": "k3b-representative-attempt-evidence.v1",
+  "stop_policy": "STOP_ON_FIRST_FAILURE",
+  "threshold_candidate_active": false,
+  "vpn_status": "disabled by user before this attempt",
+  "writes_formal_data_root": false
+}
