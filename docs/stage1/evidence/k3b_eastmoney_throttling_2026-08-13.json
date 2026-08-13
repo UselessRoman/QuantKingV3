@@ -1,0 +1,28 @@
+{
+  "attempt_date": "2026-08-13",
+  "conclusion": "The IPv4 pin is verified effective (urllib3 received only the IPv4 address), but eastmoney now drops HTTP transfers for ALL tested clients from this egress, including the exact curl -4 request that returned HTTP 200 about 25 minutes earlier. Repeated bounded probes within a short window triggered time/volume-based throttling of this egress IP. The pin stays committed because it fixes the deterministic IPv6 data-path break; the remaining failure is an eastmoney-side throttle that code cannot repair.",
+  "evidence_sequence": [
+    {
+      "time_offset": "t0",
+      "call": "curl -4 (python-requests UA) to push2his kline",
+      "result": "HTTP 200, complete payload"
+    },
+    {
+      "time_offset": "t0+25min",
+      "call": "requests.get with force_ipv4_resolution (recorded getaddrinfo: only AF_INET 117.184.38.143 returned)",
+      "result": "RemoteDisconnected"
+    },
+    {
+      "time_offset": "t0+25min",
+      "call": "curl -4 repeat of the exact t0 request",
+      "result": "curl (56) Failure when receiving data from the peer, status 000"
+    },
+    {
+      "time_offset": "t0+25min",
+      "call": "Invoke-WebRequest (.NET TLS stack)",
+      "result": "send failure"
+    }
+  ],
+  "ipv4_pin_effective": true,
+  "schema_version": "k3b-eastmoney-throttling-evidence.v1"
+}
