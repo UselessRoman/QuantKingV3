@@ -1,0 +1,84 @@
+{
+  "akshare_failure_stable_code": "AKSHARE_NETWORK",
+  "akshare_failure_underlying": "requests.exceptions.ConnectionError: RemoteDisconnected('Remote end closed connection without response')",
+  "application_retries": 0,
+  "attempt_date": "2026-08-13",
+  "elapsed_seconds": 11.33,
+  "invocations": [
+    {
+      "attempted": true,
+      "outcome": "SUCCEEDED",
+      "provider": "BAOSTOCK",
+      "role": "A",
+      "sequence": 1,
+      "symbol": "000001.SZ",
+      "upstream": "BAOSTOCK"
+    },
+    {
+      "attempted": true,
+      "outcome": "FAILED",
+      "provider": "AKSHARE",
+      "role": "B",
+      "sequence": 2,
+      "symbol": "000001.SZ",
+      "upstream": "EASTMONEY"
+    }
+  ],
+  "marker": "S1-07K3B-REPRESENTATIVE-REAL-PROBE-V2",
+  "not_called_invocation_count": 22,
+  "not_called_sequences": [
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24
+  ],
+  "plan_facts": {
+    "akshare_locked_source_http_upper_bound": {
+      "EASTMONEY": 6,
+      "SINA": 12,
+      "TENCENT": 18,
+      "total": 36
+    },
+    "baostock_protocol_message_upper_bound": {
+      "login": 6,
+      "logout_attempt": 6,
+      "query": 6,
+      "total": 18
+    },
+    "lookback_days": 15,
+    "symbols": [
+      "000001.SZ",
+      "300750.SZ",
+      "600000.SH",
+      "600036.SH",
+      "600518.SH",
+      "688981.SH"
+    ],
+    "target_end": "2026-08-09",
+    "target_start": "2026-05-11",
+    "total_invocations": 24
+  },
+  "representative_evidence_sufficient": false,
+  "schema_version": "k3b-representative-attempt-evidence.v1",
+  "stop_policy": "STOP_ON_FIRST_FAILURE",
+  "threshold_candidate_active": false,
+  "writes_formal_data_root": false
+}
