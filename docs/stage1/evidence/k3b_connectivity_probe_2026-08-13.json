@@ -1,0 +1,47 @@
+{
+  "application_retries": 0,
+  "attempt_date": "2026-08-13",
+  "eastmoney_http_reachable": false,
+  "endpoint_invocations": 3,
+  "failure_policy": "RUN_ALL_BOUNDED_NO_RETRY",
+  "marker": "S1-07K3B-AKSHARE-CONNECTIVITY-PROBE-V1",
+  "outcomes": [
+    {
+      "amount_unit": null,
+      "canonical_row_count": null,
+      "complete": null,
+      "library_version": null,
+      "message": "AKShare upstream network request failed",
+      "outcome": "FAILED",
+      "stable_code": "AKSHARE_NETWORK",
+      "upstream": "EASTMONEY",
+      "volume_unit": null
+    },
+    {
+      "amount_unit": "cny_yuan",
+      "canonical_row_count": 1,
+      "complete": true,
+      "library_version": "1.18.83",
+      "message": null,
+      "outcome": "SUCCEEDED",
+      "stable_code": null,
+      "upstream": "TENCENT",
+      "volume_unit": "lot_100_shares"
+    },
+    {
+      "amount_unit": "cny_yuan",
+      "canonical_row_count": 1,
+      "complete": true,
+      "library_version": "1.18.83",
+      "message": null,
+      "outcome": "SUCCEEDED",
+      "stable_code": null,
+      "upstream": "SINA",
+      "volume_unit": "share"
+    }
+  ],
+  "schema_version": "s1-07k3b-akshare-connectivity-evidence.v1",
+  "sina_http_reachable": true,
+  "tencent_http_reachable": true,
+  "writes_formal_data_root": false
+}
