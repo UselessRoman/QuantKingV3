@@ -1,0 +1,21 @@
+{
+  "attempt_date": "2026-08-13",
+  "conclusion": "eastmoney HTTP failures are caused by a broken IPv6 egress to eastmoney's IPv6 CDN (push2hisipv6.trafficmanager.cn). urllib3 prefers IPv6, TCP connects, then data transfer is cut (RemoteDisconnected). The IPv4 path returns HTTP 200 with complete data.",
+  "method": "curl with the exact locked akshare 1.18.83 eastmoney kline request (same URL, params, and python-requests User-Agent), once forced IPv4 and once forced IPv6",
+  "public_egress_ip": "39.144.95.99",
+  "results": {
+    "ipv4": {
+      "http_status": 200,
+      "remote_ip": "117.184.38.143",
+      "seconds": 2.081903,
+      "body_summary": "complete kline payload for 000001 (Ping An Bank), rc=0"
+    },
+    "ipv6": {
+      "curl_exit": 56,
+      "error": "Failure when receiving data from the peer",
+      "remote_ip": "2408:870c:2020:204:8000::88f",
+      "seconds": 0.188911
+    }
+  },
+  "schema_version": "k3b-eastmoney-ipv6-root-cause-evidence.v1"
+}
