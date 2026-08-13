@@ -26,6 +26,38 @@ K3_PROBE_SOURCES = (
 K3_PROBE_MAX_INVOCATIONS = len(K3_PROBE_SYMBOLS) * len(K3_PROBE_SOURCES)
 _NUMERIC_FIELDS = ("open", "high", "low", "close", "pre_close", "volume", "amount")
 
+K3_REPRESENTATIVE_PROBE_MARKER = "S1-07K3B-REPRESENTATIVE-REAL-PROBE-V2"
+K3_REPRESENTATIVE_TARGET_START = date(2026, 5, 11)
+K3_REPRESENTATIVE_TARGET_END = date(2026, 8, 9)
+K3_REPRESENTATIVE_LOOKBACK_DAYS = 15
+K3_REPRESENTATIVE_SYMBOLS = (
+    "000001.SZ",
+    "300750.SZ",
+    "600000.SH",
+    "600036.SH",
+    "600518.SH",
+    "688981.SH",
+)
+K3_REPRESENTATIVE_MAX_INVOCATIONS = len(K3_REPRESENTATIVE_SYMBOLS) * len(K3_PROBE_SOURCES)
+_SH_MAIN_PREFIXES = frozenset({"600", "601", "603", "605"})
+_SH_STAR_PREFIXES = frozenset({"688", "689"})
+_SZ_MAIN_PREFIXES = frozenset({"000", "001", "002", "003"})
+_SZ_CHINEXT_PREFIXES = frozenset({"300", "301", "302"})
+
+
+def code_segment(code: str) -> str:
+    """Map one canonical A-share code to a bounded segment label."""
+    prefix = code[:3]
+    if prefix in _SH_MAIN_PREFIXES:
+        return "sh_main"
+    if prefix in _SH_STAR_PREFIXES:
+        return "sh_star"
+    if prefix in _SZ_MAIN_PREFIXES:
+        return "sz_main"
+    if prefix in _SZ_CHINEXT_PREFIXES:
+        return "sz_chinext"
+    return "other"
+
 
 @dataclass(frozen=True, slots=True)
 class K3ProbeInvocation:
@@ -67,6 +99,7 @@ class K3ProbeSourceResult:
     upstream_row_count: int
     records: tuple[Mapping[str, object], ...]
     official_preclose: Mapping[tuple[str, str], Decimal] | None = None
+    observed_isST: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         expected = next(
@@ -93,11 +126,26 @@ class K3ProbeSourceResult:
             raise ValueError("probe source must be complete and unadjusted")
         if self.upstream_row_count < len(self.records):
             raise ValueError("upstream row count cannot be below Canonical count")
+        if self.observed_isST is not None and (
+            not isinstance(self.observed_isST, tuple)
+            or any(
+                not isinstance(item, str) or item not in {"0", "1"} for item in self.observed_isST
+            )
+            or tuple(sorted(set(self.observed_isST))) != self.observed_isST
+        ):
+            raise ValueError("observed_isST must be sorted unique {'0','1'} values or None")
 
 
-def fixed_k3_probe_plan() -> tuple[K3ProbeInvocation, ...]:
+def _fixed_plan(
+    *,
+    symbols: tuple[str, ...],
+    target_start: date,
+    target_end: date,
+    lookback_days: int,
+    max_invocations: int,
+) -> tuple[K3ProbeInvocation, ...]:
     invocations: list[K3ProbeInvocation] = []
-    for symbol in K3_PROBE_SYMBOLS:
+    for symbol in symbols:
         for role, provider, upstream in K3_PROBE_SOURCES:
             invocations.append(
                 K3ProbeInvocation(
@@ -106,16 +154,36 @@ def fixed_k3_probe_plan() -> tuple[K3ProbeInvocation, ...]:
                     provider=provider,
                     upstream=upstream,
                     symbol=symbol,
-                    target_start=K3_PROBE_TARGET_START,
-                    target_end=K3_PROBE_TARGET_END,
-                    upstream_start=K3_PROBE_TARGET_START - timedelta(days=K3_PROBE_LOOKBACK_DAYS),
-                    upstream_end=K3_PROBE_TARGET_END,
+                    target_start=target_start,
+                    target_end=target_end,
+                    upstream_start=target_start - timedelta(days=lookback_days),
+                    upstream_end=target_end,
                 )
             )
     result = tuple(invocations)
-    if len(result) != K3_PROBE_MAX_INVOCATIONS:
+    if len(result) != max_invocations:
         raise RuntimeError("K3 probe budget plan is inconsistent")
     return result
+
+
+def fixed_k3_probe_plan() -> tuple[K3ProbeInvocation, ...]:
+    return _fixed_plan(
+        symbols=K3_PROBE_SYMBOLS,
+        target_start=K3_PROBE_TARGET_START,
+        target_end=K3_PROBE_TARGET_END,
+        lookback_days=K3_PROBE_LOOKBACK_DAYS,
+        max_invocations=K3_PROBE_MAX_INVOCATIONS,
+    )
+
+
+def fixed_k3_representative_probe_plan() -> tuple[K3ProbeInvocation, ...]:
+    return _fixed_plan(
+        symbols=K3_REPRESENTATIVE_SYMBOLS,
+        target_start=K3_REPRESENTATIVE_TARGET_START,
+        target_end=K3_REPRESENTATIVE_TARGET_END,
+        lookback_days=K3_REPRESENTATIVE_LOOKBACK_DAYS,
+        max_invocations=K3_REPRESENTATIVE_MAX_INVOCATIONS,
+    )
 
 
 def k3_probe_dry_run_payload() -> MappingProxyType[str, object]:
@@ -156,6 +224,48 @@ def k3_probe_dry_run_payload() -> MappingProxyType[str, object]:
     )
 
 
+def k3_representative_dry_run_payload() -> MappingProxyType[str, object]:
+    plan = fixed_k3_representative_probe_plan()
+    symbol_count = len(K3_REPRESENTATIVE_SYMBOLS)
+    return MappingProxyType(
+        {
+            "schema_version": "s1-07k3b-representative-probe-plan.v1",
+            "mode": "dry-run",
+            "marker": K3_REPRESENTATIVE_PROBE_MARKER,
+            "network_calls_made": 0,
+            "application_retries": 0,
+            "lookback_days": K3_REPRESENTATIVE_LOOKBACK_DAYS,
+            "target_start": K3_REPRESENTATIVE_TARGET_START.isoformat(),
+            "target_end": K3_REPRESENTATIVE_TARGET_END.isoformat(),
+            "market_data_endpoint_invocations": {
+                "BAOSTOCK": symbol_count,
+                "EASTMONEY": symbol_count,
+                "TENCENT": symbol_count,
+                "SINA": symbol_count,
+                "total": K3_REPRESENTATIVE_MAX_INVOCATIONS,
+            },
+            "baostock_protocol_message_upper_bound": {
+                "login": symbol_count,
+                "query": symbol_count,
+                "logout_attempt": symbol_count,
+                "total": symbol_count * 3,
+            },
+            "akshare_locked_source_http_upper_bound": {
+                "EASTMONEY": symbol_count,
+                "TENCENT": symbol_count * 3,
+                "SINA": symbol_count * 2,
+                "total": symbol_count * 6,
+            },
+            "failure_policy": "STOP_ON_FIRST_FAILURE",
+            "writes_formal_data_root": False,
+            "excluded_scope": ["beijing_stock_exchange", "delisted_securities"],
+            "invocations": [item.to_payload() for item in plan],
+            "threshold_candidate_active": False,
+            "representative_evidence_sufficient": False,
+        }
+    )
+
+
 def _record_index(
     result: K3ProbeSourceResult,
 ) -> dict[tuple[str, str], Mapping[str, object]]:
@@ -181,6 +291,9 @@ def _numeric_value(record: Mapping[str, object], field: str) -> int | float | De
 
 def summarize_k3_probe(
     results: tuple[K3ProbeSourceResult, ...],
+    *,
+    marker: str = K3_PROBE_MARKER,
+    schema_version: str = "s1-07k3b-four-source-evidence.v1",
 ) -> MappingProxyType[str, object]:
     """Build bounded decimal evidence without returning tables or provider payloads."""
     if tuple(item.role for item in results) != ("A", "B", "C", "D"):
@@ -251,12 +364,28 @@ def summarize_k3_probe(
         if difference != 0:
             semantic_nonzero += 1
         semantic_max = max(semantic_max, difference)
+    segments: set[str] = set()
+    zero_rows: dict[str, int] = {role: 0 for role in ("A", "B", "C", "D")}
+    low_liquidity_rows: dict[str, int] = {role: 0 for role in ("A", "B", "C", "D")}
+    for role, index in indexes.items():
+        for record in index.values():
+            code = record.get("code")
+            if not isinstance(code, str):
+                raise ValueError("probe Canonical record code is invalid")
+            segments.add(code_segment(code))
+            volume = _numeric_value(record, "volume")
+            amount = _numeric_value(record, "amount")
+            if volume == 0 and amount == 0:
+                zero_rows[role] += 1
+            elif volume <= 100:
+                low_liquidity_rows[role] += 1
+    symbols_observed = len({code for code, _date_value in union})
     return MappingProxyType(
         {
-            "schema_version": "s1-07k3b-four-source-evidence.v1",
-            "marker": K3_PROBE_MARKER,
+            "schema_version": schema_version,
+            "marker": marker,
             "application_retries": 0,
-            "endpoint_invocations": K3_PROBE_MAX_INVOCATIONS,
+            "endpoint_invocations": symbols_observed * len(results),
             "sources": sources,
             "pairs": pair_summaries,
             "baostock_official_preclose_semantics": {
@@ -264,6 +393,14 @@ def summarize_k3_probe(
                 "different_from_derived_count": semantic_nonzero,
                 "max_absolute_difference": canonical_decimal(semantic_max),
                 "official_preclose_used_for_canonical": False,
+            },
+            "dimension_evidence": {
+                "code_segments_observed": sorted(segments),
+                "baostock_observed_isST": (
+                    None if bao.observed_isST is None else sorted(bao.observed_isST)
+                ),
+                "zero_volume_zero_amount_row_counts": zero_rows,
+                "low_liquidity_row_counts_le_100_shares": low_liquidity_rows,
             },
             "representative_evidence_sufficient": False,
             "threshold_candidate_active": False,
@@ -279,9 +416,18 @@ __all__ = [
     "K3_PROBE_SYMBOLS",
     "K3_PROBE_TARGET_END",
     "K3_PROBE_TARGET_START",
+    "K3_REPRESENTATIVE_LOOKBACK_DAYS",
+    "K3_REPRESENTATIVE_MAX_INVOCATIONS",
+    "K3_REPRESENTATIVE_PROBE_MARKER",
+    "K3_REPRESENTATIVE_SYMBOLS",
+    "K3_REPRESENTATIVE_TARGET_END",
+    "K3_REPRESENTATIVE_TARGET_START",
     "K3ProbeInvocation",
     "K3ProbeSourceResult",
+    "code_segment",
     "fixed_k3_probe_plan",
+    "fixed_k3_representative_probe_plan",
     "k3_probe_dry_run_payload",
+    "k3_representative_dry_run_payload",
     "summarize_k3_probe",
 ]
