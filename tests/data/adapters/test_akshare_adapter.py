@@ -1,23 +1,29 @@
 from __future__ import annotations
 
 import json
+import socket
 import subprocess
 import sys
 from datetime import UTC, date, datetime
 
 import pytest
 
-from quantking.common.time import UtcTimestamp
-from quantking.data.adapters.sources.akshare import AkshareDailyBarAdapter
+from quantking.common.time import TradingDate, UtcTimestamp
+from quantking.data.adapters.sources.akshare import (
+    AkshareDailyBarAdapter,
+    AkshareMarketDataGateway,
+)
 from quantking.data.adapters.sources.contracts import (
     AmountUnit,
     SourceAdapterError,
     SourceErrorCode,
     VolumeUnit,
 )
+from quantking.data.adapters.sources.ipv4_resolution import EASTMONEY_RESOLUTION_POLICY_VERSION
 from quantking.data.adapters.sources.parameters import DailyBarRequest
 from quantking.data.adapters.sources.registry import AKSHARE_RUNTIME_UPSTREAMS, source_registry
 from quantking.data.adapters.sources.units import AKSHARE_UNIT_POLICY_VERSION
+from quantking.data.incremental import FetchChunk
 from quantking.data.models import DataProvider, DatasetKind, DataUpstream
 
 
@@ -320,3 +326,100 @@ def test_import_is_offline_and_does_not_import_akshare() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+class ResolvingModule(FakeModule):
+    """Record which address families ``localhost`` resolution returns during a call."""
+
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        super().__init__(rows)
+        self.observed_families: set[int] = set()
+
+    def _call(self, endpoint: str, kwargs: dict[str, str | float]) -> FakeFrame:
+        results = socket.getaddrinfo("localhost", 443, 0, socket.SOCK_STREAM)
+        self.observed_families = {item[0] for item in results}
+        return super()._call(endpoint, kwargs)
+
+
+def _mixed_getaddrinfo(
+    host: object,
+    port: object,
+    family: object = socket.AF_UNSPEC,
+    type: object = socket.SOCK_STREAM,
+    proto: object = 0,
+    flags: object = 0,
+) -> list[tuple[object, ...]]:
+    del host, port, family, type, proto, flags
+    return [
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 443, 0, 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
+    ]
+
+
+def test_eastmoney_fetch_forces_ipv4_only_during_vendor_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(socket, "getaddrinfo", _mixed_getaddrinfo)
+    module = ResolvingModule(_rows(DataUpstream.EASTMONEY))
+    adapter = AkshareDailyBarAdapter(
+        DataUpstream.EASTMONEY,
+        module_loader=lambda: module,
+        clock=_clock,
+    )
+    adapter.fetch(DailyBarRequest("600000.SH", date(2026, 8, 1), date(2026, 8, 8)))
+    assert module.observed_families == {socket.AF_INET}
+    after = socket.getaddrinfo("localhost", 443, 0, socket.SOCK_STREAM)
+    assert {item[0] for item in after} == {socket.AF_INET6, socket.AF_INET}
+
+
+@pytest.mark.parametrize("upstream", [DataUpstream.TENCENT, DataUpstream.SINA])
+def test_other_akshare_upstreams_are_not_forced_to_ipv4(
+    upstream: DataUpstream,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(socket, "getaddrinfo", _mixed_getaddrinfo)
+    module = ResolvingModule(_rows(upstream))
+    adapter = AkshareDailyBarAdapter(
+        upstream,
+        module_loader=lambda: module,
+        clock=_clock,
+    )
+    adapter.fetch(DailyBarRequest("600000.SH", date(2026, 8, 1), date(2026, 8, 8)))
+    assert module.observed_families == {socket.AF_INET6, socket.AF_INET}
+
+
+def test_resolution_policy_version_is_bound_to_eastmoney_only() -> None:
+    eastmoney = AkshareDailyBarAdapter(
+        DataUpstream.EASTMONEY,
+        module_loader=lambda: FakeModule(_rows(DataUpstream.EASTMONEY)),
+        clock=_clock,
+    ).fetch(DailyBarRequest("600000.SH", date(2026, 8, 1), date(2026, 8, 8)))
+    assert eastmoney.resolution_policy_version == EASTMONEY_RESOLUTION_POLICY_VERSION
+    for upstream in (DataUpstream.TENCENT, DataUpstream.SINA):
+        result = AkshareDailyBarAdapter(
+            upstream,
+            module_loader=lambda module_upstream=upstream: FakeModule(_rows(module_upstream)),
+            clock=_clock,
+        ).fetch(DailyBarRequest("600000.SH", date(2026, 8, 1), date(2026, 8, 8)))
+        assert result.resolution_policy_version is None
+
+
+def test_gateway_records_resolution_policy_in_provider_payload() -> None:
+    gateway = AkshareMarketDataGateway(
+        AkshareDailyBarAdapter(
+            DataUpstream.EASTMONEY,
+            module_loader=lambda: FakeModule(_rows(DataUpstream.EASTMONEY)),
+            clock=_clock,
+        )
+    )
+    chunk = FetchChunk(
+        sequence=1,
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        scope=("600000.SH",),
+        start=TradingDate(date(2026, 8, 1)),
+        end=TradingDate(date(2026, 8, 8)),
+        request_sha256="a" * 64,
+    )
+    response = gateway.fetch(chunk)
+    provider_payload = json.loads(response.raw_payload)["provider_payload"]
+    assert provider_payload["resolution_policy_version"] == EASTMONEY_RESOLUTION_POLICY_VERSION

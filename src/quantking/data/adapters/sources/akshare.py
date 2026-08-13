@@ -23,6 +23,10 @@ from quantking.data.adapters.sources.contracts import (
     VolumeUnit,
     classify_source_error,
 )
+from quantking.data.adapters.sources.ipv4_resolution import (
+    EASTMONEY_RESOLUTION_POLICY_VERSION,
+    force_ipv4_resolution,
+)
 from quantking.data.adapters.sources.parameters import DailyBarRequest, endpoint_parameters
 from quantking.data.adapters.sources.registry import SourceSpec, source_spec
 from quantking.data.adapters.sources.request_window import AkshareRequestWindow
@@ -58,6 +62,7 @@ class AkshareEndpointResponse:
     unit_policy_version: str
     complete: bool
     partial_reason: str | None
+    resolution_policy_version: str | None = None
 
     @property
     def units_verified(self) -> bool:
@@ -229,11 +234,20 @@ class AkshareDailyBarAdapter:
             )
             if not unit_policy.verified:
                 raise SourceAdapterError(SourceErrorCode.UNIT_UNVERIFIED)
-            frame = endpoint(**endpoint_parameters(self.spec.upstream, request))
+            if self.spec.upstream is DataUpstream.EASTMONEY:
+                with force_ipv4_resolution():
+                    frame = endpoint(**endpoint_parameters(self.spec.upstream, request))
+            else:
+                frame = endpoint(**endpoint_parameters(self.spec.upstream, request))
         except Exception as error:
             mapped = _stable_exception(error)
             raise mapped from error
         rows = _records_from_frame(frame)
+        resolution_policy = (
+            EASTMONEY_RESOLUTION_POLICY_VERSION
+            if self.spec.upstream is DataUpstream.EASTMONEY
+            else None
+        )
         if not rows:
             fetched_at = self._clock()
             if not isinstance(fetched_at, UtcTimestamp):
@@ -259,6 +273,7 @@ class AkshareDailyBarAdapter:
                 unit_policy_version=unit_policy.policy_version,
                 complete=True,
                 partial_reason=None,
+                resolution_policy_version=resolution_policy,
             )
         expected = _COLUMN_MAP[self.spec.upstream]
         available = set(rows[0])
@@ -347,6 +362,7 @@ class AkshareDailyBarAdapter:
             unit_policy_version=unit_policy.policy_version,
             complete=complete,
             partial_reason=partial_reason,
+            resolution_policy_version=resolution_policy,
         )
 
 
@@ -413,6 +429,7 @@ class AkshareMarketDataGateway:
                 "row_count": result.row_count,
                 "content_sha256": result.content_sha256,
                 "unit_policy_version": result.unit_policy_version,
+                "resolution_policy_version": result.resolution_policy_version,
                 "request": {
                     "symbol": result.request.symbol,
                     "target_start": result.request_window.target_start.isoformat(),
