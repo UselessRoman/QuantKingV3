@@ -37,6 +37,11 @@ AKShare upstream 合并为一个来源，也不得恢复 `PRIMARY/FALLBACK` 审�
 `000xxx.SZ` 为手，其余已验证沪深白名单代码段为股；三者成交额均为元。Raw 数值原样保存，
 Canonical 标准化层才把手乘 100。未知 AKShare 版本或代码段稳定拒绝，不猜单位。
 
+东财适配器按 `eastmoney-ipv4-only.v1` 策略在每次 vendor 调用期间把地址解析限制为 AF_INET
+（ADR-019，依据 2026-08-13 东财 IPv6 CDN 数据断流证据）；该策略写入东财 SupplierResponse
+provider_payload 的 `resolution_policy_version`，腾讯/新浪不适用。CDN/网络修复后需新证据
+和新决策撤销。
+
 目标窗口开始日前固定增加 15 个自然日 lookback；在完整上游序列中从前一日 close 派生
 `pre_close` 后再裁回目标窗口。Raw manifest 同时绑定 target/upstream 窗口和
 `lookback_days=15`。空结果、网络失败、限流、schema 漂移和合法非交易日必须分开建模。

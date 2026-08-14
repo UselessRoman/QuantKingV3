@@ -2,11 +2,14 @@
 
 ## 状态与目的
 
-状态：设计已确认；K3A～K3D 离线实现完成。BaoStock 0.9.3、四源 A/B/C/D 仲裁、Decimal 证据、受管
-`DATA_ONLY` inventory/import、正式 EOD、DataCenter 与只读 verifier 均有合成回归。唯一一次
-真实 marker 已执行：BaoStock/`000001.SZ` 成功，随后东财网络失败，按零重试/失败即停规则
-终止，余下六次未调用。代表性阈值证据和旧根实际迁移仍缺失，候选规则不得激活；旧项目
-读取和正式数据根写入仍未授权。
+状态：设计已确认；K3A～K3D 离线实现完成并已提交（`38103c1`、`31419bc`、`648890e`）。
+BaoStock 0.9.3、四源 A/B/C/D 仲裁、Decimal 证据、受管 `DATA_ONLY` inventory/import、正式
+EOD、DataCenter 与只读 verifier 均有合成回归；K3C CLI `quantking-legacy-import` 已落地。
+真实证据：2026-08-12 固定 marker 只完成 1/8；2026-08-13 V2 代表性 marker（6 证券×4 源
+=24 次）三度执行均在第 2 次东财调用失败即停；最小连通性探针证明腾讯/新浪正常、仅东财
+HTTP 层被断。根因是东财 IPv6 CDN 数据断流，适配器已按 ADR-019 钉死 IPv4；随后东财对本
+出口 IP 触发限流。代表性阈值证据和旧根实际迁移仍缺失，候选规则不得激活；旧项目读取和
+正式数据根写入仍未授权。
 所属 Stage：Stage 1。后续任务：[S1-08](S1-08_TASK.md)。
 
 本任务解决两个已经实证的问题：
@@ -110,6 +113,16 @@ Canonical。若 BaoStock 不覆盖某市场、证券状态或历史区间，该�
 `000001.SZ` 成功；第 2 个计划调用 AKShare/东财时发生代理断连，任务按
 `STOP_ON_FIRST_FAILURE` 立即停止，未重试，也未调用余下 6 个计划项。该结果只证明失败边界
 生效并保留 BaoStock 单次成功事实；它不构成四源比较证据，不能激活或放宽 K3 候选阈值。
+
+2026-08-13，主 agent 执行 V2 代表性 marker `S1-07K3B-REPRESENTATIVE-REAL-PROBE-V2`
+（`000001.SZ`、`300750.SZ`、`600000.SH`、`600036.SH`、`600518.SH`、`688981.SH`；目标
+窗口 2026-05-11..2026-08-09，lookback 15；24 次 endpoint、BaoStock 协议上界 18、AKShare
+HTTP 上界 36；零重试、失败即停）：三次执行均为 BaoStock/`000001.SZ` 成功、东财断连即停，
+余下 22 次未调用。最小连通性探针 `S1-07K3B-AKSHARE-CONNECTIVITY-PROBE-V1`（东财/腾讯/
+新浪各 1 次）证明腾讯/新浪 complete、仅东财 HTTP 层失败。诊断确认东财 IPv6 CDN 数据断流
+为直接根因，已按 ADR-019 把东财适配器钉死 IPv4（策略版本 `eastmoney-ipv4-only.v1`）；
+同日后同一 curl 请求先 200 后 56，说明东财对本出口 IP 有临时限流。全部失败与证据固化在
+`docs/stage1/evidence/`，不构成代表性阈值证据，K3 candidate 继续 inactive，零容差继续生效。
 
 ### K3C：旧 XTQuant `DATA_ONLY` 受管导入
 

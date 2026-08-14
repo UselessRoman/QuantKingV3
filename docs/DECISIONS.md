@@ -177,3 +177,20 @@ Stage 1 以尽快交付真实、明确范围的未复权日线版本为复杂度
 - 已验收的 S1-01～S1-06 代码在 K1/K2 替换前可作为过渡实现存在，但历史验收只证明当时范围，不得覆盖本 ADR 的目标边界。
 
 DataCenter 日常读侧是否从深层复验收敛为“发布时完整验证 + 显式完整性检查”，在 K2 完成后单独评审；当前不作为 K1/K2 阻断项。ADR-009 双回测和 ADR-012 模型生命周期分别留到 Stage 4、Stage 3 开始时复核，本次不提前修改。
+
+## ADR-019：东财适配器显式 IPv4 解析策略（S1-07K3B）
+
+**状态：已接受（2026-08-13）**
+
+2026-08-13 真实探针诊断确认：东财 IPv6 CDN（`push2hisipv6.trafficmanager.cn`）TCP 可连
+但 HTTP 数据被断，urllib3 优先 IPv6 导致 `RemoteDisconnected`；同一出口的 IPv4 路径曾返回
+完整数据。因此 AKShare/东财适配器在每次 vendor 调用期间把地址解析限制为 AF_INET
+（策略版本 `eastmoney-ipv4-only.v1`），并写入 SupplierResponse provider_payload 的
+`resolution_policy_version`；腾讯/新浪不受影响。
+
+这是显式的按上游地址族策略，不是 IP 规避、UA 伪造或静默换源；当网络或 CDN 路径修复后，
+应通过新证据和新决策撤销。同日后观测到东财对本出口 IP 的临时限流（同一 curl 请求先 200
+后 56，python-requests 与 .NET TLS 栈同断），该现象属于服务端侧状态，代码不处理。
+
+证据：`docs/stage1/evidence/k3b_eastmoney_ipv6_root_cause_2026-08-13.json`、
+`docs/stage1/evidence/k3b_eastmoney_throttling_2026-08-13.json`。

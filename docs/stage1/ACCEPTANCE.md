@@ -70,7 +70,7 @@ AKShare 三源范围，不证明 2026-08-12 接受的 BaoStock、四源路由或
 
 ## S1-07K3 验收状态
 
-状态：离线实现完成，真实验收阻断，尚未提交。
+状态：离线实现完成并已提交（`38103c1`、`31419bc`、`648890e`）；代表性真实证据被东财环境阻断。
 
 - `baostock==0.9.3` 已精确锁定；适配器通过独立子进程硬超时、稳定错误、分页计数、Raw 原字段、
   官方 `preclose` 保留及 Canonical 前序未复权 close 派生合同。
@@ -78,11 +78,18 @@ AKShare 三源范围，不证明 2026-08-12 接受的 BaoStock、四源路由或
   endpoint/protocol/HTTP 预算均有离线回归，XTQuant 只允许 `DATA_ONLY` 导入。
 - 旧日线 inventory/managed import/verifier 已在 `tmp_path` 合成 Parquet 上验证，不读取旧根、
   不创建 Warehouse/PUBLISHED；实际 5,208 候选文件清单、pilot、full 迁移仍未授权。
+  K3C CLI `quantking-legacy-import`（inventory/import/dry-run，合成与 REAL marker 双边界）已落地。
 - 默认正式 EOD、K3 Resolution artifact、DataCenter 安全 lineage 和 immutable read-only release
   verifier 已通过合成端到端；K2 三源 frozen/artifact 兼容回归保留。
-- 唯一真实 marker 中 BaoStock/`000001.SZ` 成功，随后东财发生网络失败并立即停止；总计只执行
-  2/8 计划 endpoint、零重试，其余未调用。该结果不足以形成代表性阈值，K3 candidate 继续
-  inactive，生产仍使用历史零容差并 fail closed。
+- 差异 manifest k3.v3 显式记录 `unit_policy_versions` 并经 verifier 校验；输入指纹
+  `legacy_import_manifest_sha256` 的 None→真实 SHA 替换路径有专门测试。
+- 真实执行：2026-08-12 固定 marker 1/8；2026-08-13 V2 代表性 marker（24 次计划）三次均为
+  BaoStock/`000001.SZ` 成功、东财断连即停；连通性探针证明腾讯/新浪 complete、仅东财 HTTP
+  层不可达。根因=东财 IPv6 CDN 数据断流，已按 ADR-019 把东财适配器钉死 IPv4（写入
+  provider_payload `resolution_policy_version`）；随后东财对本出口 IP 限流。证据固化于
+  `docs/stage1/evidence/`。
+- 以上均不足以形成代表性阈值证据，K3 candidate 继续 inactive，生产仍使用历史零容差并
+  fail closed。
 
 K3 只有在代表性四源实测、旧根只读清单/受管迁移、完整质量门和独立提交均完成后才能主验收；
 当前不得执行 S1-08R2。
