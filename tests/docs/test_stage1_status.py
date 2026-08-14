@@ -21,7 +21,10 @@ def _read(relative: str) -> str:
         "CONTRACTS.md",
         "ACCEPTANCE.md",
         "S1-07K3_TASK.md",
+        "S1-07K4_TASK.md",
         "S1-08_TASK.md",
+        "S1-08R2_TASK.md",
+        "S1-08R3_TASK.md",
         "S1-01_ACCEPTANCE.md",
         "S1-02_ACCEPTANCE.md",
         "S1-03_ACCEPTANCE.md",
@@ -75,29 +78,31 @@ def test_current_status_records_commits_without_claiming_stage_completion() -> N
     assert "Stage 1 已完成验收" not in combined
 
 
-def test_single_contract_keeps_history_and_the_accepted_k3_route() -> None:
+def test_single_contract_keeps_history_and_the_accepted_three_role_route() -> None:
     text = _read("docs/stage1/CONTRACTS.md")
     for phrase in (
         "daily_bar_unadjusted.v1",
         "query_history_k_data_plus",
-        "stock_zh_a_hist",
         "stock_zh_a_hist_tx",
         "stock_zh_a_daily",
         "BAOSTOCK",
-        "EASTMONEY",
         "TENCENT",
         "SINA",
+        "ADR-021",
+        "东财和 FTShare 已退出正式来源集合",
         "XTQUANT_LEGACY",
         "lookback_days=15",
         "comparison-thresholds.daily-bar-unadjusted.k1.v1",
         "ResolutionDecision",
         "SourceOverride",
         "无两源一致",
+        "(code, trade_date)",
+        "共同缺行不构成",
     ):
         assert phrase in text
 
 
-def test_s1_08_records_the_bounded_failed_formal_run_without_stage_completion() -> None:
+def test_s1_08_history_records_the_bounded_failed_formal_run() -> None:
     text = _read("docs/stage1/S1-08_TASK.md")
     for phrase in (
         "首次正式运行的不可变事实",
@@ -109,19 +114,20 @@ def test_s1_08_records_the_bounded_failed_formal_run_without_stage_completion() 
         "2026-06-11..2026-08-09",
         "2026-05-27..2026-08-09",
         "共 12 次",
-        "HTTP 上界估算 24",
+        "上界估算 24",
         "应用层零重试",
         "E:\\QuantKingV3Data",
-        "S1-07K3",
+        "S1-07K4",
+        "S1-08R2",
+        "S1-08R3",
         "Stage 2 未开始",
     ):
         assert phrase in text
 
 
-def test_k3_task_freezes_baostock_four_sources_and_managed_legacy_import() -> None:
+def test_k3_history_preserves_rejected_routes_and_migration_baseline() -> None:
     text = _read("docs/stage1/S1-07K3_TASK.md")
     for phrase in (
-        "设计已确认",
         "BAOSTOCK / BAOSTOCK",
         "AKSHARE / EASTMONEY",
         "AKSHARE / TENCENT",
@@ -130,13 +136,44 @@ def test_k3_task_freezes_baostock_four_sources_and_managed_legacy_import() -> No
         "5,208",
         "527,708,270",
         "DATA_ONLY",
-        "SHA-256",
-        "应用层默认零自动重试",
-        "旧根前后指纹一致",
+        "应用层零自动重试",
+        "S1-07K4",
         "S1-08R2",
-        "不自动重跑",
     ):
         assert phrase in text
+
+
+def test_successor_cards_have_single_ownership_and_strict_order() -> None:
+    k4 = _read("docs/stage1/S1-07K4_TASK.md")
+    for phrase in (
+        "BaoStock A + AKShare/腾讯 B",
+        "三角色实现重构",
+        "仲裁与质量语义",
+        "代表性三源实测与规则冻结",
+        "旧 XTQuant 日线 DATA_ONLY 迁移",
+        "旧根前后指纹一致",
+    ):
+        assert phrase in k4
+
+    r2 = _read("docs/stage1/S1-08R2_TASK.md")
+    for phrase in (
+        "发布引擎离线收口",
+        "SQLITE_BUSY/SQLITE_LOCKED",
+        "manifest 驱动的范围和预算",
+        "只读 verifier",
+        "不执行真实网络或正式 Job",
+    ):
+        assert phrase in r2
+
+    r3 = _read("docs/stage1/S1-08R3_TASK.md")
+    for phrase in (
+        "正式发布与 Stage 1 终验",
+        "唯一正式 Job",
+        "PUBLISHED DatasetVersion",
+        "独立只读复验与双幂等",
+        "S1-08_ACCEPTANCE.md",
+    ):
+        assert phrase in r3
 
 
 def test_stage1_history_and_architecture_decisions_remain_auditable() -> None:
@@ -144,6 +181,8 @@ def test_stage1_history_and_architecture_decisions_remain_auditable() -> None:
         assert (_STAGE1 / f"{task}_ACCEPTANCE.md").is_file()
     decisions = _read("docs/DECISIONS.md")
     assert "ADR-018" in decisions
+    assert "ADR-021" in decisions
+    assert "Stage 1 三角色来源路线" in decisions
     assert "Stage 1 控制面简化" in decisions
     assert "生产运行时只支持 `daily_bar_unadjusted`" in decisions
 

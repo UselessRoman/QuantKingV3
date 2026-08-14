@@ -6,7 +6,7 @@
 
 核心字段：
 
-`symbol, trade_date, open, high, low, close, volume, amount`
+`code, trade_date, open, high, low, close, pre_close, volume, amount`
 
 来源字段：
 
@@ -17,14 +17,17 @@
 | 角色 | provider | upstream | 接口/输入 |
 |---|---|---|---|
 | A 常态供数 | BAOSTOCK | BAOSTOCK | `query_history_k_data_plus` |
-| B 常态互验 | AKSHARE | EASTMONEY | `stock_zh_a_hist` |
-| C 异常仲裁 | AKSHARE | TENCENT | `stock_zh_a_hist_tx` |
-| D 最后仲裁 | AKSHARE | SINA | `stock_zh_a_daily` |
+| B 常态互验 | AKSHARE | TENCENT | `stock_zh_a_hist_tx` |
+| C 异常仲裁 | AKSHARE | SINA | `stock_zh_a_daily` |
 | X 历史候选 | XTQUANT_LEGACY | XTQUANT | 受管 `DATA_ONLY` 导入对象 |
 
 必须记录实际 provider/upstream；BaoStock 服务故障与 AKShare 的网页/API/库变化分别建模。
-三个 AKShare upstream 不得合并，旧 XTQuant 也不得冒充当前可调用服务。来源合同保持固定且
+两个 AKShare upstream 不得合并，旧 XTQuant 也不得冒充当前可调用服务。来源合同保持固定且
 最小，不恢复候选审批、`PRODUCTION_READY` 或 source×dataset 能力矩阵。
+
+上表是 ADR-021 接受的目标合同，不代表已提交四角色实现已经完成重构，也不是新的真实运行
+授权。东财和 FTShare 不得进入正式来源；S1-07K4 必须先完成 registry、路由、预算、artifact、
+verifier 和 DataCenter 的三角色迁移及离线验收。
 
 ## 分层
 
@@ -44,7 +47,8 @@ Research         复权、股票池、因子、标签和 Qlib 派生视图
 
 - 每次 upstream 请求对应明确批次和 manifest。
 - Raw 记录请求范围、endpoint、AKShare 版本、采集时间、row_count 和 SHA。
-- Canonical 主键至少为 `(symbol, trade_date)`，排序确定。
+- Canonical 物理主键至少为 `(code, trade_date)`，排序确定；任务/配置中的 `symbol` 只表示
+  逻辑证券 scope，不得与物理列名混用。
 - 已发布版本不可原地修改；新数据或修订生成新版本。
 - 失败或未达成两源一致的行进入隔离，不进入发布候选。
 - Stage 1 运行时只处理 `daily_bar_unadjusted`；其他数据集 schema 不进入抓取、比较或发布枚举。
@@ -56,17 +60,28 @@ Research         复权、股票池、因子、标签和 Qlib 派生视图
 - `low <= open/close <= high`。
 - 价格非负，volume/amount 非负。
 - 日期范围、交易日和空结果语义。
-- 覆盖、新鲜度和上游 schema 漂移。
+- 按交易所/证券的预期交易日覆盖、未解释缺口、新鲜度和上游 schema 漂移。
+
+Stage 1 发布门必须消费带版本和内容 SHA 的交易日历。`coverage_window` 的全局最小/最大日期
+只能作为边界检查，不能替代逐证券预期交易日检查；停牌、未上市或整个请求范围无交易等例外
+必须形成显式缺口/空结果决定和证据。
 
 ## 多源仲裁
 
-1. 每次正常任务采集 BaoStock A 和东财 B。
+1. 每次正常任务采集 BaoStock A 和腾讯 B。
 2. A/B 都成功并在字段阈值内一致时选择 A。
-3. A/B 任一失败、缺行、质量失败或分歧时，对受影响范围采集腾讯 C。
-4. 仍无两源一致时才对剩余范围采集新浪 D。
-5. 至少两源一致才可选择；从一致集合按 A、B、C、D 优先级选择。
-6. 历史导入的 X 先与 A 比较，分歧时按 B/C/D 逐级仲裁。
-7. 无两源一致时隔离并报告。
+3. A/B 任一失败、缺行、质量失败或分歧时，对受影响范围采集新浪 C。
+4. 至少两源一致才可选择；从一致集合按 A、B、C 优先级选择。
+5. 历史导入的 X 先与 A 比较，分歧时按 B/C 仲裁。
+6. 无两源一致时隔离并报告。
+
+只有两个来源都持有同一主键行时才能比较字段并形成值共识。若任一来源持有行，其他来源的
+共同缺行不构成该行共识；恰好一个来源持有行时必须继续取证或隔离。经交易日历确认的多源
+整范围合法空结果可以形成零行结果，但使用独立原因码，不能伪装成 `AB/AC/..._AGREE_*_SELECTED`。
+
+比较器与仲裁器必须复用同一版本化 Decimal/定点阈值实现；阈值版本进入 DifferenceReport、
+Resolution artifact、输入指纹和 verifier，不能出现报告判为容差内一致而仲裁仍按 float
+原值判为冲突的双重口径。
 
 允许逐证券/交易日选源。每个决定至少记录 `selected_upstream`、参与比较的来源、规则版本、决定原因和差异报告标识；它属于正常 `ResolutionDecision`，不是 `SourceOverride` 或静默补洞。
 
@@ -74,6 +89,8 @@ K2 可以在版本级记录共同默认决定，并只为例外证券/交易日�
 
 BaoStock 与旧 XTQuant 的价格、`pre_close`、成交量、成交额、复权和停牌语义必须由 K3 实测；
 新量额容差也由代表性样本形成版本化合同。不得在未实测时猜测或覆盖历史零容差失败证据。
+Canonical `pre_close` 对所有服务源统一由完整未复权序列的前一行 `close` 派生；供应商直出的
+参考昨收只保留在 Raw，不能在某个适配器存在该列时静默切换 Canonical 语义。
 
 ## 发布
 

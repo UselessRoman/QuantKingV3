@@ -1,0 +1,53 @@
+{
+  "api_call_budget_max": 2,
+  "api_calls_attempted": 1,
+  "application_retries": 0,
+  "attempt_date": "2026-08-14",
+  "candidate_production_active": false,
+  "comparison_calls_attempted": {
+    "AKSHARE_TENCENT": 0,
+    "BAOSTOCK": 0,
+    "total": 0
+  },
+  "conclusion": "The FTShare gateway was reachable but rejected the first single-symbol request with HTTP 400. The conditional batch request was not made. No market-data contract was established, so FTShare remains inactive as source B.",
+  "failure_analysis": {
+    "confirmed": [
+      "The gateway returned HTTP 400 rather than a connection error.",
+      "The SDK exposed no structured API code for this response.",
+      "The R2 request sent adjust_kind as the literal string None."
+    ],
+    "inference": "The most likely request-contract error is that the documented optional default None should be Python None and omitted from JSON, not the literal string None. This has not been verified by another network call.",
+    "other_causes_not_excluded": [
+      "timestamp boundary validation",
+      "symbol validation",
+      "another undocumented gateway constraint"
+    ]
+  },
+  "marker": "S1-07K3-FTSHARE-CANDIDATE-DIAGNOSTIC-R2",
+  "outcomes": [
+    {
+      "api_code": null,
+      "error_type": "FtshareHTTPError",
+      "http_status": 400,
+      "label": "single:000001.SZ",
+      "outcome": "FAILED",
+      "stable_message": "FTShare candidate request failed"
+    }
+  ],
+  "plan": {
+    "adjust_kind_sent": "None",
+    "conditional_batch_on_single_success": true,
+    "lookback_days": 15,
+    "symbols": [
+      "000001.SZ"
+    ],
+    "target_end": "2026-08-09",
+    "target_start": "2026-06-11",
+    "upstream_end": "2026-08-09",
+    "upstream_start": "2026-05-27"
+  },
+  "schema_version": "s1-07k3-ftshare-candidate-r2-evidence.v1",
+  "sdk_git_commit": "8ffb97aef871b5ab787831652668dbb7f2001fed",
+  "sdk_version": "0.1.1",
+  "writes_formal_data_root": false
+}

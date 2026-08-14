@@ -1,0 +1,53 @@
+{
+  "application_retries": 0,
+  "attempt_date": "2026-08-14",
+  "candidate_production_active": false,
+  "conclusion": "FTShare is not accepted as production source B. The bounded qualification stopped because the batch response symbol set did not match the two requested canonical symbols. Independent-source lineage, market-data licensing, units, quotas and SLA also remain undocumented.",
+  "endpoint_invocation_budget": {
+    "AKSHARE_TENCENT": 2,
+    "BAOSTOCK": 2,
+    "FTSHARE_BATCH": 1,
+    "FTSHARE_SINGLE": 2,
+    "total": 7
+  },
+  "endpoint_invocations_attempted": {
+    "AKSHARE_TENCENT": 0,
+    "BAOSTOCK": 0,
+    "FTSHARE_BATCH": 1,
+    "FTSHARE_SINGLE": 2,
+    "total": 3
+  },
+  "failure": {
+    "classification": "BATCH_SYMBOL_CONTRACT_MISMATCH",
+    "message": "FTShare batch symbols do not match the request",
+    "requested_symbols": [
+      "000001.SZ",
+      "600000.SH"
+    ],
+    "returned_symbols_retained": false,
+    "stage": "FTSHARE_SINGLE_BATCH_CONSISTENCY"
+  },
+  "governance_blockers": [
+    "The underlying stock candlestick data supplier is not disclosed, so independence from BaoStock and AKShare upstreams is unproven.",
+    "The MIT license covers the SDK source code but no market-data usage license was found.",
+    "No official response-unit, correction, quota or SLA contract was found for stock candlesticks.",
+    "Version 0.1.1 is not resolvable from the Python package index and the official GitHub Releases page has no usable release artifact."
+  ],
+  "marker": "S1-07K3-FTSHARE-B-SOURCE-QUALIFICATION-V1",
+  "plan": {
+    "lookback_days": 15,
+    "symbols": [
+      "000001.SZ",
+      "600000.SH"
+    ],
+    "target_end": "2026-08-09",
+    "target_start": "2026-06-11",
+    "upstream_end": "2026-08-09",
+    "upstream_start": "2026-05-27"
+  },
+  "schema_version": "s1-07k3-ftshare-qualification-attempt.v1",
+  "sdk_git_commit": "8ffb97aef871b5ab787831652668dbb7f2001fed",
+  "sdk_version": "0.1.1",
+  "severity": "HIGH",
+  "writes_formal_data_root": false
+}

@@ -28,21 +28,30 @@ Parquet 保存批量数据，DuckDB 用于查询，SQLite 保存元数据、任�
 
 ## ADR-004：数据源与仲裁策略
 
-**状态：已接受（2026-08-12 修订，取代 AKShare 单 provider 路线）**
+**状态：已接受（2026-08-14 修订；现行角色由 ADR-021 冻结）**
 
-Stage 1 使用 BaoStock 独立服务和 AKShare 三个明确 upstream。常态采集 BaoStock(A) 与
-AKShare/东财(B)；任一调用失败、缺行、质量失败或字段分歧时，先按受影响证券/日期调用
-AKShare/腾讯(C)，仍无法形成共识时才调用 AKShare/新浪(D)。至少两个独立来源在冻结的字段、
+Stage 1 使用 BaoStock 独立服务和 AKShare 两个明确 upstream。常态采集 BaoStock(A) 与
+AKShare/腾讯(B)；任一调用失败、缺行、质量失败或字段分歧时，按受影响证券/日期调用
+AKShare/新浪(C)。至少两个独立来源在冻结的字段、
 单位和精度规则内一致，才可形成发布候选；不以简单多数绕过单位、复权或缺行冲突。
 
-结果：BaoStock 与三个 AKShare upstream 分别进入 Raw，`ResolutionDecision` 按证券/交易日
+“一致”只指两个来源都实际持有同一 `(code, trade_date)` 行且字段在同一版本化阈值内一致。
+若任一来源持有行，另外两个来源的共同缺行不得形成该行的值共识，也不得选择一个不存在的
+来源行；它必须触发继续取证、显式缺口决定或冲突隔离。仅当冻结请求范围经版本化交易日历
+确认无交易时，多个来源的合法整范围空结果才可形成零行结果，且必须使用区别于价格行一致的
+原因码和证据。该段是对原有“缺行冲突不得绕过”的澄清，不改变两源共识原则。
+
+结果：BaoStock 与两个 AKShare upstream 分别进入 Raw，`ResolutionDecision` 按证券/交易日
 记录选择来源、参与比较来源、规则版本和原因。BaoStock 是常态供数来源，但不是可绕过复核
-直接发布的权威源；AKShare 三源是独立复核/仲裁来源，新浪不得用于全市场常态抓取。没有
+直接发布的权威源；腾讯是常态互验源，新浪只作异常仲裁且不得用于全市场常态抓取。没有
 两源一致时隔离。XTQuant/QMT 不再是生产依赖；Tushare 和 JQData 不进入 Stage 1。
 
 首次 AKShare 三源正式 Job 的 OHLC/`pre_close` 一致，而量额存在最大 50 股/50 元级舍入差。
 因此容差必须由 S1-07K3 的 BaoStock、旧 XTQuant 和 AKShare 代表性样本实测后版本化冻结；
 不得修改既有 Raw、把历史失败改写为成功，或仅凭两只证券永久设定全市场阈值。
+
+东财 B 和四角色路由只保留为已提交历史基线；ADR-021 已用腾讯 B、 新浪 C 三角色路线取代。
+S1-08R3 开始前必须由 S1-07K4 同步更新来源合同、实现和真实验收证据。
 
 ## ADR-005：数据范围与分期
 
@@ -167,8 +176,8 @@ Difference/Resolution，无法形成两源一致时隔离。禁止修改旧项�
 Stage 1 以尽快交付真实、明确范围的未复权日线版本为复杂度边界，不建设通用数据平台或机构级证据系统：
 
 - K1 删除 XTQuant/QMT 生产路线、旧 `DataSource` 候选集合、`SourceCandidateAssessment` 和
-  24 单元 source×dataset 矩阵；K3 在不恢复该控制面的前提下，把固定来源扩展为
-  `BAOSTOCK`、`AKSHARE/EASTMONEY|TENCENT|SINA` 和仅迁移使用的 `XTQUANT_LEGACY`。
+  24 单元 source×dataset 矩阵；K3 历史基线曾扩展到东财/腾讯/新浪，ADR-021 的现行固定来源
+  为 `BAOSTOCK`、`AKSHARE/TENCENT|SINA` 和仅迁移使用的 `XTQUANT_LEGACY`。
 - K1 的生产运行时只支持 `daily_bar_unadjusted`；其他五类历史 schema 不得驱动 EOD 分支。
 - K2 最初使用 `ResolutionDecision` 表达 A/B/C 正常仲裁；K3 扩展到固定 A/B/C/D，但不改变
   该领域合同。`SourceOverride` 的申请、批准、claim、attempt 和 child-version 状态机保持
@@ -180,7 +189,7 @@ DataCenter 日常读侧是否从深层复验收敛为“发布时完整验证 + 
 
 ## ADR-019：东财适配器显式 IPv4 解析策略（S1-07K3B）
 
-**状态：已接受（2026-08-13）**
+**状态：已退役（2026-08-14；历史诊断证据保留）**
 
 2026-08-13 真实探针诊断确认：东财 IPv6 CDN（`push2hisipv6.trafficmanager.cn`）TCP 可连
 但 HTTP 数据被断，urllib3 优先 IPv6 导致 `RemoteDisconnected`；同一出口的 IPv4 路径曾返回
@@ -194,3 +203,39 @@ DataCenter 日常读侧是否从深层复验收敛为“发布时完整验证 + 
 
 证据：`docs/stage1/evidence/k3b_eastmoney_ipv6_root_cause_2026-08-13.json`、
 `docs/stage1/evidence/k3b_eastmoney_throttling_2026-08-13.json`。
+
+## ADR-020：拒绝 FTShare 作为 Stage 1 常态 B 源
+
+**状态：已接受（2026-08-14）**
+
+FTShare 不进入 QuantKing V3 的依赖、来源 registry、生产 EOD 路由或发布血缘。R3 证明固定
+SDK 在省略 `adjust_kind` 时可以返回单证券日线，但后续资格验收的双证券 batch 返回标识集合
+不符合冻结合同并按失败即停规则停止；更关键的是，官方资料没有提供股票 K 线底层供应商
+独立性、行情数据使用许可、返回单位、修订政策、调用配额或 SLA，`0.1.1` 也没有可由 Python
+包索引解析的正式发行物。SDK 的 MIT 许可证不得替代行情数据许可。
+
+R1～R3 与资格验收事实作为拒绝证据保留，临时候选探针代码不合入生产代码。不得因单证券
+接口曾成功而将 FTShare 静默映射为任何既有 upstream。后续来源角色由 ADR-021 取代本段
+“重新待选”状态；FTShare 仍保持拒绝。
+
+证据：`docs/stage1/S1-07K3_FTSHARE_VALIDATION.md`、
+`docs/stage1/evidence/k3_ftshare_qualification_attempt_2026-08-14.json`。
+
+## ADR-021：Stage 1 三角色来源路线
+
+**状态：已接受（2026-08-14）**
+
+Stage 1 正式目标路线固定为：`A=BAOSTOCK/BAOSTOCK` 常态供数、
+`B=AKSHARE/TENCENT` 常态互验、`C=AKSHARE/SINA` 异常仲裁。正常任务每次调用 A/B；A/B 任一
+失败、缺行、质量失败或字段分歧时，只对受影响证券/日期调用 C。至少两个实际持有同一行的
+来源在冻结规则内一致才允许发布；无两源一致即隔离。优先级为 A、B、C。
+
+东财因网络/限流和可用性证据不足退出正式来源集合，FTShare 按 ADR-020 拒绝。两者的历史 Raw、
+失败记录、适配器诊断和验收证据保留，但不得产生新的正式调用或进入新 Job 指纹。已提交的
+A/B/C/D 实现是迁移前基线，必须由 S1-07K4 删除东财 runtime/registry/预算分支并将腾讯、 新浪
+重排为 B/C；历史 migrations 和不可变证据不得改写。
+
+腾讯与新浪虽然都通过 AKShare 客户端接入，仍必须按不同 upstream、endpoint、Raw、质量运行和
+错误状态分别记录。AKShare 客户端相同不等于上游相同；但生产验收仍须以代表性真实探针确认
+两者没有静默共用同一返回、字段单位和修订语义已冻结，并为每次单调用提供硬超时。旧 XTQuant
+仍仅是 `DATA_ONLY` 历史候选 X，不计入日常 A/B/C 路由。

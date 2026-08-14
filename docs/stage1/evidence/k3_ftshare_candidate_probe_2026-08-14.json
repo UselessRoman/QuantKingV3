@@ -1,0 +1,49 @@
+{
+  "api_calls_attempted": 3,
+  "application_retries": 0,
+  "attempt_date": "2026-08-14",
+  "candidate_production_active": false,
+  "comparison_calls_attempted": {
+    "AKSHARE_TENCENT": 0,
+    "BAOSTOCK": 0,
+    "total": 0
+  },
+  "conclusion": "FTShare did not produce a usable response contract in the first bounded probe. All three fixed API calls failed with FtshareHTTPError, so independent-source and field/unit comparison was not started.",
+  "marker": "S1-07K3-FTSHARE-CANDIDATE-PROBE-V1",
+  "outcomes": [
+    {
+      "error_type": "FtshareHTTPError",
+      "label": "batch",
+      "outcome": "FAILED",
+      "stable_message": "FTShare candidate request failed"
+    },
+    {
+      "error_type": "FtshareHTTPError",
+      "label": "single:000001.SZ",
+      "outcome": "FAILED",
+      "stable_message": "FTShare candidate request failed"
+    },
+    {
+      "error_type": "FtshareHTTPError",
+      "label": "single:600000.SH",
+      "outcome": "FAILED",
+      "stable_message": "FTShare candidate request failed"
+    }
+  ],
+  "plan": {
+    "lookback_days": 15,
+    "symbols": [
+      "000001.SZ",
+      "600000.SH"
+    ],
+    "target_end": "2026-08-09",
+    "target_start": "2026-06-11",
+    "upstream_end": "2026-08-09",
+    "upstream_start": "2026-05-27"
+  },
+  "package_index_release_available": false,
+  "schema_version": "s1-07k3-ftshare-candidate-evidence.v1",
+  "sdk_git_commit": "8ffb97aef871b5ab787831652668dbb7f2001fed",
+  "sdk_version": "0.1.1",
+  "writes_formal_data_root": false
+}

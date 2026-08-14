@@ -1,0 +1,73 @@
+{
+  "api_call_budget_max": 1,
+  "api_calls_attempted": 1,
+  "application_retries": 0,
+  "attempt_date": "2026-08-14",
+  "candidate_production_active": false,
+  "comparison_calls_attempted": {
+    "AKSHARE_TENCENT": 0,
+    "BAOSTOCK": 0,
+    "FTSHARE_BATCH": 0,
+    "total": 0
+  },
+  "conclusion": "Omitting the optional adjust_kind field fixed the request contract and produced a 52-row single-symbol response. This establishes endpoint usability for the bounded case but does not yet satisfy the production B-source acceptance criteria.",
+  "marker": "S1-07K3-FTSHARE-CANDIDATE-OMIT-ADJUST-R3",
+  "outcomes": [
+    {
+      "label": "single:000001.SZ",
+      "outcome": "SUCCEEDED",
+      "payload_sha256": "591bc5e1e18541bbbc37de55582d6c54edc52482ccc8df8cb8856d41da1f41ae",
+      "payload_type": "dict",
+      "record_shapes": [
+        {
+          "fields": [
+            "close",
+            "high",
+            "low",
+            "open",
+            "ts_millis",
+            "ts_millis_open",
+            "turnover",
+            "volume"
+          ],
+          "first_row": {
+            "close": "10.7600",
+            "high": "10.8500",
+            "low": "10.7200",
+            "open": "10.7600",
+            "ts_millis": 1779865200000,
+            "ts_millis_open": 1779845400000,
+            "turnover": "905710898.2800",
+            "volume": 83972718
+          },
+          "path": "$.data",
+          "row_count": 52
+        }
+      ],
+      "top_level_keys": [
+        "code",
+        "data",
+        "message"
+      ]
+    }
+  ],
+  "plan": {
+    "lookback_days": 15,
+    "symbols": [
+      "000001.SZ"
+    ],
+    "target_end": "2026-08-09",
+    "target_start": "2026-06-11",
+    "upstream_end": "2026-08-09",
+    "upstream_start": "2026-05-27"
+  },
+  "request_delta_from_r2": {
+    "adjust_kind_json_behavior": "OMITTED_BY_FIXED_SDK",
+    "adjust_kind_python_value": null,
+    "all_other_parameters_unchanged": true
+  },
+  "schema_version": "s1-07k3-ftshare-candidate-r3-evidence.v1",
+  "sdk_git_commit": "8ffb97aef871b5ab787831652668dbb7f2001fed",
+  "sdk_version": "0.1.1",
+  "writes_formal_data_root": false
+}
