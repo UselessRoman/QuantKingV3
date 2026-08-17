@@ -61,15 +61,15 @@ class TestRawStoreLanding:
         self, tmp_path: Path, publisher: RawBatchPublisher
     ) -> None:
         request = RawBatchPublishRequest(
-            source="eastmoney",
+            source="tencent",
             dataset="daily_bar_unadjusted",
             batch_id="b-2026-07-16-001",
-            adapter_version="eastmoney-probe-1",
+            adapter_version="tencent-probe-1",
             request_params={"code": "000001.SZ"},
             files=(_file("rows/000001.SZ.parquet", b"AAA"),),
         )
         landed = publisher.publish(request)
-        final = tmp_path / "raw" / "eastmoney" / "daily_bar_unadjusted" / request.batch_id
+        final = tmp_path / "raw" / "tencent" / "daily_bar_unadjusted" / request.batch_id
         assert landed == final
         assert landed.is_dir()
         assert (
@@ -82,10 +82,10 @@ class TestRawStoreLanding:
         self, tmp_path: Path, publisher: RawBatchPublisher
     ) -> None:
         request = RawBatchPublishRequest(
-            source="eastmoney",
+            source="tencent",
             dataset="daily_bar_unadjusted",
             batch_id="b-2026-07-16-002",
-            adapter_version="eastmoney-probe-1",
+            adapter_version="tencent-probe-1",
             request_params={"code": "000001.SZ", "start": "2026-01-01"},
             files=(
                 _file("rows/000001.SZ.parquet", b"hello-000001"),
@@ -93,16 +93,16 @@ class TestRawStoreLanding:
             ),
         )
         publisher.publish(request)
-        final = tmp_path / "raw" / "eastmoney" / "daily_bar_unadjusted" / request.batch_id
+        final = tmp_path / "raw" / "tencent" / "daily_bar_unadjusted" / request.batch_id
         manifest_path = final / RAW_MANIFEST_FILENAME
         complete_path = final / RAW_COMPLETE_FILENAME
         assert manifest_path.is_file()
         assert complete_path.is_file()
         manifest = load_raw_manifest(final)
-        assert manifest["source"] == "eastmoney"
+        assert manifest["source"] == "tencent"
         assert manifest["dataset"] == "daily_bar_unadjusted"
         assert manifest["batch_id"] == request.batch_id
-        assert manifest["adapter_version"] == "eastmoney-probe-1"
+        assert manifest["adapter_version"] == "tencent-probe-1"
         assert manifest["request_params"] == {"code": "000001.SZ", "start": "2026-01-01"}
         files = {entry["relative_path"]: entry for entry in manifest["files"]}
         assert set(files) == {"rows/000001.SZ.parquet", "rows/600000.SH.parquet"}
@@ -116,10 +116,10 @@ class TestRawStoreLanding:
         self, tmp_path: Path, publisher: RawBatchPublisher
     ) -> None:
         request = RawBatchPublishRequest(
-            source="eastmoney",
+            source="tencent",
             dataset="daily_bar_unadjusted",
             batch_id="b-2026-07-16-003",
-            adapter_version="eastmoney-probe-1",
+            adapter_version="tencent-probe-1",
             request_params={"code": "000001.SZ"},
             files=(_file("rows/000001.SZ.parquet", b"AAA"),),
         )
@@ -133,19 +133,19 @@ class TestRawStoreLanding:
         self, tmp_path: Path, publisher: RawBatchPublisher
     ) -> None:
         request = RawBatchPublishRequest(
-            source="eastmoney",
+            source="tencent",
             dataset="daily_bar_unadjusted",
             batch_id="b-2026-07-16-004",
-            adapter_version="eastmoney-probe-1",
+            adapter_version="tencent-probe-1",
             request_params={"code": "000001.SZ"},
             files=(_file("rows/000001.SZ.parquet", b"AAA"),),
         )
         publisher.publish(request)
         conflicting = RawBatchPublishRequest(
-            source="eastmoney",
+            source="tencent",
             dataset="daily_bar_unadjusted",
             batch_id="b-2026-07-16-004",
-            adapter_version="eastmoney-probe-1",
+            adapter_version="tencent-probe-1",
             request_params={"code": "000001.SZ"},
             files=(_file("rows/000001.SZ.parquet", b"BBB"),),
         )
@@ -153,26 +153,26 @@ class TestRawStoreLanding:
             publisher.publish(conflicting)
         # The original payload must still be intact; the conflicting request
         # must not have overwritten the batch.
-        final = tmp_path / "raw" / "eastmoney" / "daily_bar_unadjusted" / request.batch_id
+        final = tmp_path / "raw" / "tencent" / "daily_bar_unadjusted" / request.batch_id
         assert (final / "rows" / "000001.SZ.parquet").read_bytes() == b"AAA"
 
     def test_idempotency_conflict_when_manifest_differs(
         self, tmp_path: Path, publisher: RawBatchPublisher
     ) -> None:
         request = RawBatchPublishRequest(
-            source="eastmoney",
+            source="tencent",
             dataset="daily_bar_unadjusted",
             batch_id="b-2026-07-16-005",
-            adapter_version="eastmoney-probe-1",
+            adapter_version="tencent-probe-1",
             request_params={"code": "000001.SZ"},
             files=(_file("rows/000001.SZ.parquet", b"AAA"),),
         )
         publisher.publish(request)
         conflicting = RawBatchPublishRequest(
-            source="eastmoney",
+            source="tencent",
             dataset="daily_bar_unadjusted",
             batch_id="b-2026-07-16-005",
-            adapter_version="eastmoney-probe-2",
+            adapter_version="tencent-probe-2",
             request_params={"code": "000001.SZ"},
             files=(_file("rows/000001.SZ.parquet", b"AAA"),),
         )
@@ -189,10 +189,10 @@ class TestRawStoreLanding:
 
         publisher = _BoomPublisher(data_root=tmp_path)
         request = RawBatchPublishRequest(
-            source="eastmoney",
+            source="tencent",
             dataset="daily_bar_unadjusted",
             batch_id="b-2026-07-16-006",
-            adapter_version="eastmoney-probe-1",
+            adapter_version="tencent-probe-1",
             request_params={"code": "000001.SZ"},
             files=(_file("rows/000001.SZ.parquet", b"AAA"),),
         )
@@ -201,13 +201,13 @@ class TestRawStoreLanding:
         incomplete = (
             tmp_path
             / "raw"
-            / "eastmoney"
+            / "tencent"
             / "daily_bar_unadjusted"
             / (request.batch_id + ".incomplete")
         )
         assert incomplete.is_dir()
         assert not (
-            tmp_path / "raw" / "eastmoney" / "daily_bar_unadjusted" / request.batch_id
+            tmp_path / "raw" / "tencent" / "daily_bar_unadjusted" / request.batch_id
         ).exists()
         failure = json.loads((incomplete / RAW_FAILURE_FILENAME).read_text(encoding="utf-8"))
         assert failure["batch_id"] == request.batch_id
@@ -224,10 +224,10 @@ class TestRawStoreLanding:
 
         publisher = _BoomPublisher(data_root=tmp_path)
         request = RawBatchPublishRequest(
-            source="eastmoney",
+            source="tencent",
             dataset="daily_bar_unadjusted",
             batch_id="b-2026-07-16-007",
-            adapter_version="eastmoney-probe-1",
+            adapter_version="tencent-probe-1",
             request_params={"code": "000001.SZ"},
             files=(_file("rows/000001.SZ.parquet", b"AAA"),),
         )
@@ -240,10 +240,10 @@ class TestRawStoreLanding:
         # A retry with a new batch id must succeed independently.
         ok_publisher = RawBatchPublisher(data_root=tmp_path)
         new_request = RawBatchPublishRequest(
-            source="eastmoney",
+            source="tencent",
             dataset="daily_bar_unadjusted",
             batch_id="b-2026-07-16-007-retry",
-            adapter_version="eastmoney-probe-1",
+            adapter_version="tencent-probe-1",
             request_params={"code": "000001.SZ"},
             files=(_file("rows/000001.SZ.parquet", b"AAA"),),
         )
@@ -260,10 +260,10 @@ class TestRawStorePathContainment:
         # catch the error raised by either side.
         with pytest.raises(InvalidPathError):
             request = RawBatchPublishRequest(
-                source="eastmoney",
+                source="tencent",
                 dataset="daily_bar_unadjusted",
                 batch_id="b-2026-07-16-008",
-                adapter_version="eastmoney-probe-1",
+                adapter_version="tencent-probe-1",
                 request_params={"code": "000001.SZ"},
                 files=(RawManifestFile(relative_path="/etc/passwd", payload=b"x", row_count=0),),
             )
@@ -272,10 +272,10 @@ class TestRawStorePathContainment:
     def test_rejects_parent_traversal(self, tmp_path: Path, publisher: RawBatchPublisher) -> None:
         with pytest.raises(InvalidPathError):
             request = RawBatchPublishRequest(
-                source="eastmoney",
+                source="tencent",
                 dataset="daily_bar_unadjusted",
                 batch_id="b-2026-07-16-009",
-                adapter_version="eastmoney-probe-1",
+                adapter_version="tencent-probe-1",
                 request_params={"code": "000001.SZ"},
                 files=(
                     RawManifestFile(

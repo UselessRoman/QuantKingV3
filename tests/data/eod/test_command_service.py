@@ -111,18 +111,19 @@ def test_execution_config_rejects_bool_integer_fields(field: str, value: bool) -
         "code_version": "test-code",
         "adapter_version": "test-adapter",
         "rule_version": "test-rules",
-        "resolution_rule_version": "source-resolution.daily-bar-unadjusted.k3.v1",
-        "source_route_version": "test-route",
+        "resolution_rule_version": "source-resolution.daily-bar-unadjusted.k4.v1",
+        "source_route_version": "BAO-TX-SINA.k4.v1",
         "baostock_version": "0.9.3",
         "baostock_unit_policy_version": "test-baostock-units",
+        "akshare_unit_policy_version": "test-akshare-units",
         "planner_lookback_days": 0,
         "adapter_context_lookback_days": 15,
-        "max_days_per_chunk": 1,
+        "max_days_per_chunk": 31,
         "max_items_per_chunk": 1,
-        "endpoint_invocation_limit": 16,
+        "endpoint_invocation_limit": 12,
         "c_endpoint_invocation_limit": 4,
-        "d_endpoint_invocation_limit": 4,
-        "estimated_http_request_limit": 24,
+        "d_endpoint_invocation_limit": 0,
+        "estimated_http_request_limit": 20,
         "estimated_baostock_protocol_message_limit": 12,
         "legacy_import_manifest_sha256": None,
         "datasets": {},
@@ -144,6 +145,36 @@ def _finish(jobs: JobService, job_id: str, status: JobStatus) -> None:
             failure=FailureInfo("TEST_FAILURE", "stable failure", False),
             summary="terminal",
         )
+
+
+def test_production_config_freezes_k4_constants_and_manifest(tmp_path: Path) -> None:
+    config = EodExecutionConfig.production(
+        code_version="test-code", settings=app_settings(tmp_path)
+    )
+    assert config.adapter_version == "baostock-akshare-daily-bar.k4.v1"
+    assert config.resolution_rule_version == "source-resolution.daily-bar-unadjusted.k4.v1"
+    assert config.source_route_version == "BAO-TX-SINA.k4.v1"
+    assert config.endpoint_invocation_limit == 12
+    assert config.c_endpoint_invocation_limit == 4
+    assert config.d_endpoint_invocation_limit == 0
+    assert config.estimated_http_request_limit == 20
+    assert config.estimated_baostock_protocol_message_limit == 12
+    assert config.akshare_unit_policy_version
+
+    rendered = config.to_dict(selected=("daily_bar_unadjusted",), bases={})
+    assert rendered["akshare_unit_policy_version"] == config.akshare_unit_policy_version
+    assert rendered["source_route_version"] == "BAO-TX-SINA.k4.v1"
+    assert rendered["endpoint_invocation_limit"] == 12
+    assert rendered["c_endpoint_invocation_limit"] == 4
+    assert rendered["d_endpoint_invocation_limit"] == 0
+    assert rendered["estimated_http_request_limit"] == 20
+    assert rendered["estimated_baostock_protocol_message_limit"] == 12
+
+    command, jobs = _service(tmp_path)
+    created = command.enqueue(_request(), idempotency_key="k4-manifest", requester="pytest")
+    manifest = jobs.get_job(created.job_id).version_manifest
+    assert manifest["akshare_unit_policy_version"] == config.akshare_unit_policy_version
+    assert manifest["source_route_version"] == "BAO-TX-SINA.k4.v1"
 
 
 @pytest.mark.parametrize("terminal", [JobStatus.FAILED, JobStatus.INTERRUPTED])

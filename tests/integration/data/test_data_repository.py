@@ -55,7 +55,7 @@ def factory(tmp_path: Path) -> DataSqliteUnitOfWorkFactory:
 
 def _running_batch(
     *,
-    source: DataUpstream = DataUpstream.EASTMONEY,
+    source: DataUpstream = DataUpstream.SINA,
     dataset: DatasetKind = DatasetKind.DAILY_BAR_UNADJUSTED,
     batch_id: EntityId | None = None,
 ) -> IngestionBatch:
@@ -64,7 +64,6 @@ def _running_batch(
         provider=DataProvider.AKSHARE,
         upstream=source,
         endpoint={
-            DataUpstream.EASTMONEY: "stock_zh_a_hist",
             DataUpstream.TENCENT: "stock_zh_a_hist_tx",
             DataUpstream.SINA: "stock_zh_a_daily",
         }[source],
@@ -75,7 +74,6 @@ def _running_batch(
             "provider": "AKSHARE",
             "upstream": source.value,
             "endpoint": {
-                DataUpstream.EASTMONEY: "stock_zh_a_hist",
                 DataUpstream.TENCENT: "stock_zh_a_hist_tx",
                 DataUpstream.SINA: "stock_zh_a_daily",
             }[source],
@@ -336,7 +334,7 @@ class TestQualityAndDifferencePersistence:
     def test_difference_report_save_read_and_query(
         self, factory: DataSqliteUnitOfWorkFactory
     ) -> None:
-        primary_batch = _succeeded_batch(source=DataUpstream.EASTMONEY)
+        primary_batch = _succeeded_batch(source=DataUpstream.SINA)
         fallback_batch = _succeeded_batch(source=DataUpstream.TENCENT)
         primary_version = _building_version((primary_batch.batch_id,))
         fallback_version = _building_version((fallback_batch.batch_id,))
@@ -385,7 +383,7 @@ class TestQualityAndDifferencePersistence:
         report = DifferenceReport(
             report_id=new_entity_id("data_diff"),
             version_id=primary_version.version_id,
-            primary_source=DataUpstream.EASTMONEY,
+            primary_source=DataUpstream.SINA,
             fallback_source=DataUpstream.TENCENT,
             created_at=_DECIDED,
             field_differences={"amount": "2", "close": "1"},
@@ -420,7 +418,7 @@ class TestQualityAndDifferencePersistence:
         with factory() as uow:
             assert uow.data.get_difference_report(str(report.report_id)) == report
             assert uow.data.list_difference_reports(
-                version_id=str(primary_version.version_id), primary_source=DataUpstream.EASTMONEY
+                version_id=str(primary_version.version_id), primary_source=DataUpstream.SINA
             ) == [report]
 
 

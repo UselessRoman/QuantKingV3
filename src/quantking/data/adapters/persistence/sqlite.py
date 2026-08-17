@@ -411,11 +411,15 @@ def _difference_row_values(report: DifferenceReport) -> dict[str, object]:
 def _difference_from_verified(report: VerifiedDifferenceReport) -> DifferenceReport:
     shared_candidate = report.primary_version_id == report.fallback_version_id
     if shared_candidate and (
-        report.manifest_schema_version != "difference-report-manifest.k2.v2"
+        report.manifest_schema_version
+        not in {
+            "difference-report-manifest.k2.v2",
+            "difference-report-manifest.k4.v4",
+        }
         or report.binding_mode != "SHARED_RESOLUTION_CANDIDATE"
     ):
         raise InvalidDataTransitionError(
-            "shared DifferenceReport requires the verified K2 artifact schema"
+            "shared DifferenceReport requires a verified shared-candidate artifact schema"
         )
     return DifferenceReport(
         report_id=report.report_id,

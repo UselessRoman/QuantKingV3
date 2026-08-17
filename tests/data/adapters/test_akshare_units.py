@@ -34,14 +34,10 @@ _SUPPORTED_SYMBOLS = (
 
 
 @pytest.mark.parametrize("symbol", _SUPPORTED_SYMBOLS)
-def test_frozen_policy_resolves_eastmoney_lots_and_sina_shares(symbol: str) -> None:
-    eastmoney = resolve_returned_units(DataUpstream.EASTMONEY, symbol, "1.18.83")
+def test_frozen_policy_resolves_sina_shares(symbol: str) -> None:
     sina = resolve_returned_units(DataUpstream.SINA, symbol, "1.18.83")
 
-    assert eastmoney.policy_version == AKSHARE_UNIT_POLICY_VERSION
-    assert eastmoney.volume_unit is VolumeUnit.LOT_100_SHARES
-    assert eastmoney.amount_unit is AmountUnit.CNY_YUAN
-    assert eastmoney.verified is True
+    assert sina.policy_version == AKSHARE_UNIT_POLICY_VERSION
     assert sina.volume_unit is VolumeUnit.SHARE
     assert sina.amount_unit is AmountUnit.CNY_YUAN
     assert sina.verified is True

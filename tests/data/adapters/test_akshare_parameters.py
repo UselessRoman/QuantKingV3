@@ -17,14 +17,6 @@ from quantking.data.models import DataUpstream
 def test_parameters_are_centralized_explicit_and_unadjusted() -> None:
     request = DailyBarRequest("600000.SH", date(2026, 6, 1), date(2026, 7, 31))
 
-    assert endpoint_parameters(DataUpstream.EASTMONEY, request) == {
-        "symbol": "600000",
-        "period": "daily",
-        "start_date": "20260517",
-        "end_date": "20260731",
-        "adjust": "",
-        "timeout": 15.0,
-    }
     assert AKSHARE_ENDPOINT_TIMEOUT_SECONDS == 15.0
     assert endpoint_parameters(DataUpstream.TENCENT, request) == {
         "symbol": "sh600000",

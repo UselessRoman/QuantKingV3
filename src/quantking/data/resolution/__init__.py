@@ -1,4 +1,4 @@
-"""Immutable K2 three-upstream resolution contracts and artifacts."""
+"""Immutable K4 three-role resolution contracts and artifacts (K2/K3 readable)."""
 
 from quantking.data.resolution.artifacts import (
     ResolutionArtifactConflictError,
@@ -8,8 +8,11 @@ from quantking.data.resolution.artifacts import (
     VerifiedResolutionArtifact,
     verify_resolution_artifact,
 )
-from quantking.data.resolution.differences import K2DifferenceArtifactRecorder
+from quantking.data.resolution.differences import ResolutionDifferenceArtifactRecorder
 from quantking.data.resolution.models import (
+    K2_RESOLUTION_RULE_VERSION,
+    K3_RESOLUTION_RULE_VERSION,
+    K4_RESOLUTION_RULE_VERSION,
     RESOLUTION_RULE_VERSION,
     CRequestTrace,
     ResolutionDecision,
@@ -33,15 +36,18 @@ from quantking.data.resolution.service import (
 )
 
 __all__ = [
+    "K2_RESOLUTION_RULE_VERSION",
+    "K3_RESOLUTION_RULE_VERSION",
+    "K4_RESOLUTION_RULE_VERSION",
     "RESOLUTION_RULE_VERSION",
     "CRequestTrace",
-    "K2DifferenceArtifactRecorder",
     "ResolutionArtifactConflictError",
     "ResolutionArtifactVerificationError",
     "ResolutionArtifactVerifier",
     "ResolutionArtifactWriter",
     "ResolutionDecision",
     "ResolutionDefaultSummary",
+    "ResolutionDifferenceArtifactRecorder",
     "ResolutionDifferencePort",
     "ResolutionKey",
     "ResolutionOutcome",

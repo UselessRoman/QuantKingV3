@@ -81,7 +81,7 @@ class TestDifferenceReportVerifier:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="EASTMONEY",
+            primary_source="BAOSTOCK",
             fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
@@ -106,7 +106,7 @@ class TestDifferenceReportVerifier:
 
         assert verified.report_id == outcome.report_id
         assert verified.dataset == "daily_bar_unadjusted"
-        assert verified.primary_source == "EASTMONEY"
+        assert verified.primary_source == "BAOSTOCK"
         assert verified.fallback_source == "TENCENT"
         assert verified.total_differences == outcome.total_differences
         assert len(verified.row_differences) == outcome.total_differences
@@ -131,7 +131,7 @@ class TestDifferenceReportVerifier:
         manifest = {
             "report_id": str(report_id),
             "dataset": "daily_bar_unadjusted",
-            "primary_source": "EASTMONEY",
+            "primary_source": "BAOSTOCK",
             "fallback_source": "TENCENT",
             "report_sha256": "c" * 64,
         }
@@ -155,7 +155,7 @@ class TestDifferenceReportVerifier:
         manifest = {
             "report_id": str(report_id),
             "dataset": "daily_bar_unadjusted",
-            "primary_source": "EASTMONEY",
+            "primary_source": "BAOSTOCK",
             "fallback_source": "TENCENT",
             "report_sha256": "c" * 64,
         }
@@ -183,7 +183,7 @@ class TestDifferenceReportVerifier:
         manifest = {
             "report_id": str(report_id),
             "dataset": "daily_bar_unadjusted",
-            "primary_source": "EASTMONEY",
+            "primary_source": "BAOSTOCK",
             "fallback_source": "TENCENT",
             "report_sha256": "c" * 64,
         }
@@ -230,7 +230,7 @@ class TestDifferenceReportVerifier:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="EASTMONEY",
+            primary_source="BAOSTOCK",
             fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),

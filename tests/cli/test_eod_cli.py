@@ -250,17 +250,18 @@ def test_dry_run_subprocess_is_read_only_and_reports_fixed_budget(tmp_path: Path
     assert payload["adapter_context_lookback_days"] == 15
     assert len(payload["a_chunks"]) == len(payload["b_chunks"]) == 4
     assert len(payload["max_c_chunks"]) == 4
-    assert len(payload["max_d_chunks"]) == 4
+    assert "max_d_chunks" not in payload
     assert payload["network_budget"] == {
         "a_baostock_endpoint_invocations": 4,
         "application_retries": 0,
-        "b_eastmoney_endpoint_invocations": 4,
-        "estimated_max_akshare_http_requests": 24,
+        "b_tencent_endpoint_invocations": 4,
+        "estimated_max_akshare_http_requests": 20,
         "estimated_max_baostock_protocol_messages": 12,
         "max_c_endpoint_invocations": 4,
-        "max_d_endpoint_invocations": 4,
-        "max_endpoint_invocations": 16,
+        "max_endpoint_invocations": 12,
     }
+    assert "akshare_unit_policy" in payload["versions"]
+    assert payload["idempotency_key"] == "s1-07k4-first-release-20260611-20260809-v1"
     assert not data_root.exists()
 
 

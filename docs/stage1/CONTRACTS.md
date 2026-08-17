@@ -5,10 +5,19 @@
 为准。S1-01～S1-06 的验收报告只证明历史交付范围，K1/K2 已接受的简化合同覆盖其中
 冲突的 XTQuant、assessment、`SourceOverride` 和旧 EOD evidence 描述。
 [S1-07K3](S1-07K3_TASK.md) 只记录 BaoStock 与旧数据受管迁移的历史离线基线；未完成的真实
-实测和旧根迁移不得由合成证据替代。2026-08-14 两份独立评审确认当前实现尚未完全满足下述
-合同，尤其是缺行仲裁、交易日完整性、manifest 参数化和恢复边界。必须依次完成
-[S1-07K4](S1-07K4_TASK.md)、[S1-08R2](S1-08R2_TASK.md)，随后才可按
-[S1-08R3](S1-08R3_TASK.md) 创建新的正式发布 Job。
+实测和旧根迁移不得由合成证据替代。S1-07K4 已把四角色运行时重构为 ADR-021 三角色路线并
+修复缺行仲裁、zero-row 原因码、共享 `ThresholdSet`、Canonical `pre_close` 恒派生和版本化
+交易日历质量门（见 [S1-07K4 实施记录](S1-07K4_IMPLEMENTATION.md)）。K4C 第一次代表性真实
+三源实测（2026-08-15）当时经独立验收不通过（S1-07K4C-R1，历史证据
+[evidence/k4c_representative_probe_2026-08-15.json](evidence/k4c_representative_probe_2026-08-15.json)
+保留）；R1 修复、R2/R3 真实实测与 R4 证据链修复依次交付后，**K4C-R4 已于 2026-08-16 独立
+验收通过，K4 阈值/单位/路由合同据此接受重新冻结（ADR-024）**。
+K4D 评估已完成并收口（ADR-027）：只读 inventory 已于 2026-08-16 获授权执行一次并成功
+（5,208 文件、零读取错误、Stage 0 基线差异 0/0，ADR-025）；两次真实 pilot attempt 分别于
+2026-08-16/08-17 获授权执行并失败即停（ADR-026，数据根零写入、授权已消费）；旧 XTQuant
+迁移因复权语义不可信被用户决定**拒绝**，第 3 次 pilot、全量诊断与 full 均不执行，
+`XTQUANT_LEGACY` 不进入发布链。随后必须完成
+[S1-08R2](S1-08R2_TASK.md)，才可按 [S1-08R3](S1-08R3_TASK.md) 创建新的正式发布 Job。
 
 ## 范围
 
@@ -28,11 +37,21 @@
 | A | BAOSTOCK / BAOSTOCK | `query_history_k_data_plus` | 正常 EOD 每次 |
 | B | AKSHARE / TENCENT | `stock_zh_a_hist_tx` | 正常 EOD 每次 |
 | C | AKSHARE / SINA | `stock_zh_a_daily` | A/B 异常时，仅受影响范围 |
-| X | XTQUANT_LEGACY / XTQUANT | 受管导入对象 | 仅旧历史迁移 |
+| X | XTQUANT_LEGACY / XTQUANT | 旧导出文件（只读评估对象） | 迁移已拒绝（ADR-027），不进入发布链 |
 
-上表由 ADR-021 冻结。已提交代码仍是东财 B、腾讯 C、 新浪 D 的历史四角色基线，尚不能运行
-新的正式 Job；S1-07K4 必须同步更新来源 registry、路由、预算、artifact/verifier、DataCenter、
-测试与真实探针。东财和 FTShare 已退出正式来源集合。
+上表由 ADR-021 冻结。S1-07K4 已把来源 registry、路由、预算、artifact/verifier、DataCenter、
+CLI/Web 投影和测试重构为三角色：正常任务只计划 A/B；A/B 一致时 C 的 planned/actual 都为 0，
+C 只按受影响证券/日期调用；AKShare 每次调用经受控子进程硬超时（60 秒），BaoStock 会话硬
+超时 20 秒，应用层零重试，预算不足在首次调用前拒绝。东财和 FTShare 已退出正式来源集合；
+东财 runtime/registry/预算和新 Job 指纹分支已删除，其历史 Raw、migration 和证据仍可读。
+K4 路由冻结为 `source-resolution.daily-bar-unadjusted.k4.v1` + `BAO-TX-SINA.k4.v1`，
+预算冻结为端点 12/4/0、HTTP 上界 20、BaoStock 协议消息上界 12。K4C 第一次代表性实测
+（2026-08-15）经独立验收不通过（S1-07K4C-R1）；K4C-R2（36/36）、K4C-R3 Phase B（9/9）
+与 K4C-R4（证据链修复，ADR-023）依次交付后，**K4C-R4 已于 2026-08-16 独立验收通过，
+`comparison-thresholds.daily-bar-unadjusted.k4.v1`（OHLC/`pre_close` 零容差、量额绝对
+容差 50 股/50 元、相对 0）已按用户决定接受重新冻结（ADR-024）**。单位与路由版本继续
+保持冻结。历史证据文件中生成于待重新验收时期的
+`thresholds_pending_reacceptance: true` 字段为字节冻结事实，不随规则状态改写。
 
 每个 Raw/导入批次必须分别记录 provider、upstream、endpoint/导入格式、库版本、采集或导入
 时间、目标范围、实际范围、请求参数或源文件 SHA、row count、内容 SHA 和 Job。不得把两个
@@ -52,9 +71,11 @@ registry 和新 Job 指纹删除，不能迁移到腾讯或新浪。
 在 Raw，不得成为按列是否存在而切换的 Canonical 分支。Raw manifest 同时绑定 target/upstream 窗口和
 `lookback_days=15`。空结果、网络失败、限流、schema 漂移和合法非交易日必须分开建模。
 
-旧 XTQuant 文件必须先逐文件复制为受管不可变导入对象，源根前后只读指纹一致；转换层明确
-记录原字段、单位、复权和日期语义。未确认、未复核或 BaoStock 不支持的证券/日期保留为
-迁移缺口，不静默丢弃，也不进入发布候选。
+旧 XTQuant 文件曾按"先逐文件复制为受管不可变导入对象、源根前后只读指纹一致、转换层
+明确记录原字段/单位/复权和日期语义、未确认或未复核保留为迁移缺口"的合同评估；两次
+真实 pilot 证明其复权语义无法可靠满足 `daily_bar_unadjusted` 契约，迁移已按 ADR-027
+拒绝：`XTQUANT_LEGACY` 不进入正式 Raw、staging、Canonical、Warehouse 或发布候选，
+该导入合同不再有活跃执行对象（离线框架与历史证据保留为审计输入）。
 
 ## 质量与仲裁
 
@@ -72,9 +93,15 @@ registry 和新 Job 指纹删除，不能迁移到腾讯或新浪。
 分区/证券摘要和有界行级证据路径，不能只保留固定失败文案。
 
 历史阈值 `comparison-thresholds.daily-bar-unadjusted.k1.v1` 对全部字段零容差，只绑定首次
-失败 Job，不得修改。K3 必须用 BaoStock、旧 XTQuant 和 AKShare 代表性实测形成新的不可变
-规则版本；OHLC/`pre_close` 默认仍为零容差，量额若采用容差必须使用十进制定点比较、记录
-实际差值和阈值，并覆盖边界正负测试，不得通过修改 Raw 或 Canonical 舍入来制造一致。
+失败 Job，不得修改，且继续可复验。第一次 K4C 实测（2026-06-11..2026-08-09，6 只代表性
+证券 × BaoStock/腾讯/新浪）的 36 次调用全部成功、OHLC/`pre_close` 三源一致、量额差异为
+腾讯 100 股/100 元舍入；但独立验收不通过（代表性覆盖未验证、attempt b 无证据、50 极值
+不可复算）。**K4C-R4 已于 2026-08-16 独立验收通过，
+`comparison-thresholds.daily-bar-unadjusted.k4.v1`（OHLC/`pre_close` 零容差、量额绝对
+容差 50、相对 0）已按用户决定接受重新冻结（ADR-024）**：规则值不变、状态由待重新验收
+转为已接受，验收记录为 `k4_threshold_acceptance()`（含四条 SHA 绑定证据引用）。容差使用
+十进制定点比较、记录实际差值和阈值，并覆盖边界正负测试，不得通过修改 Raw 或 Canonical
+舍入来制造一致。任何更大容差都必须来自新的代表性证据并通过离线 verifier 与独立验收。
 
 1. EOD 的 A/B 都通过且一致时选择 A，C 零调用。
 2. A/B 任一调用失败、质量失败、缺行或字段分歧时，只为受影响证券/日期范围调用 C。
@@ -87,9 +114,19 @@ registry 和新 Job 指纹删除，不能迁移到腾讯或新浪。
 7. 经版本化交易日历确认的多方整范围合法空结果可以形成零行结果，但必须使用独立原因码；
    调用/质量失败或逐行缺失不能冒充合法空或 `AB/AC/..._AGREE_*_SELECTED`。
 
-DifferenceReport 与 Resolution 必须调用同一版本化 `ThresholdSet` 和 Decimal/定点比较函数。
-阈值版本同时进入比较、决定、artifact、输入指纹和 verifier；不得一层按容差判断、另一层按
-float 原值 `==`。激活新版本时必须原子更新版本白名单/registry，而不是保留只接受 K1 的散落硬编码。
+DifferenceReport 与 Resolution 必须调用同一版本化 `ThresholdSet` 和 Decimal/定点比较函数
+（`thresholds_for` 注册表与 `rows_within_threshold` 是唯一实现）。阈值版本同时进入比较、
+决定、artifact、输入指纹和 verifier；不得一层按容差判断、另一层按 float 原值 `==`。
+激活新版本时必须原子更新版本白名单/registry，而不是保留只接受 K1 的散落硬编码。
+
+仲裁逐行只允许实际持有行的来源参与值一致：共同缺行不构成值共识；恰好一个实际来源持有行时
+该行以 `SINGLE_SOURCE_ROW_ISOLATED` 隔离；两个实际行分歧时写 `NO_TWO_SOURCE_CONSENSUS`；
+两者都是 conflict 并阻止发布。经版本化交易日历确认的多方合法整范围空结果产生
+`ZERO_ROW_LEGAL_EMPTY_CONSENSUS` 的 run 级原因码，绝不使用任何 `*_AGREE_*_SELECTED`。
+Canonical `pre_close` 对全部服务源统一由完整未复权序列的前一行 `close` 派生，vendor 参考
+昨收只保留 Raw；`pre_close_consistency`、带版本/SHA 绑定的 `calendar_membership`、
+逐证券 `expected_trading_days`（含冻结的上市/停牌例外）与 `freshness` 规则进入 K4 质量门
+（`quality-rules.daily-bar-unadjusted.k4.v1`）。
 
 不可变 `ResolutionRun`/`ResolutionDecision` 使用版本级默认摘要加行级例外和冲突，绑定
 Job、输入指纹、全部实际 Raw/import batch/content SHA、DifferenceReport、规则版本和 C

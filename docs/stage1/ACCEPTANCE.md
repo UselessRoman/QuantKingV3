@@ -16,7 +16,7 @@ AKShare 三源范围，不证明 2026-08-12 接受的 BaoStock、历史四角色
 | S1-05 | 已主验收 | [验收记录](S1-05_ACCEPTANCE.md) |
 | S1-06 | 已主验收 | [验收记录](S1-06_ACCEPTANCE.md) |
 | S1-07K3 | 历史基线完成 | [历史记录](S1-07K3_TASK.md) |
-| S1-07K4 | 待开发 | [任务卡](S1-07K4_TASK.md)；三角色、仲裁/质量、实测与旧迁移 |
+| S1-07K4 | 已主验收（2026-08-17：**S1-07K4 独立验收通过**，形成单一 K4 提交）：K4A/K4B 离线实现完成；K4C-R1（当时独立验收不通过，历史事实）修复、R2 真实实测、R3（ADR-022 + Phase B 9/9）与 R4（ADR-023）依次交付，**K4C-R4 已于 2026-08-16 独立验收通过**，k4 阈值已按 ADR-024 接受重新冻结；**K4D 真实只读 inventory 已于 2026-08-16 获授权执行一次并成功**（5,208 文件、零读取错误、Stage 0 基线差异 0/0）；**K4D 真实 pilot 两次 attempt 均失败即停（2026-08-16/08-17，ADR-026，数据根零写入、授权已消费）**；**旧 XTQuant 迁移已按 ADR-027 拒绝并完成 K4D 决策收口（第 3 次 pilot、全量诊断与 full 均不执行）** | [验收记录](S1-07K4_ACCEPTANCE.md)、[任务卡](S1-07K4_TASK.md)、[实施记录](S1-07K4_IMPLEMENTATION.md) |
 | S1-08R2 | 待开发 | [任务卡](S1-08R2_TASK.md)；存储恢复、manifest、verifier/DataCenter |
 | S1-08R3 | 被前两项阻断 | [任务卡](S1-08R3_TASK.md)；正式发布与最终验收 |
 
@@ -81,7 +81,9 @@ AKShare 三源范围，不证明 2026-08-12 接受的 BaoStock、历史四角色
 - 已提交基线固定来源为 BaoStock A、东财 B、腾讯 C、新浪 D；正常 A/B、逐级 C/D、无共识隔离和四源
   endpoint/protocol/HTTP 预算均有离线回归，XTQuant 只允许 `DATA_ONLY` 导入。
 - 旧日线 inventory/managed import/verifier 已在 `tmp_path` 合成 Parquet 上验证，不读取旧根、
-  不创建 Warehouse/PUBLISHED；实际 5,208 候选文件清单、pilot、full 迁移仍未授权。
+  不创建 Warehouse/PUBLISHED；实际 5,208 候选文件清单已于 2026-08-16 获授权执行成功
+  （ADR-025），两次真实 pilot 均失败即停（ADR-026），迁移最终按用户决定拒绝并完成 K4D
+  决策收口（ADR-027），full 不再执行。
   K3C CLI `quantking-legacy-import`（inventory/import/dry-run，合成与 REAL marker 双边界）已落地。
 - 默认正式 EOD、K3 Resolution artifact、DataCenter 安全 lineage 和 immutable read-only release
   verifier 已通过合成端到端；K2 三源 frozen/artifact 兼容回归保留。
@@ -121,8 +123,10 @@ S1-08 离线实现已完成，首次真实授权也已执行，但唯一正式 J
   Decimal 阈值版本。
 - 所有来源的 Canonical `pre_close` 由前序未复权 close 派生；vendor 参考昨收只保留 Raw。
 - BaoStock A、腾讯 B、 新浪 C 的实际覆盖、差异、硬超时、预算/失败情况有报告。
-- 旧项目日线候选全部被发现、受管导入或明确隔离；旧根未修改，每个发布历史行有独立来源
-  复核，迁移计数和字节守恒。
+- 旧项目日线候选全部被发现并以可复验的冻结结论处置：本项目为 ADR-027 拒绝迁移
+  （inventory 成功、两次 pilot 失败即停、诊断与失败证据冻结、旧根未修改、
+  `XTQUANT_LEGACY` 不进入发布链）；成功迁移并复核是未采用的另一分支，不构成 Stage 1
+  的额外前置。
 - SQLite 锁竞争、合法空版本、正式发布并发/单 owner、legacy 硬中断与增量内部断档的恢复和
   幂等回归通过；失败保留脱敏原因链和有界行级证据。
 - R2 证券集合、逐证券 coverage、分块、预算、血缘上限和 verifier 由冻结 manifest 驱动，

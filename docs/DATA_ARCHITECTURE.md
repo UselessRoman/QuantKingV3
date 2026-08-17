@@ -19,15 +19,26 @@
 | A 常态供数 | BAOSTOCK | BAOSTOCK | `query_history_k_data_plus` |
 | B 常态互验 | AKSHARE | TENCENT | `stock_zh_a_hist_tx` |
 | C 异常仲裁 | AKSHARE | SINA | `stock_zh_a_daily` |
-| X 历史候选 | XTQUANT_LEGACY | XTQUANT | 受管 `DATA_ONLY` 导入对象 |
+| X 历史候选 | XTQUANT_LEGACY | XTQUANT | `DATA_ONLY` 候选：评估完成、迁移已拒绝（ADR-027） |
 
 必须记录实际 provider/upstream；BaoStock 服务故障与 AKShare 的网页/API/库变化分别建模。
 两个 AKShare upstream 不得合并，旧 XTQuant 也不得冒充当前可调用服务。来源合同保持固定且
 最小，不恢复候选审批、`PRODUCTION_READY` 或 source×dataset 能力矩阵。
 
-上表是 ADR-021 接受的目标合同，不代表已提交四角色实现已经完成重构，也不是新的真实运行
-授权。东财和 FTShare 不得进入正式来源；S1-07K4 必须先完成 registry、路由、预算、artifact、
-verifier 和 DataCenter 的三角色迁移及离线验收。
+上表是 ADR-021 接受的合同。S1-07K4 已完成 registry、路由、预算、artifact、verifier 和
+DataCenter 的三角色迁移与离线验收。K4C 第一次代表性真实三源实测曾于 2026-08-15 经独立
+验收不通过（S1-07K4C-R1，当时的历史事实）；此后 R1 修复、K4C-R2 真实实测、K4C-R3
+（ADR-022）与 K4C-R4（ADR-023）依次交付，**K4C-R4 已于 2026-08-16 独立验收通过**，
+`comparison-thresholds.daily-bar-unadjusted.k4.v1` 已按用户决定接受重新冻结（ADR-024，
+取代此前“待重新验收”状态；见 [S1-07K4 实施记录](stage1/S1-07K4_IMPLEMENTATION.md)）。
+K4D 评估已完成并收口（ADR-027）：只读 inventory 已于 2026-08-16 获授权执行一次并成功
+（5,208 文件、零读取错误、Stage 0 基线差异 0/0，ADR-025）；两次真实 pilot attempt 分别于
+2026-08-16/08-17 获授权执行并失败即停（ADR-026，数据根零写入、授权已消费）；旧 XTQuant
+迁移因复权语义不可信被用户决定拒绝，第 3 次 pilot、全量诊断与 full 均不执行，
+`XTQUANT_LEGACY` 不进入正式 Raw、Canonical、Warehouse 或发布候选。**S1-07K4 已于
+2026-08-17 经 K4E 独立验收通过并形成单一 K4 提交**
+（[S1-07K4 验收记录](stage1/S1-07K4_ACCEPTANCE.md)），该验收不构成新的
+真实运行授权。东财和 FTShare 不得进入正式来源。
 
 ## 分层
 
@@ -87,8 +98,10 @@ Resolution artifact、输入指纹和 verifier，不能出现报告判为容差�
 
 K2 可以在版本级记录共同默认决定，并只为例外证券/交易日保存行级决定，避免为完全一致的普通行重复存储相同审计文本。
 
-BaoStock 与旧 XTQuant 的价格、`pre_close`、成交量、成交额、复权和停牌语义必须由 K3 实测；
-新量额容差也由代表性样本形成版本化合同。不得在未实测时猜测或覆盖历史零容差失败证据。
+BaoStock 的价格、`pre_close`、成交量、成交额、复权和停牌语义必须由 K3 实测；新量额
+容差也由代表性样本形成版本化合同。不得在未实测时猜测或覆盖历史零容差失败证据。
+旧 XTQuant 的对应语义评估未通过（两次 pilot 失败，ADR-026/027），其数据不进入发布链，
+不再列为待实测对象。
 Canonical `pre_close` 对所有服务源统一由完整未复权序列的前一行 `close` 派生；供应商直出的
 参考昨收只保留在 Raw，不能在某个适配器存在该列时静默切换 Canonical 语义。
 

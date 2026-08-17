@@ -59,15 +59,15 @@ def _batch(index: int, *, at: datetime) -> IngestionBatch:
     return IngestionBatch.running(
         batch_id=new_entity_id("data_batch"),
         provider=DataProvider.AKSHARE,
-        upstream=DataUpstream.EASTMONEY,
-        endpoint="stock_zh_a_hist",
+        upstream=DataUpstream.TENCENT,
+        endpoint="stock_zh_a_hist_tx",
         library_version="test",
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         adapter_version="s1-06-test",
         request_params={
             "provider": "AKSHARE",
-            "upstream": "EASTMONEY",
-            "endpoint": "stock_zh_a_hist",
+            "upstream": "TENCENT",
+            "endpoint": "stock_zh_a_hist_tx",
             "akshare_version": "test",
             "index": str(index),
         },
@@ -90,7 +90,7 @@ def test_database_keyset_page_is_stable_across_concurrent_insert(tmp_path: Path)
     with factory() as uow:
         first = uow.data.list_batches_page(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-            upstream=DataUpstream.EASTMONEY,
+            upstream=DataUpstream.TENCENT,
             status=IngestionBatchStatus.RUNNING,
             started_from=None,
             started_to=None,
@@ -110,7 +110,7 @@ def test_database_keyset_page_is_stable_across_concurrent_insert(tmp_path: Path)
         with factory() as uow:
             page = uow.data.list_batches_page(
                 dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-                upstream=DataUpstream.EASTMONEY,
+                upstream=DataUpstream.TENCENT,
                 status=IngestionBatchStatus.RUNNING,
                 started_from=None,
                 started_to=None,

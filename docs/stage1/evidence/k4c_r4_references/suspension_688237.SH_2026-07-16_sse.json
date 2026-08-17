@@ -1,0 +1,13 @@
+{
+  "schema_version": "s1-07k4c-r4-reference.v1",
+  "reference_kind": "suspension_exchange_announcement",
+  "provenance_hardening_only": true,
+  "objective": "suspension_session",
+  "symbol": "688237.SH",
+  "announcement_number": "2026-031",
+  "suspension_start": "2026-07-16",
+  "source_type": "exchange_announcement",
+  "publisher": "上海证券交易所",
+  "announcement_url": "https://static.sse.com.cn/disclosure/listedinfo/announcement/c/new/2026-07-16/688237_20260716_Y6W3.pdf",
+  "notes": "仅补强已预固定 R3 停牌样本（688237.SH/2026-07-16）的来源证明（provenance_hardening_only），不参与事后选样；未下载归档远端 PDF，故不记录远端 PDF SHA。"
+}

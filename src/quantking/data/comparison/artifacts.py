@@ -28,7 +28,8 @@ from quantking.data.adapters.warehouse.manifest import (
     path_safe_id,
 )
 from quantking.data.comparison.comparator import CrossSourceComparisonOutcome
-from quantking.data.comparison.thresholds import uses_decimal_evidence
+from quantking.data.comparison.thresholds import K4_THRESHOLD_RULE_VERSION, uses_decimal_evidence
+from quantking.data.comparison.verifier import K4_MANIFEST_SCHEMA_VERSION
 
 _DATA_DIFF_SUBDIR = "data-diff"
 _ROW_DIFFERENCES_FILENAME = "row_differences.json"
@@ -73,15 +74,19 @@ def _manifest_payload(outcome: CrossSourceComparisonOutcome) -> dict[str, object
     ).encode("utf-8")
     shared_candidate = outcome.primary_version_id == outcome.fallback_version_id
     if uses_decimal_evidence(outcome.threshold_rule_version) and not shared_candidate:
-        raise ValueError("K3 decimal evidence requires a shared resolution candidate")
+        raise ValueError("decimal evidence requires a shared resolution candidate")
     payload: dict[str, object] = {
         "manifest_schema_version": (
-            "difference-report-manifest.k3.v3"
-            if uses_decimal_evidence(outcome.threshold_rule_version)
+            K4_MANIFEST_SCHEMA_VERSION
+            if outcome.threshold_rule_version == K4_THRESHOLD_RULE_VERSION
             else (
-                "difference-report-manifest.k2.v2"
-                if shared_candidate
-                else "difference-report-manifest.v1"
+                "difference-report-manifest.k3.v3"
+                if uses_decimal_evidence(outcome.threshold_rule_version)
+                else (
+                    "difference-report-manifest.k2.v2"
+                    if shared_candidate
+                    else "difference-report-manifest.v1"
+                )
             )
         ),
         "report_id": str(outcome.report_id),

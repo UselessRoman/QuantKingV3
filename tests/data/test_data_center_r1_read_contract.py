@@ -106,15 +106,15 @@ def _batch(index: int) -> IngestionBatch:
     return IngestionBatch.running(
         batch_id=new_entity_id("data_batch"),
         provider=DataProvider.AKSHARE,
-        upstream=DataUpstream.EASTMONEY,
-        endpoint="stock_zh_a_hist",
+        upstream=DataUpstream.SINA,
+        endpoint="stock_zh_a_daily",
         library_version="test",
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         adapter_version="s1-06-r1-test",
         request_params={
             "provider": "AKSHARE",
-            "upstream": "EASTMONEY",
-            "endpoint": "stock_zh_a_hist",
+            "upstream": "SINA",
+            "endpoint": "stock_zh_a_daily",
             "akshare_version": "test",
             "index": str(index),
         },
@@ -243,7 +243,7 @@ def test_same_report_sha_cannot_mask_different_artifact_lineage() -> None:
     report = SimpleNamespace(
         report_id=report_id,
         version_id=primary_version_id,
-        primary_source=DataUpstream.EASTMONEY,
+        primary_source=DataUpstream.SINA,
         fallback_source=DataUpstream.TENCENT,
         created_at=created_at,
         field_differences={"close": "1"},
@@ -265,7 +265,7 @@ def test_same_report_sha_cannot_mask_different_artifact_lineage() -> None:
     verified = SimpleNamespace(
         report_id=report_id,
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED.value,
-        primary_source=DataUpstream.EASTMONEY.value,
+        primary_source=DataUpstream.SINA.value,
         fallback_source=DataUpstream.TENCENT.value,
         created_at=created_at,
         field_differences={"close": "1"},
@@ -306,7 +306,7 @@ def test_legacy_distinct_published_versions_remain_readable() -> None:
     report = SimpleNamespace(
         report_id=report_id,
         version_id=primary_version_id,
-        primary_source=DataUpstream.EASTMONEY,
+        primary_source=DataUpstream.SINA,
         fallback_source=DataUpstream.TENCENT,
         created_at=created_at,
         field_differences={"close": "1"},
@@ -329,7 +329,7 @@ def test_legacy_distinct_published_versions_remain_readable() -> None:
         **{
             **vars(report),
             "dataset": DatasetKind.DAILY_BAR_UNADJUSTED.value,
-            "primary_source": DataUpstream.EASTMONEY.value,
+            "primary_source": DataUpstream.SINA.value,
             "fallback_source": DataUpstream.TENCENT.value,
             "row_differences": [],
         }
@@ -377,7 +377,7 @@ def test_legacy_distinct_published_versions_remain_readable() -> None:
     batches = {
         str(primary_batch_id): SimpleNamespace(
             batch_id=primary_batch_id,
-            upstream=DataUpstream.EASTMONEY,
+            upstream=DataUpstream.SINA,
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             status=IngestionBatchStatus.SUCCEEDED,
         ),

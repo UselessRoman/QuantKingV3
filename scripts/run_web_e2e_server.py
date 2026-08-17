@@ -132,13 +132,15 @@ def _daily(close: float) -> pa.Table:
 
 def _batch(upstream: DataUpstream, dataset: DatasetKind, row_count: int) -> IngestionBatch:
     endpoint = {
-        DataUpstream.EASTMONEY: "stock_zh_a_hist",
+        DataUpstream.BAOSTOCK: "query_history_k_data_plus",
         DataUpstream.TENCENT: "stock_zh_a_hist_tx",
         DataUpstream.SINA: "stock_zh_a_daily",
     }[upstream]
+    provider = DataProvider.BAOSTOCK if upstream is DataUpstream.BAOSTOCK else DataProvider.AKSHARE
+    version_key = "baostock_version" if provider is DataProvider.BAOSTOCK else "akshare_version"
     return IngestionBatch(
         batch_id=new_entity_id("data_batch"),
-        provider=DataProvider.AKSHARE,
+        provider=provider,
         upstream=upstream,
         endpoint=endpoint,
         library_version="playwright-fixture",
@@ -146,10 +148,10 @@ def _batch(upstream: DataUpstream, dataset: DatasetKind, row_count: int) -> Inge
         status=IngestionBatchStatus.SUCCEEDED,
         adapter_version="playwright-real-query-chain",
         request_params={
-            "provider": DataProvider.AKSHARE.value,
+            "provider": provider.value,
             "upstream": upstream.value,
             "endpoint": endpoint,
-            "akshare_version": "playwright-fixture",
+            version_key: "playwright-fixture",
             "scope": "synthetic-loopback",
         },
         request_params_json='{"scope":"synthetic-loopback"}',
@@ -272,7 +274,7 @@ def _seed_data_center(
     )
     calendar, _, _ = _publish(
         dataset=DatasetKind.EXCHANGE_CALENDAR,
-        upstream=DataUpstream.EASTMONEY,
+        upstream=DataUpstream.BAOSTOCK,
         table=_calendar(),
         artifacts_root=artifacts_root,
         uow_factory=uow_factory,
@@ -289,7 +291,7 @@ def _seed_data_center(
     fallback_table = _daily(10.8)
     primary, primary_run_id, primary_batch = _publish(
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        upstream=DataUpstream.EASTMONEY,
+        upstream=DataUpstream.BAOSTOCK,
         table=primary_table,
         artifacts_root=artifacts_root,
         uow_factory=uow_factory,
@@ -311,7 +313,7 @@ def _seed_data_center(
         request=CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version=primary.schema_version,
-            primary_source=DataUpstream.EASTMONEY,
+            primary_source=DataUpstream.BAOSTOCK,
             fallback_source=DataUpstream.TENCENT,
             primary_version_id=primary.version_id,
             fallback_version_id=fallback.version_id,

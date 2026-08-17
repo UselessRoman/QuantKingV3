@@ -10,28 +10,46 @@ from pathlib import PurePosixPath
 
 from quantking.common.ids import EntityId
 from quantking.common.time import UtcTimestamp
-from quantking.data.adapters.sources.registry import PRODUCTION_UPSTREAMS
-from quantking.data.comparison.thresholds import THRESHOLD_RULE_VERSION
+from quantking.data.comparison.thresholds import (
+    THRESHOLD_RULE_VERSION,
+    supported_threshold_versions,
+)
 from quantking.data.models import DatasetKind, DataUpstream
 
 K2_RESOLUTION_RULE_VERSION = "source-resolution.daily-bar-unadjusted.k2.v1"
 K3_RESOLUTION_RULE_VERSION = "source-resolution.daily-bar-unadjusted.k3.v1"
-# K2 remains the active writer/service rule until the K3 service/artifact slice lands.
-RESOLUTION_RULE_VERSION = K2_RESOLUTION_RULE_VERSION
+K4_RESOLUTION_RULE_VERSION = "source-resolution.daily-bar-unadjusted.k4.v1"
+# K4 is the active writer/service rule; K2/K3 remain readable for historical
+# Raw, migrations and immutable evidence, never for new Jobs.
+RESOLUTION_RULE_VERSION = K4_RESOLUTION_RULE_VERSION
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _K2_SOURCE_ORDER = (
     DataUpstream.EASTMONEY,
     DataUpstream.TENCENT,
     DataUpstream.SINA,
 )
-_SOURCE_ORDER = PRODUCTION_UPSTREAMS
+_K4_SOURCE_ORDER = (
+    DataUpstream.BAOSTOCK,
+    DataUpstream.TENCENT,
+    DataUpstream.SINA,
+)
+# Historical four-role order; K3 artifacts stay readable through this tuple
+# even though EASTMONEY is retired from the runtime route by ADR-021.
+_K3_SOURCE_ORDER = (
+    DataUpstream.BAOSTOCK,
+    DataUpstream.EASTMONEY,
+    DataUpstream.TENCENT,
+    DataUpstream.SINA,
+)
 
 
 def _source_order(rule_version: str) -> tuple[DataUpstream, ...]:
     if rule_version == K2_RESOLUTION_RULE_VERSION:
         return _K2_SOURCE_ORDER
     if rule_version == K3_RESOLUTION_RULE_VERSION:
-        return _SOURCE_ORDER
+        return _K3_SOURCE_ORDER
+    if rule_version == K4_RESOLUTION_RULE_VERSION:
+        return _K4_SOURCE_ORDER
     raise ValueError("rule_version is unsupported")
 
 
@@ -54,6 +72,12 @@ class ResolutionReasonCode(StrEnum):
     BD_AGREE_B_SELECTED = "BD_AGREE_B_SELECTED"
     CD_AGREE_C_SELECTED = "CD_AGREE_C_SELECTED"
     NO_TWO_SOURCE_CONSENSUS = "NO_TWO_SOURCE_CONSENSUS"
+    # Exactly one source actually holds the row and no other held row exists:
+    # the row is isolated (quarantined), never silently dropped or published.
+    SINGLE_SOURCE_ROW_ISOLATED = "SINGLE_SOURCE_ROW_ISOLATED"
+    # Multi-source legitimate whole-range empty consensus confirmed against the
+    # versioned trading calendar; never a per-row price-agreement code.
+    ZERO_ROW_LEGAL_EMPTY_CONSENSUS = "ZERO_ROW_LEGAL_EMPTY_CONSENSUS"
 
 
 class ResolutionRunStatus(StrEnum):
@@ -186,15 +210,17 @@ class ResolutionDefaultSummary:
         ):
             raise TypeError("source_bindings must contain ResolutionSourceBinding values")
         source_order = tuple(item.upstream for item in self.source_bindings)
-        if source_order not in {_K2_SOURCE_ORDER, _SOURCE_ORDER}:
+        if source_order not in {_K2_SOURCE_ORDER, _K3_SOURCE_ORDER, _K4_SOURCE_ORDER}:
             raise ValueError("default source_bindings must use a supported stable source order")
         statuses = tuple(item.status for item in self.source_bindings)
         if any(status is not ResolutionSourceStatus.NOT_CALLED for status in statuses[2:]):
             raise ValueError("default summary must keep exceptional sources NOT_CALLED")
         if source_order == _K2_SOURCE_ORDER:
             expected_compared = (DataUpstream.EASTMONEY, DataUpstream.TENCENT)
-        else:
+        elif source_order == _K3_SOURCE_ORDER:
             expected_compared = (DataUpstream.BAOSTOCK, DataUpstream.EASTMONEY)
+        else:
+            expected_compared = (DataUpstream.BAOSTOCK, DataUpstream.TENCENT)
         _upstreams(
             self.compared_upstreams,
             field="compared_upstreams",
@@ -249,6 +275,7 @@ class ResolutionDecision:
     difference_report_ids: tuple[EntityId, ...]
     created_job_id: EntityId
     created_at: UtcTimestamp
+    threshold_rule_version: str = THRESHOLD_RULE_VERSION
     c_request: ResolutionRequestTrace | None = None
     request_traces: tuple[ResolutionRequestTrace, ...] = ()
 
@@ -275,32 +302,47 @@ class ResolutionDecision:
             field="agreeing_upstreams",
             source_order=source_order,
         )
-        comparable = tuple(
-            item.upstream
-            for item in self.source_bindings
-            if item.status
-            in {
+        if self.threshold_rule_version not in supported_threshold_versions():
+            raise ValueError("threshold_rule_version is unsupported")
+        if self.reason_code is ResolutionReasonCode.ZERO_ROW_LEGAL_EMPTY_CONSENSUS:
+            raise ValueError("zero-row legal empty consensus is a run-level reason only")
+        comparable_statuses: set[ResolutionSourceStatus]
+        if self.rule_version == K4_RESOLUTION_RULE_VERSION:
+            # K4: only an actually-held row (or its per-row absence) may join a
+            # value comparison; a whole-call legal EMPTY never participates.
+            comparable_statuses = {
+                ResolutionSourceStatus.AVAILABLE,
+                ResolutionSourceStatus.MISSING_ROW,
+            }
+        else:
+            comparable_statuses = {
                 ResolutionSourceStatus.AVAILABLE,
                 ResolutionSourceStatus.MISSING_ROW,
                 ResolutionSourceStatus.EMPTY,
             }
+        comparable = tuple(
+            item.upstream for item in self.source_bindings if item.status in comparable_statuses
         )
         if self.compared_upstreams != comparable:
             raise ValueError("compared_upstreams must exactly match comparable source states")
         if any(item not in self.compared_upstreams for item in self.agreeing_upstreams):
             raise ValueError("agreeing_upstreams must be a subset of compared_upstreams")
+        conflict_reasons = (
+            ResolutionReasonCode.NO_TWO_SOURCE_CONSENSUS,
+            ResolutionReasonCode.SINGLE_SOURCE_ROW_ISOLATED,
+        )
         if self.selected_upstream is None:
             if (
                 self.agreeing_upstreams
                 or self.selected_row_present is not None
-                or self.reason_code is not ResolutionReasonCode.NO_TWO_SOURCE_CONSENSUS
+                or self.reason_code not in conflict_reasons
             ):
                 raise ValueError("conflict decisions must have no agreeing/selected source")
         elif (
             self.selected_upstream not in self.agreeing_upstreams
             or len(self.agreeing_upstreams) < 2
             or not isinstance(self.selected_row_present, bool)
-            or self.reason_code is ResolutionReasonCode.NO_TWO_SOURCE_CONSENSUS
+            or self.reason_code in conflict_reasons
         ):
             raise ValueError("selected source requires two-source agreement")
         if self.selected_upstream is not None:
@@ -335,7 +377,7 @@ class ResolutionDecision:
                     DataUpstream.EASTMONEY,
                 ),
             }
-        else:
+        elif self.rule_version == K3_RESOLUTION_RULE_VERSION:
             expected_resolution = {
                 ResolutionReasonCode.ABC_AGREE_A_SELECTED: (
                     (
@@ -366,6 +408,29 @@ class ResolutionDecision:
                     DataUpstream.EASTMONEY,
                 ),
                 ResolutionReasonCode.CD_AGREE_C_SELECTED: (
+                    (DataUpstream.TENCENT, DataUpstream.SINA),
+                    DataUpstream.TENCENT,
+                ),
+            }
+        else:
+            expected_resolution = {
+                ResolutionReasonCode.ABC_AGREE_A_SELECTED: (
+                    (
+                        DataUpstream.BAOSTOCK,
+                        DataUpstream.TENCENT,
+                        DataUpstream.SINA,
+                    ),
+                    DataUpstream.BAOSTOCK,
+                ),
+                ResolutionReasonCode.AB_AGREE_A_SELECTED: (
+                    (DataUpstream.BAOSTOCK, DataUpstream.TENCENT),
+                    DataUpstream.BAOSTOCK,
+                ),
+                ResolutionReasonCode.AC_AGREE_A_SELECTED: (
+                    (DataUpstream.BAOSTOCK, DataUpstream.SINA),
+                    DataUpstream.BAOSTOCK,
+                ),
+                ResolutionReasonCode.BC_AGREE_B_SELECTED: (
                     (DataUpstream.TENCENT, DataUpstream.SINA),
                     DataUpstream.TENCENT,
                 ),
@@ -402,7 +467,7 @@ class ResolutionDecision:
                 raise ValueError("K2 decisions cannot carry generalized request_traces")
             traces = () if self.c_request is None else (self.c_request,)
             exceptional = (DataUpstream.SINA,)
-        else:
+        elif self.rule_version == K3_RESOLUTION_RULE_VERSION:
             if self.c_request is not None:
                 raise ValueError("K3 decisions must use generalized request_traces")
             if not isinstance(self.request_traces, tuple) or any(
@@ -428,6 +493,32 @@ class ResolutionDecision:
                 raise ValueError("request_traces must be sorted and unique")
             traces = self.request_traces
             exceptional = (DataUpstream.TENCENT, DataUpstream.SINA)
+        else:
+            if self.c_request is not None:
+                raise ValueError("K4 decisions must use generalized request_traces")
+            if not isinstance(self.request_traces, tuple) or any(
+                not isinstance(item, ResolutionRequestTrace) for item in self.request_traces
+            ):
+                raise TypeError("request_traces must contain ResolutionRequestTrace values")
+            rank = {source: index for index, source in enumerate(source_order)}
+            ordered = tuple(
+                sorted(
+                    self.request_traces,
+                    key=lambda item: (
+                        rank[item.upstream],
+                        item.symbol,
+                        item.start_date,
+                        item.end_date,
+                        item.trigger_reason,
+                    ),
+                )
+            )
+            if self.request_traces != ordered or len(set(self.request_traces)) != len(
+                self.request_traces
+            ):
+                raise ValueError("request_traces must be sorted and unique")
+            traces = self.request_traces
+            exceptional = (DataUpstream.SINA,)
         for upstream in exceptional:
             binding = next(item for item in self.source_bindings if item.upstream is upstream)
             matching = tuple(item for item in traces if item.upstream is upstream)
@@ -461,7 +552,7 @@ class ResolutionDecision:
             "selected_row_present": self.selected_row_present,
             "reason_code": self.reason_code.value,
             "rule_version": self.rule_version,
-            "threshold_rule_version": THRESHOLD_RULE_VERSION,
+            "threshold_rule_version": self.threshold_rule_version,
             "difference_report_ids": [str(item) for item in self.difference_report_ids],
             "created_job_id": str(self.created_job_id),
             "created_at": self.created_at.to_iso(),
@@ -489,6 +580,7 @@ class ResolutionRun:
     run_blockers: tuple[ResolutionRunBlocker, ...]
     exceptions: tuple[ResolutionDecision, ...]
     conflicts: tuple[ResolutionDecision, ...]
+    zero_row_reason_code: ResolutionReasonCode | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.run_id, EntityId) or self.run_id.namespace != "data_resolution":
@@ -500,8 +592,17 @@ class ResolutionRun:
         if not isinstance(self.created_at, UtcTimestamp):
             raise TypeError("created_at must be UtcTimestamp")
         source_order = _source_order(self.rule_version)
-        if self.threshold_rule_version != THRESHOLD_RULE_VERSION:
+        if self.threshold_rule_version not in supported_threshold_versions():
             raise ValueError("threshold_rule_version is unsupported")
+        if self.zero_row_reason_code is not None:
+            if (
+                not isinstance(self.zero_row_reason_code, ResolutionReasonCode)
+                or self.zero_row_reason_code
+                is not ResolutionReasonCode.ZERO_ROW_LEGAL_EMPTY_CONSENSUS
+            ):
+                raise ValueError("zero_row_reason_code has exactly one supported value")
+            if self.rule_version != K4_RESOLUTION_RULE_VERSION:
+                raise ValueError("zero-row reason codes are bound to the K4 rule version")
         if _SHA256.fullmatch(self.input_fingerprint) is None:
             raise ValueError("input_fingerprint must be lowercase SHA-256")
         if self.candidate_version_id is not None and (
@@ -531,11 +632,11 @@ class ResolutionRun:
             {json_key(item) for item in self.input_bindings}
         ) != len(self.input_bindings):
             raise ValueError("input_bindings must be sorted and unique")
-        exceptional_sources = (
-            (DataUpstream.SINA,)
-            if self.rule_version == K2_RESOLUTION_RULE_VERSION
-            else (DataUpstream.TENCENT, DataUpstream.SINA)
-        )
+        exceptional_sources: tuple[DataUpstream, ...]
+        if self.rule_version == K3_RESOLUTION_RULE_VERSION:
+            exceptional_sources = (DataUpstream.TENCENT, DataUpstream.SINA)
+        else:
+            exceptional_sources = (DataUpstream.SINA,)
         for source in exceptional_sources:
             source_bindings = tuple(item for item in self.input_bindings if item.upstream is source)
             if not source_bindings:
@@ -622,6 +723,19 @@ class ResolutionRun:
                     item.status is ResolutionSourceStatus.AVAILABLE for item in self.input_bindings
                 ):
                     raise ValueError("zero-row publication requires two-source empty consensus")
+                if (
+                    self.rule_version == K4_RESOLUTION_RULE_VERSION
+                    and self.zero_row_reason_code
+                    is not ResolutionReasonCode.ZERO_ROW_LEGAL_EMPTY_CONSENSUS
+                ):
+                    raise ValueError(
+                        "K4 zero-row publication requires the legal empty consensus reason"
+                    )
+            elif (
+                self.rule_version == K4_RESOLUTION_RULE_VERSION
+                and self.zero_row_reason_code is not None
+            ):
+                raise ValueError("non-empty K4 resolution cannot carry a zero-row reason code")
         elif not self.conflicts and not self.run_blockers:
             raise ValueError("blocked resolution requires conflicts or run blockers")
 
@@ -642,7 +756,7 @@ class ResolutionRun:
         return self.default_decision_count + len(self.exceptions) + len(self.conflicts)
 
     def summary_dict(self) -> dict[str, object]:
-        return {
+        value: dict[str, object] = {
             "run_id": str(self.run_id),
             "dataset": self.dataset.value,
             "created_job_id": str(self.created_job_id),
@@ -665,6 +779,11 @@ class ResolutionRun:
             "conflict_count": len(self.conflicts),
             "blocker_count": len(self.run_blockers),
         }
+        if self.rule_version == K4_RESOLUTION_RULE_VERSION:
+            value["zero_row_reason_code"] = (
+                None if self.zero_row_reason_code is None else self.zero_row_reason_code.value
+            )
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -702,7 +821,7 @@ class ResolutionRunRecord:
         if not isinstance(self.created_at, UtcTimestamp):
             raise TypeError("created_at must be UtcTimestamp")
         _source_order(self.rule_version)
-        if self.threshold_rule_version != THRESHOLD_RULE_VERSION:
+        if self.threshold_rule_version not in supported_threshold_versions():
             raise ValueError("threshold_rule_version is unsupported")
         for value, field in (
             (self.input_fingerprint, "input_fingerprint"),
@@ -760,6 +879,7 @@ def json_key(binding: ResolutionSourceBinding) -> tuple[str, str, str, str]:
 __all__ = [
     "K2_RESOLUTION_RULE_VERSION",
     "K3_RESOLUTION_RULE_VERSION",
+    "K4_RESOLUTION_RULE_VERSION",
     "RESOLUTION_RULE_VERSION",
     "CRequestTrace",
     "ResolutionDecision",

@@ -729,12 +729,12 @@ class DifferenceReport:
             raise ValueError("primary_batch_id and fallback_batch_id must differ")
         shared_candidate = self.primary_version_id == self.fallback_version_id
         if shared_candidate:
-            if (
-                self.version_id != self.primary_version_id
-                or self.threshold_rule_version != "comparison-thresholds.daily-bar-unadjusted.k1.v1"
-            ):
+            if self.version_id != self.primary_version_id or self.threshold_rule_version not in {
+                "comparison-thresholds.daily-bar-unadjusted.k1.v1",
+                "comparison-thresholds.daily-bar-unadjusted.k4.v1",
+            }:
                 raise ValueError(
-                    "shared DifferenceReport versions require the K2 final candidate binding"
+                    "shared DifferenceReport versions require a frozen final candidate binding"
                 )
         elif self.version_id != self.primary_version_id:
             raise ValueError("legacy DifferenceReport version_id must equal primary_version_id")

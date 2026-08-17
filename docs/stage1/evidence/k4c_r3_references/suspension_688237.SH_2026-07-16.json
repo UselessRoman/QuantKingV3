@@ -1,0 +1,52 @@
+{
+  "schema_version": "s1-07k4c-r3-reference.v1",
+  "reference_kind": "suspension_announcement",
+  "objective": "suspension_session",
+  "symbol": "688237.SH",
+  "issuer": "湖北超卓航空科技股份有限公司",
+  "facts": [
+    "控股股东、实际控制人筹划控制权变更，股票自 2026-07-16 开市起停牌",
+    "停牌不超过 2 个交易日（2026-07-16 与 2026-07-17）",
+    "停牌公告发布于 2026-07-15 晚间，检索于 2026-08-16"
+  ],
+  "sources": [
+    {
+      "title": "超卓航科：控股股东、实际控制人筹划控制权变更 16日起停牌",
+      "url": "https://www.cnstock.com/commonDetail/745619",
+      "publisher": "上海证券报·中国证券网",
+      "published": "2026-07-15"
+    },
+    {
+      "title": "超卓航科：控股股东、实际控制人筹划控制权变更 股票停牌",
+      "url": "https://finance.eastmoney.com/a/202607153807573757.html",
+      "publisher": "东方财富",
+      "published": "2026-07-15"
+    },
+    {
+      "title": "超卓航科：筹划控制权变更事项，股票停牌不超过2个交易日",
+      "url": "https://app.dahecube.com/nweb/pc/spiderdetail.html?spidid=822674",
+      "publisher": "大河财立方",
+      "published": "2026-07-15"
+    },
+    {
+      "title": "超卓航科拟再次易主，自7月16日开市起停牌",
+      "url": "https://www.chnfund.com/article/ARcdab3d6f-ce14-08c4-a406-3a2277be6163",
+      "publisher": "中国基金报",
+      "published": "2026-07-16"
+    },
+    {
+      "title": "停牌！688237，又拟易主",
+      "url": "https://m.21jingji.com/article/20260716/herald/2d8136fb6ec54883f9d2cded4c48ea52.html",
+      "publisher": "21世纪经济报道",
+      "published": "2026-07-16"
+    },
+    {
+      "title": "超卓航科(688237.SH)：实控人筹划重大事项 股票7月16日起停牌",
+      "url": "https://wwwhk.aastocks.com/tc/cnhk/quote/stock-news-content/688237/GLH5269783N/GLH",
+      "publisher": "阿斯达克财经",
+      "published": "2026-07-16"
+    }
+  ],
+  "retrieved_at": "2026-08-16",
+  "notes": "检索渠道为授权的有界只读公开资料查询（搜索引擎摘要）；本文件冻结上述公告来源与事实，SHA-256 进入 R3 dry-run。"
+}

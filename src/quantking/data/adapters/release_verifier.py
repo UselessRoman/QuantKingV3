@@ -37,11 +37,11 @@ from quantking.data.adapters.sources.contracts import (
     SupplierResponse,
     VolumeUnit,
 )
-from quantking.data.adapters.sources.registry import (
-    AKSHARE_RUNTIME_UPSTREAMS,
-    PRODUCTION_UPSTREAMS,
+from quantking.data.adapters.sources.registry import PRODUCTION_UPSTREAMS
+from quantking.data.adapters.sources.units import (
+    AKSHARE_UNIT_POLICY_VERSION,
+    resolve_returned_units,
 )
-from quantking.data.adapters.sources.units import resolve_returned_units
 from quantking.data.adapters.warehouse.errors import ManifestIntegrityError
 from quantking.data.adapters.warehouse.manifest import path_safe_id
 from quantking.data.adapters.warehouse.publish_coordinator import compute_content_sha256
@@ -62,44 +62,35 @@ from quantking.data.comparison.verifier import (
 from quantking.data.eod.fingerprint import eod_input_fingerprint
 from quantking.data.eod.frozen import FrozenEodCommandError, parse_frozen_eod_command
 from quantking.data.eod.release import (
-    S107K3_CODE_VERSION,
-    S107K3_IDEMPOTENCY_KEY,
-    S108_CODE_VERSION,
-    S108_IDEMPOTENCY_KEY,
+    S107K4_CODE_VERSION,
+    S107K4_IDEMPOTENCY_KEY,
     S108_TARGET_END,
     S108_TARGET_START,
 )
 from quantking.data.incremental import IncrementalPlanRequest, build_incremental_plan
 from quantking.data.models import DatasetKind, DataUpstream
-from quantking.data.quality.models import S108_DAILY_RULE_VERSION
+from quantking.data.quality.models import K4_DAILY_RULE_VERSION
 from quantking.data.resolution.artifacts import (
     ResolutionArtifactVerificationError,
     ResolutionArtifactVerifier,
     verify_resolution_artifact,
 )
-from quantking.data.resolution.models import (
-    K2_RESOLUTION_RULE_VERSION,
-    K3_RESOLUTION_RULE_VERSION,
-)
+from quantking.data.resolution.models import K4_RESOLUTION_RULE_VERSION
 
 S108_RELEASE_REVISION = "20260810_0014"
-S108_ADAPTER_VERSION = "akshare-daily-bar.v1"
-S107K3_ADAPTER_VERSION = "baostock-akshare-daily-bar.k3.v1"
+S107K4_ADAPTER_VERSION = "baostock-akshare-daily-bar.k4.v1"
 _DATASET = DatasetKind.DAILY_BAR_UNADJUSTED.value
 _ENDPOINTS = {
     DataUpstream.BAOSTOCK.value: "query_history_k_data_plus",
-    DataUpstream.EASTMONEY.value: "stock_zh_a_hist",
     DataUpstream.TENCENT.value: "stock_zh_a_hist_tx",
     DataUpstream.SINA.value: "stock_zh_a_daily",
 }
 _PROVIDERS = {
     DataUpstream.BAOSTOCK.value: "BAOSTOCK",
-    DataUpstream.EASTMONEY.value: "AKSHARE",
     DataUpstream.TENCENT.value: "AKSHARE",
     DataUpstream.SINA.value: "AKSHARE",
 }
 _HTTP_PER_ENDPOINT = {
-    DataUpstream.EASTMONEY.value: 1,
     DataUpstream.TENCENT.value: 3,
     DataUpstream.SINA.value: 2,
 }
@@ -439,7 +430,6 @@ def _verify_log(
     planned_chunks: Mapping[str, int],
     raw_responses: Mapping[str, int],
     failed_batches: Mapping[str, int],
-    k3: bool,
 ) -> dict[str, object]:
     log_id = row["log_id"]
     if not isinstance(log_id, str):
@@ -462,55 +452,38 @@ def _verify_log(
     summaries = [item for item in events if item.get("event") == "network_budget_summary"]
     if len(planned) != 1 or len(summaries) != 1:
         raise S108ReleaseVerificationError("Job network budget logs are incomplete")
-    expected_planned = (
-        {
-            "endpoint_limit": 16,
-            "tencent_endpoint_limit": 4,
-            "sina_endpoint_limit": 4,
-            "estimated_akshare_http_request_limit": 24,
-            "estimated_baostock_protocol_message_limit": 12,
-            "application_retries": 0,
-        }
-        if k3
-        else {
-            "endpoint_limit": 12,
-            "sina_endpoint_limit": 4,
-            "estimated_http_request_limit": 24,
-            "application_retries": 0,
-        }
-    )
+    expected_planned = {
+        "endpoint_limit": 12,
+        "sina_endpoint_limit": 4,
+        "estimated_akshare_http_request_limit": 20,
+        "estimated_baostock_protocol_message_limit": 12,
+        "application_retries": 0,
+    }
     if any(planned[0].get(key) != expected for key, expected in expected_planned.items()):
         raise S108ReleaseVerificationError("Job planned network budget is invalid")
     budget = summaries[0].get("network_budget")
     if not isinstance(budget, dict):
         raise S108ReleaseVerificationError("Job network budget summary is invalid")
-    actual = budget.get("endpoint_actual" if k3 else "actual")
-    logged_planned = budget.get("endpoint_planned" if k3 else "planned")
+    actual = budget.get("endpoint_actual")
+    logged_planned = budget.get("endpoint_planned")
     if not isinstance(actual, dict) or not all(
         isinstance(value, int) and not isinstance(value, bool) for value in actual.values()
     ):
         raise S108ReleaseVerificationError("Job actual network budget is invalid")
-    upstreams = PRODUCTION_UPSTREAMS if k3 else AKSHARE_RUNTIME_UPSTREAMS
+    upstreams = PRODUCTION_UPSTREAMS
     expected_keys = {upstream.value for upstream in upstreams}
-    actual_total_key = "endpoint_actual_total" if k3 else "actual_total"
-    planned_total_key = "endpoint_planned_total" if k3 else "planned_total"
-    expected_limits: object = (
-        {
-            "total": 16,
-            "per_source": {upstream.value: 4 for upstream in PRODUCTION_UPSTREAMS},
-        }
-        if k3
-        else {"total": 12, "sina": 4}
-    )
-    limits_key = "endpoint_limits" if k3 else "limits"
+    expected_limits: object = {
+        "total": 12,
+        "per_source": {upstream.value: 4 for upstream in PRODUCTION_UPSTREAMS},
+    }
     if (
-        budget.get(limits_key) != expected_limits
+        budget.get("endpoint_limits") != expected_limits
         or set(actual) != expected_keys
         or logged_planned != dict(planned_chunks)
-        or budget.get(actual_total_key) != sum(actual.values())
-        or budget.get(planned_total_key) != sum(planned_chunks.values())
+        or budget.get("endpoint_actual_total") != sum(actual.values())
+        or budget.get("endpoint_planned_total") != sum(planned_chunks.values())
         or budget.get("application_retries") != 0
-        or sum(actual.values()) > (16 if k3 else 12)
+        or sum(actual.values()) > 12
         or any(actual.get(item.value, 0) > 4 for item in upstreams)
         or any(actual[key] > planned_chunks[key] for key in expected_keys)
         or any(actual[key] != raw_responses[key] + failed_batches[key] for key in expected_keys)
@@ -616,12 +589,8 @@ def _verify_release(
     if version["dataset"] != _DATASET or version["status"] != "PUBLISHED":
         raise S108ReleaseVerificationError("DatasetVersion is not the published daily release")
     if (
-        version["code_version"]
-        not in {
-            S108_CODE_VERSION,
-            S107K3_CODE_VERSION,
-        }
-        or version["rule_version"] != S108_DAILY_RULE_VERSION
+        version["code_version"] != S107K4_CODE_VERSION
+        or version["rule_version"] != K4_DAILY_RULE_VERSION
     ):
         raise S108ReleaseVerificationError("DatasetVersion release versions are invalid")
     if version["failure_json"] is not None or not version["published_at"]:
@@ -651,11 +620,10 @@ def _verify_release(
         config_manifest=_json_object(job["config_manifest_json"], label="Job config manifest"),
         version_manifest=_json_object(job["version_manifest_json"], label="Job version manifest"),
     )
-    k3 = frozen.resolution_rule_version == K3_RESOLUTION_RULE_VERSION
-    expected_code_version = S107K3_CODE_VERSION if k3 else S108_CODE_VERSION
-    expected_adapter_version = S107K3_ADAPTER_VERSION if k3 else S108_ADAPTER_VERSION
-    expected_idempotency_key = S107K3_IDEMPOTENCY_KEY if k3 else S108_IDEMPOTENCY_KEY
-    expected_upstreams = PRODUCTION_UPSTREAMS if k3 else AKSHARE_RUNTIME_UPSTREAMS
+    expected_code_version = S107K4_CODE_VERSION
+    expected_adapter_version = S107K4_ADAPTER_VERSION
+    expected_idempotency_key = S107K4_IDEMPOTENCY_KEY
+    expected_upstreams = PRODUCTION_UPSTREAMS
     if (
         frozen.request.start_date != S108_TARGET_START
         or frozen.request.end_date != S108_TARGET_END
@@ -663,18 +631,13 @@ def _verify_release(
         or frozen.datasets[0].scope != S108_FIRST_RELEASE_SYMBOLS
         or frozen.code_version != expected_code_version
         or frozen.adapter_version != expected_adapter_version
-        or frozen.rule_version != S108_DAILY_RULE_VERSION
-        or frozen.resolution_rule_version
-        != (K3_RESOLUTION_RULE_VERSION if k3 else K2_RESOLUTION_RULE_VERSION)
+        or frozen.rule_version != K4_DAILY_RULE_VERSION
+        or frozen.resolution_rule_version != K4_RESOLUTION_RULE_VERSION
         or job["idempotency_key"] != expected_idempotency_key
-        or (
-            k3
-            and (
-                frozen.source_route_version != "BAO-EAST-TX-SINA.k3.v1"
-                or frozen.baostock_version != BAOSTOCK_DISTRIBUTION_VERSION
-                or frozen.baostock_unit_policy_version != BAOSTOCK_UNIT_POLICY_VERSION
-            )
-        )
+        or frozen.source_route_version != "BAO-TX-SINA.k4.v1"
+        or frozen.baostock_version != BAOSTOCK_DISTRIBUTION_VERSION
+        or frozen.baostock_unit_policy_version != BAOSTOCK_UNIT_POLICY_VERSION
+        or frozen.akshare_unit_policy_version != AKSHARE_UNIT_POLICY_VERSION
     ):
         raise S108ReleaseVerificationError("Job is not the fixed S1-08 release request")
     expected_fingerprint = eod_input_fingerprint(frozen)
@@ -686,7 +649,7 @@ def _verify_release(
         "SELECT * FROM ingestion_batches WHERE job_run_id = ? ORDER BY batch_id",
         (job["job_id"],),
     )
-    if not 2 <= len(batch_rows) <= (10 if k3 else 6):
+    if not 2 <= len(batch_rows) <= 12:
         raise S108ReleaseVerificationError("release Job batch count is outside the fixed bound")
     input_batch_ids = [
         str(item)
@@ -972,11 +935,7 @@ def _verify_release(
                 raise S108ReleaseVerificationError("Raw partial failure binding is invalid")
             partial_batch_count[upstream] += 1
     expected_chunks = sorted(_expected_chunks())
-    primary_upstreams = (
-        (DataUpstream.BAOSTOCK.value, DataUpstream.EASTMONEY.value)
-        if k3
-        else (DataUpstream.EASTMONEY.value, DataUpstream.TENCENT.value)
-    )
+    primary_upstreams = (DataUpstream.BAOSTOCK.value, DataUpstream.TENCENT.value)
     for upstream in primary_upstreams:
         if planned_chunk_count[upstream] != 4:
             raise S108ReleaseVerificationError("A/B planned inventory is not four chunks")
@@ -990,9 +949,7 @@ def _verify_release(
                 raise S108ReleaseVerificationError("failed A/B Raw inventory is invalid")
         elif sorted(raw_chunks[upstream]) != expected_chunks or raw_response_count[upstream] != 4:
             raise S108ReleaseVerificationError("successful A/B Raw inventory is invalid")
-    exceptional_upstreams = (
-        (DataUpstream.TENCENT.value, DataUpstream.SINA.value) if k3 else (DataUpstream.SINA.value,)
-    )
+    exceptional_upstreams = (DataUpstream.SINA.value,)
     if any(planned_chunk_count[item] > 4 for item in exceptional_upstreams):
         raise S108ReleaseVerificationError("exception endpoint inventory exceeds four chunks")
 
@@ -1005,7 +962,7 @@ def _verify_release(
     if (
         final_quality["version_id"] != version_id
         or final_quality["status"] != "PASSED"
-        or final_quality["rule_version"] != S108_DAILY_RULE_VERSION
+        or final_quality["rule_version"] != K4_DAILY_RULE_VERSION
         or final_quality["schema_version"] != version["schema_version"]
         or final_quality["content_sha256"] != version["content_sha256"]
     ):
@@ -1233,15 +1190,7 @@ def _verify_release(
     ):
         raise S108ReleaseVerificationError("ResolutionRun exception lacks two-source consensus")
     decisions = (*verified_resolution.exceptions, *verified_resolution.conflicts)
-    traces = [
-        trace
-        for decision in decisions
-        for trace in (
-            decision.request_traces
-            if k3
-            else (() if decision.c_request is None else (decision.c_request,))
-        )
-    ]
+    traces = [trace for decision in decisions for trace in decision.request_traces]
     if any(
         item.symbol not in S108_FIRST_RELEASE_SYMBOLS
         or not S108_TARGET_START <= item.start_date <= item.end_date <= S108_TARGET_END
@@ -1314,7 +1263,6 @@ def _verify_release(
         planned_chunks=dict(planned_chunk_count),
         raw_responses=dict(raw_response_count),
         failed_batches=dict(failed_batch_count),
-        k3=k3,
     )
     endpoint_actual_value = budget_log.get("actual")
     if not isinstance(endpoint_actual_value, dict):
@@ -1325,8 +1273,8 @@ def _verify_release(
         for key in endpoint_actual
         if key in _HTTP_PER_ENDPOINT
     )
-    if estimated_http > 24:
-        raise S108ReleaseVerificationError("locked-source HTTP upper bound exceeds twenty-four")
+    if estimated_http > 20:
+        raise S108ReleaseVerificationError("locked-source HTTP upper bound exceeds twenty")
     data_center_read = _verify_data_center(
         data_root=data_root,
         version_id=version_id,
@@ -1353,7 +1301,7 @@ def _verify_release(
         "difference_report_ids": report_ids,
         "resolution_run_id": str(resolution["run_id"]),
         "endpoint_invocations": dict(sorted(endpoint_actual.items())),
-        "estimated_http_request_upper_bound": 24,
+        "estimated_http_request_upper_bound": 20,
         "estimated_http_requests_for_actual_inventory": estimated_http,
         "network_budget_log": budget_log,
         "data_center_explicit_version_read": data_center_read,

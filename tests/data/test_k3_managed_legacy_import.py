@@ -22,8 +22,9 @@ from quantking.data.adapters.legacy_managed_import import (
     verify_managed_legacy_import,
 )
 from quantking.data.legacy_import import (
-    K3C_SYNTHETIC_AUTHORIZATION_MARKER,
+    K4D_PILOT_SYNTHETIC_MARKER,
     LegacyImportAuthorization,
+    LegacyImportMode,
     LegacyImportSemantics,
 )
 from quantking.data.models import DatasetKind
@@ -35,7 +36,9 @@ def _authorization(tmp_path: Path) -> LegacyImportAuthorization:
     return LegacyImportAuthorization(
         source_root=source,
         staging_root=tmp_path / "managed",
-        marker=K3C_SYNTHETIC_AUTHORIZATION_MARKER,
+        mode=LegacyImportMode.PILOT,
+        marker=K4D_PILOT_SYNTHETIC_MARKER,
+        pilot_symbols=("600000.SH",),
     )
 
 
@@ -432,3 +435,25 @@ def test_verifier_rejects_path_escape_and_reparse_tamper(
     )
     with pytest.raises(LegacyImportError, match="symlink or junction"):
         verify_managed_legacy_import(outcome.directory, staging_root=authorization.staging_root)
+
+
+def test_pilot_subset_defers_non_selected_files(tmp_path: Path) -> None:
+    authorization = _authorization(tmp_path)
+    _write(authorization.source_root / "daily/600000.parquet", _rows())
+    _write(
+        authorization.source_root / "daily/000001.parquet",
+        [dict(row, code="000001.SZ") for row in _rows()],
+    )
+    inventory = _inventory(authorization)
+    assert inventory.file_count == 2
+
+    outcome = LegacyManagedImporter(authorization).import_inventory(
+        inventory=inventory,
+        semantics=_semantics(),
+        idempotency_key="pilot-subset",
+    )
+
+    assert outcome.deferred_file_count == 1
+    assert outcome.deferred_byte_count > 0
+    assert outcome.canonical_row_count == 4
+    assert outcome.raw_file_count == 1

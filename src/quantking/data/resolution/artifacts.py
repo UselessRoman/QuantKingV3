@@ -12,11 +12,12 @@ from pathlib import Path
 from quantking.common.ids import EntityId, parse_entity_id
 from quantking.common.time import UtcTimestamp
 from quantking.data.adapters.warehouse.manifest import path_safe_id
-from quantking.data.comparison.thresholds import THRESHOLD_RULE_VERSION
+from quantking.data.comparison.thresholds import supported_threshold_versions
 from quantking.data.models import DatasetKind, DataUpstream
 from quantking.data.resolution.models import (
     K2_RESOLUTION_RULE_VERSION,
     K3_RESOLUTION_RULE_VERSION,
+    K4_RESOLUTION_RULE_VERSION,
     CRequestTrace,
     ResolutionDecision,
     ResolutionDefaultSummary,
@@ -31,6 +32,7 @@ from quantking.data.resolution.models import (
 
 _K2_SCHEMA_VERSION = "resolution-artifact.v1"
 _K3_SCHEMA_VERSION = "resolution-artifact.v2"
+_K4_SCHEMA_VERSION = "resolution-artifact.v3"
 _SUMMARY = "summary.json"
 _EXCEPTIONS = "exceptions.jsonl"
 _CONFLICTS = "conflicts.jsonl"
@@ -56,6 +58,7 @@ _MANIFEST_FIELDS = {
     "files",
     "manifest_sha256",
 }
+_K4_MANIFEST_FIELDS = _MANIFEST_FIELDS | {"zero_row_reason_code"}
 
 
 class ResolutionArtifactConflictError(Exception):
@@ -108,7 +111,7 @@ def _file_entry(payload: bytes, *, row_count: int) -> dict[str, object]:
 
 
 def _manifest_payload(run: ResolutionRun, files: dict[str, bytes]) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "schema_version": _schema_for_rule(run.rule_version),
         "run_id": str(run.run_id),
         "dataset": run.dataset.value,
@@ -140,6 +143,11 @@ def _manifest_payload(run: ResolutionRun, files: dict[str, bytes]) -> dict[str, 
             for name in _FILES
         },
     }
+    if run.rule_version == K4_RESOLUTION_RULE_VERSION:
+        payload["zero_row_reason_code"] = (
+            None if run.zero_row_reason_code is None else run.zero_row_reason_code.value
+        )
+    return payload
 
 
 def _schema_for_rule(rule_version: str) -> str:
@@ -147,6 +155,8 @@ def _schema_for_rule(rule_version: str) -> str:
         return _K2_SCHEMA_VERSION
     if rule_version == K3_RESOLUTION_RULE_VERSION:
         return _K3_SCHEMA_VERSION
+    if rule_version == K4_RESOLUTION_RULE_VERSION:
+        return _K4_SCHEMA_VERSION
     raise ValueError("resolution rule version is unsupported")
 
 
@@ -393,6 +403,7 @@ def _decision(
             selected_row_present=selected_row_present,
             reason_code=ResolutionReasonCode(str(value["reason_code"])),
             rule_version=str(value["rule_version"]),
+            threshold_rule_version=str(value["threshold_rule_version"]),
             difference_report_ids=tuple(parse_entity_id(str(item)) for item in report_ids),
             created_job_id=parse_entity_id(str(value["created_job_id"])),
             created_at=UtcTimestamp.from_iso(str(value["created_at"])),
@@ -410,8 +421,10 @@ def _decision(
         )
     except (TypeError, ValueError) as error:
         raise ResolutionArtifactVerificationError("decision is invalid") from error
-    if value["threshold_rule_version"] != THRESHOLD_RULE_VERSION:
+    if value["threshold_rule_version"] not in supported_threshold_versions():
         raise ResolutionArtifactVerificationError("threshold rule version is invalid")
+    if result.threshold_rule_version != value["threshold_rule_version"]:
+        raise ResolutionArtifactVerificationError("threshold rule version is not canonical")
     if result.rule_version != manifest_rule_version:
         raise ResolutionArtifactVerificationError("decision rule does not match manifest")
     if result.to_dict() != value:
@@ -463,6 +476,7 @@ def _verify_summary(
     manifest: dict[str, object],
     exceptions: tuple[ResolutionDecision, ...],
     conflicts: tuple[ResolutionDecision, ...],
+    schema_version: str,
 ) -> None:
     expected = {
         "run_id",
@@ -483,6 +497,8 @@ def _verify_summary(
         "conflict_count",
         "blocker_count",
     }
+    if schema_version == _K4_SCHEMA_VERSION:
+        expected.add("zero_row_reason_code")
     if set(summary) != expected:
         raise ResolutionArtifactVerificationError("resolution summary fields are invalid")
     inputs = summary["input_bindings"]
@@ -498,6 +514,16 @@ def _verify_summary(
     report_ids = tuple(parse_entity_id(str(item)) for item in reports)
     default_value = summary["default_decision"]
     default = None if default_value is None else _default_summary(default_value)
+    zero_row_value = summary.get("zero_row_reason_code")
+    if schema_version == _K4_SCHEMA_VERSION:
+        try:
+            zero_row_reason = (
+                None if zero_row_value is None else ResolutionReasonCode(str(zero_row_value))
+            )
+        except ValueError as error:
+            raise ResolutionArtifactVerificationError("zero-row reason code is invalid") from error
+    else:
+        zero_row_reason = None
     try:
         reconstructed = ResolutionRun(
             run_id=parse_entity_id(str(summary["run_id"])),
@@ -518,6 +544,7 @@ def _verify_summary(
             run_blockers=tuple(ResolutionRunBlocker(str(item)) for item in blockers),
             exceptions=exceptions,
             conflicts=conflicts,
+            zero_row_reason_code=zero_row_reason,
         )
     except (TypeError, ValueError) as error:
         raise ResolutionArtifactVerificationError("resolution summary is invalid") from error
@@ -546,7 +573,12 @@ def verify_resolution_artifact(
     if actual_files != {*_FILES, _MANIFEST, _COMPLETE}:
         raise ResolutionArtifactVerificationError("resolution artifact file set is invalid")
     manifest, manifest_bytes = _plain_json(resolved / _MANIFEST)
-    if set(manifest) != _MANIFEST_FIELDS:
+    expected_manifest_fields = (
+        _K4_MANIFEST_FIELDS
+        if manifest.get("rule_version") == K4_RESOLUTION_RULE_VERSION
+        else _MANIFEST_FIELDS
+    )
+    if set(manifest) != expected_manifest_fields:
         raise ResolutionArtifactVerificationError("resolution manifest fields are invalid")
     embedded = manifest.get("manifest_sha256")
     unsigned = dict(manifest)
@@ -630,7 +662,12 @@ def verify_resolution_artifact(
         manifest=manifest,
         exceptions=exceptions,
         conflicts=conflicts,
+        schema_version=schema_version,
     )
+    if schema_version == _K4_SCHEMA_VERSION and manifest.get("zero_row_reason_code") != summary.get(
+        "zero_row_reason_code"
+    ):
+        raise ResolutionArtifactVerificationError("zero-row reason does not bind the manifest")
     if _canonical(manifest) != manifest_bytes:
         raise ResolutionArtifactVerificationError("manifest bytes changed during verification")
     return VerifiedResolutionArtifact(

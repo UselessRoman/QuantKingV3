@@ -13,7 +13,6 @@ from quantking.common.time import UtcTimestamp
 from quantking.data.comparison.thresholds import THRESHOLD_RULE_VERSION, default_thresholds
 from quantking.data.models import DatasetKind, DataUpstream
 from quantking.data.resolution import (
-    CRequestTrace,
     ResolutionArtifactVerificationError,
     ResolutionArtifactVerifier,
     ResolutionArtifactWriter,
@@ -26,11 +25,17 @@ from quantking.data.resolution import (
     ResolutionSourceStatus,
     verify_resolution_artifact,
 )
-from quantking.data.resolution.models import K2_RESOLUTION_RULE_VERSION
+from quantking.data.resolution.models import K4_RESOLUTION_RULE_VERSION, ResolutionRequestTrace
 
 _SHA_A = "a" * 64
 _SHA_B = "b" * 64
 _SHA_C = "c" * 64
+
+_A, _B, _C = (
+    DataUpstream.BAOSTOCK,
+    DataUpstream.TENCENT,
+    DataUpstream.SINA,
+)
 
 
 def _id(namespace: str, suffix: int) -> object:
@@ -51,11 +56,21 @@ def _binding(
     )
 
 
+def _trace(symbol: str, day: date) -> ResolutionRequestTrace:
+    return ResolutionRequestTrace(
+        upstream=_C,
+        symbol=symbol,
+        start_date=day,
+        end_date=day,
+        trigger_reason="AB_AFFECTED_RANGE",
+    )
+
+
 def _run() -> ResolutionRun:
-    a = _binding(DataUpstream.EASTMONEY, ResolutionSourceStatus.AVAILABLE, 1, _SHA_A)
-    b = _binding(DataUpstream.TENCENT, ResolutionSourceStatus.AVAILABLE, 2, _SHA_B)
-    c = _binding(DataUpstream.SINA, ResolutionSourceStatus.AVAILABLE, 3, _SHA_C)
-    default_c = _binding(DataUpstream.SINA, ResolutionSourceStatus.NOT_CALLED, None, None)
+    a = _binding(_A, ResolutionSourceStatus.AVAILABLE, 1, _SHA_A)
+    b = _binding(_B, ResolutionSourceStatus.AVAILABLE, 2, _SHA_B)
+    c = _binding(_C, ResolutionSourceStatus.AVAILABLE, 3, _SHA_C)
+    default_c = _binding(_C, ResolutionSourceStatus.NOT_CALLED, None, None)
     reports = tuple(_id("data_diff", item) for item in (11, 12, 13))
     job = _id("job", 21)
     created = UtcTimestamp.from_iso("2026-08-10T01:02:03Z")
@@ -63,56 +78,38 @@ def _run() -> ResolutionRun:
         symbol="600000.SH",
         trade_date=date(2026, 8, 7),
         source_bindings=(a, b, c),
-        compared_upstreams=(
-            DataUpstream.EASTMONEY,
-            DataUpstream.TENCENT,
-            DataUpstream.SINA,
-        ),
-        agreeing_upstreams=(DataUpstream.EASTMONEY, DataUpstream.SINA),
-        selected_upstream=DataUpstream.EASTMONEY,
+        compared_upstreams=(_A, _B, _C),
+        agreeing_upstreams=(_A, _C),
+        selected_upstream=_A,
         selected_row_present=True,
         reason_code=ResolutionReasonCode.AC_AGREE_A_SELECTED,
-        rule_version=K2_RESOLUTION_RULE_VERSION,
+        rule_version=K4_RESOLUTION_RULE_VERSION,
         difference_report_ids=reports,
         created_job_id=job,  # type: ignore[arg-type]
         created_at=created,
-        c_request=CRequestTrace(
-            symbol="600000.SH",
-            start_date=date(2026, 8, 7),
-            end_date=date(2026, 8, 7),
-            trigger_reason="FIELD_DIFFERENCE:close",
-        ),
+        request_traces=(_trace("600000.SH", date(2026, 8, 7)),),
     )
     conflict = ResolutionDecision(
         symbol="600000.SH",
         trade_date=date(2026, 8, 8),
         source_bindings=(a, b, c),
-        compared_upstreams=(
-            DataUpstream.EASTMONEY,
-            DataUpstream.TENCENT,
-            DataUpstream.SINA,
-        ),
+        compared_upstreams=(_A, _B, _C),
         agreeing_upstreams=(),
         selected_upstream=None,
         selected_row_present=None,
         reason_code=ResolutionReasonCode.NO_TWO_SOURCE_CONSENSUS,
-        rule_version=K2_RESOLUTION_RULE_VERSION,
+        rule_version=K4_RESOLUTION_RULE_VERSION,
         difference_report_ids=reports,
         created_job_id=job,  # type: ignore[arg-type]
         created_at=created,
-        c_request=CRequestTrace(
-            symbol="600000.SH",
-            start_date=date(2026, 8, 8),
-            end_date=date(2026, 8, 8),
-            trigger_reason="FIELD_DIFFERENCE:volume",
-        ),
+        request_traces=(_trace("600000.SH", date(2026, 8, 8)),),
     )
     return ResolutionRun(
         run_id=_id("data_resolution", 31),  # type: ignore[arg-type]
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         created_job_id=job,  # type: ignore[arg-type]
         created_at=created,
-        rule_version=K2_RESOLUTION_RULE_VERSION,
+        rule_version=K4_RESOLUTION_RULE_VERSION,
         threshold_rule_version=THRESHOLD_RULE_VERSION,
         input_fingerprint="f" * 64,
         candidate_version_id=None,
@@ -120,9 +117,9 @@ def _run() -> ResolutionRun:
         difference_report_ids=reports,  # type: ignore[arg-type]
         default_summary=ResolutionDefaultSummary(
             source_bindings=(a, b, default_c),
-            compared_upstreams=(DataUpstream.EASTMONEY, DataUpstream.TENCENT),
-            agreeing_upstreams=(DataUpstream.EASTMONEY, DataUpstream.TENCENT),
-            selected_upstream=DataUpstream.EASTMONEY,
+            compared_upstreams=(_A, _B),
+            agreeing_upstreams=(_A, _B),
+            selected_upstream=_A,
             reason_code=ResolutionReasonCode.AB_AGREE_DEFAULT,
             decision_count=2,
         ),
@@ -293,7 +290,7 @@ def test_resigned_semantic_summary_tampering_is_rejected(
 
 def test_not_called_and_reason_combinations_reject_fabricated_or_malformed_state() -> None:
     with pytest.raises(ValueError, match="NOT_CALLED"):
-        _binding(DataUpstream.SINA, ResolutionSourceStatus.NOT_CALLED, 3, _SHA_C)
+        _binding(_C, ResolutionSourceStatus.NOT_CALLED, 3, _SHA_C)
 
     run = _run()
     decision = run.exceptions[0]
@@ -303,15 +300,15 @@ def test_not_called_and_reason_combinations_reject_fabricated_or_malformed_state
             trade_date=decision.trade_date,
             source_bindings=decision.source_bindings,
             compared_upstreams=decision.compared_upstreams,
-            agreeing_upstreams=(DataUpstream.TENCENT, DataUpstream.SINA),
-            selected_upstream=DataUpstream.TENCENT,
+            agreeing_upstreams=(_B, _C),
+            selected_upstream=_B,
             selected_row_present=True,
             reason_code=ResolutionReasonCode.AC_AGREE_A_SELECTED,
             rule_version=decision.rule_version,
             difference_report_ids=decision.difference_report_ids,
             created_job_id=decision.created_job_id,
             created_at=decision.created_at,
-            c_request=decision.c_request,
+            request_traces=decision.request_traces,
         )
 
 
@@ -330,7 +327,7 @@ def test_run_rejects_unbound_duplicate_or_cross_job_decisions() -> None:
         run.conflicts[0],
         symbol=decision.symbol,
         trade_date=decision.trade_date,
-        c_request=decision.c_request,
+        request_traces=decision.request_traces,
     )
     with pytest.raises(ValueError, match="globally unique"):
         replace(run, conflicts=(duplicate,))
@@ -338,19 +335,19 @@ def test_run_rejects_unbound_duplicate_or_cross_job_decisions() -> None:
 
 def test_c_trace_must_cover_exact_decision_symbol_and_date() -> None:
     decision = _run().exceptions[0]
+    trace = decision.request_traces[0]
 
     with pytest.raises(ValueError, match="cover"):
-        replace(
-            decision,
-            c_request=replace(decision.c_request, symbol="000001.SZ"),
-        )
+        replace(decision, request_traces=(replace(trace, symbol="000001.SZ"),))
     with pytest.raises(ValueError, match="cover"):
         replace(
             decision,
-            c_request=replace(
-                decision.c_request,
-                start_date=date(2026, 8, 6),
-                end_date=date(2026, 8, 6),
+            request_traces=(
+                replace(
+                    trace,
+                    start_date=date(2026, 8, 6),
+                    end_date=date(2026, 8, 6),
+                ),
             ),
         )
 

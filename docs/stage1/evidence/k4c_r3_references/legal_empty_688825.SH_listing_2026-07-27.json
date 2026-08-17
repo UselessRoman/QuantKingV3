@@ -1,0 +1,41 @@
+{
+  "schema_version": "s1-07k4c-r3-reference.v1",
+  "reference_kind": "listing_announcement_and_calendar",
+  "objective": "missing_or_empty_upstream",
+  "criterion": "legal_full_range_empty_pre_listing",
+  "symbol": "688825.SH",
+  "issuer": "长鑫科技集团股份有限公司",
+  "listing_date": "2026-07-27",
+  "facts": [
+    "上交所公告确认 688825.SH 自 2026-07-27 起上市交易",
+    "2026-07-24 为周五，且沪深北交易所 2025-12-22 发布的 2026 年部分节假日休市安排不含 7 月节假日，故 2026-07-24 为上交所开市日",
+    "目标窗口 2026-07-24..2026-07-24 完全位于上市日前，不跨越 2026-07-27"
+  ],
+  "sources": [
+    {
+      "title": "上交所上市公告（上证公告（股票）[2026]21号）",
+      "url": "https://www.sse.com.cn/disclosure/announcement/listing/ipo/c/c_20260724_10826610.shtml",
+      "publisher": "上海证券交易所",
+      "published": "2026-07-24"
+    },
+    {
+      "title": "长鑫科技集团股份有限公司 688825（公司信息）",
+      "url": "https://www.sse.com.cn/assortment/stock/list/info/company/index.shtml?COMPANY_CODE=688825",
+      "publisher": "上海证券交易所"
+    },
+    {
+      "title": "2026年，这些日子A股休市（沪深北交易所2026年部分节假日休市安排）",
+      "url": "https://www.cnstock.com/commonDetail/606982",
+      "publisher": "上海证券报·中国证券网",
+      "published": "2025-12-22"
+    },
+    {
+      "title": "上交所发布2026年部分节假日休市安排",
+      "url": "https://news.qq.com/rain/a/20251222A05GGP00",
+      "publisher": "腾讯新闻",
+      "published": "2025-12-22"
+    }
+  ],
+  "retrieved_at": "2026-08-16",
+  "notes": "用户已于 2026-08-16 明确接受合同修订：missing_or_empty_upstream 的 R3 实测改为经独立参考证明的上市前合法整范围空结果（legal_full_range_empty_pre_listing）。本参考同时充当上市日期/证券范围参考与冻结交易日历依据。"
+}

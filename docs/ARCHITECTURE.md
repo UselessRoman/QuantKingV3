@@ -106,6 +106,18 @@ Stage 1 的生产主链只处理 `daily_bar_unadjusted`。其他历史 schema �
 
 Stage 0 已完成。Stage 1 的 S1-01～S1-06、K1 和 K2 已主验收；S1-08 首次 AKShare 三源
 正式运行被量额零容差阻断。[S1-07K3](stage1/S1-07K3_TASK.md) 只保留 BaoStock 与历史四角色
-离线基线事实。现行工作依次为 [S1-07K4](stage1/S1-07K4_TASK.md) 完成三角色与旧数据迁移、
-[S1-08R2](stage1/S1-08R2_TASK.md) 收口发布引擎、[S1-08R3](stage1/S1-08R3_TASK.md) 执行唯一
-正式 Job 和终验。Stage 1 尚未完成，Stage 2 未开始。
+离线基线事实。S1-07K4 已完成三角色离线重构；K4C 第一次代表性真实三源实测经独立验收不通过
+（S1-07K4C-R1），R1 修复后 K4C-R2 真实实测已于 2026-08-16 执行（36/36 成功、
+sufficient=false 如实记录），K4C-R3（合同修订 ADR-022 + Phase B 9/9 成功）与 K4C-R4
+（证据链验证与停牌来源闭链，ADR-023）已交付，**K4C-R4 已于 2026-08-16 独立验收通过**；
+`comparison-thresholds.daily-bar-unadjusted.k4.v1`（OHLC/`pre_close` 零容差、量额绝对
+50/相对 0）**已按用户决定接受重新冻结（ADR-024）**（见
+[S1-07K4 实施记录](stage1/S1-07K4_IMPLEMENTATION.md)）。K4D 只读 inventory 已于 2026-08-16
+获授权执行一次并成功（5,208 文件、零读取错误、Stage 0 基线差异 0/0，ADR-025）；K4D
+真实 pilot 两次 attempt 分别于 2026-08-16/08-17 获授权执行并失败即停（ADR-026，数据根
+零写入、授权已消费）；**旧 XTQuant 日线迁移已按用户决定拒绝并完成 K4D 决策收口
+（ADR-027）：第 3 次 pilot、全量诊断与 full 均不执行，`XTQUANT_LEGACY` 不进入发布链**。
+**S1-07K4 已于 2026-08-17 经 K4E 独立验收通过并形成单一 K4 提交**
+（[S1-07K4 验收记录](stage1/S1-07K4_ACCEPTANCE.md)）。
+下一步是 [S1-08R2](stage1/S1-08R2_TASK.md) 发布引擎收口，随后
+[S1-08R3](stage1/S1-08R3_TASK.md) 唯一正式 Job 和终验。Stage 1 尚未完成，Stage 2 未开始。

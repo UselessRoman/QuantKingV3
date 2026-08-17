@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
+from itertools import pairwise
 from types import MappingProxyType
 
 from quantking.common.ids import parse_entity_id
@@ -19,6 +20,7 @@ EOD_REQUEST_SCHEMA = "eod-request.v1"
 EOD_REQUEST_MANIFEST_SCHEMA = "eod-request-manifest.v1"
 LEGACY_EOD_CONFIG_SCHEMA = "eod-execution-config.v2"
 EOD_CONFIG_SCHEMA = "eod-execution-config.v3"
+K4_EOD_CONFIG_SCHEMA = "eod-execution-config.v4"
 
 _DATASET_ORDER = (
     DatasetKind.EXCHANGE_CALENDAR,
@@ -360,6 +362,7 @@ class EodDatasetConfig:
     known_coverage: tuple[tuple[str, str, str], ...] = ()
     base_version: EodBaseVersion | None = None
     references: Mapping[str, EodReferenceVersion] = MappingProxyType({})
+    security_exceptions: Mapping[str, tuple[tuple[str, str], ...]] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         if not isinstance(self.scope, tuple):
@@ -394,6 +397,9 @@ class EodDatasetConfig:
                 raise TypeError("references must contain EodReferenceVersion values")
             normalized[key] = reference
         object.__setattr__(self, "references", MappingProxyType(dict(sorted(normalized.items()))))
+        object.__setattr__(
+            self, "security_exceptions", _security_exceptions(self.security_exceptions, self.scope)
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -404,11 +410,30 @@ class EodDatasetConfig:
             ],
             "base_version": (None if self.base_version is None else self.base_version.to_dict()),
             "references": {key: reference.to_dict() for key, reference in self.references.items()},
+            "security_exceptions": {
+                code: [[start, end] for start, end in ranges]
+                for code, ranges in self.security_exceptions.items()
+            },
         }
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> EodDatasetConfig:
-        if set(value) != {"scope", "known_coverage", "base_version", "references"}:
+        if set(value) == {"scope", "known_coverage", "base_version", "references"}:
+            has_exceptions = False
+            raw_exceptions: Mapping[str, object] = {}
+        elif set(value) == {
+            "scope",
+            "known_coverage",
+            "base_version",
+            "references",
+            "security_exceptions",
+        }:
+            has_exceptions = True
+            candidate = value["security_exceptions"]
+            if not isinstance(candidate, Mapping):
+                raise TypeError("security_exceptions must be an object")
+            raw_exceptions = candidate
+        else:
             raise ValueError("dataset config fields are invalid")
         scope = value["scope"]
         coverage = value["known_coverage"]
@@ -435,15 +460,73 @@ class EodDatasetConfig:
             if not isinstance(key, str) or not isinstance(item, Mapping):
                 raise TypeError("reference entries are invalid")
             parsed_references[key] = EodReferenceVersion.from_dict(item)
+        parsed_exceptions: dict[str, tuple[tuple[str, str], ...]] = {}
+        for code, item in raw_exceptions.items():
+            if not isinstance(code, str) or not isinstance(item, list):
+                raise TypeError("security exception entries are invalid")
+            parsed_exceptions[code] = tuple(_exception_range(pair, code=code) for pair in item)
         result = cls(
             scope=tuple(scope),
             known_coverage=tuple(coverage_values),
             base_version=None if base is None else EodBaseVersion.from_dict(base),
             references=parsed_references,
+            security_exceptions=parsed_exceptions,
         )
-        if result.to_dict() != dict(value):
+        expected = dict(result.to_dict())
+        if not has_exceptions:
+            # Historical v2/v3 configs keep their four-field shape canonical.
+            expected.pop("security_exceptions", None)
+        if expected != dict(value):
             raise ValueError("dataset config is not canonical")
         return result
+
+
+def _exception_range(value: object, *, code: str) -> tuple[str, str]:
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or not all(isinstance(item, str) for item in value)
+    ):
+        raise TypeError("security exception range must be [start, end] ISO dates")
+    start, end = value[0], value[1]
+    try:
+        parsed_start = date.fromisoformat(start)
+        parsed_end = date.fromisoformat(end)
+    except ValueError as error:
+        raise ValueError(f"security exception dates for {code} must be ISO dates") from error
+    if parsed_end < parsed_start:
+        raise ValueError("security exception end must not precede start")
+    if start != parsed_start.isoformat() or end != parsed_end.isoformat():
+        raise ValueError("security exception dates must be canonical ISO text")
+    return start, end
+
+
+def _security_exceptions(
+    value: Mapping[str, tuple[tuple[str, str], ...]], scope: tuple[str, ...]
+) -> Mapping[str, tuple[tuple[str, str], ...]]:
+    if not isinstance(value, Mapping):
+        raise TypeError("security_exceptions must be a mapping")
+    normalized: dict[str, tuple[tuple[str, str], ...]] = {}
+    for code, ranges in value.items():
+        if not isinstance(code, str) or not code.strip():
+            raise ValueError("security_exceptions key must be non-empty text")
+        if code not in scope:
+            raise ValueError("security_exceptions reference securities outside the scope")
+        if not isinstance(ranges, tuple):
+            raise TypeError("security_exceptions value must be a tuple of date ranges")
+        parsed: list[tuple[str, str]] = []
+        for pair in ranges:
+            if not isinstance(pair, tuple) or len(pair) != 2:
+                raise TypeError("security exception range must be a (start, end) pair")
+            parsed.append(_exception_range(list(pair), code=code))
+        parsed.sort()
+        if len(set(parsed)) != len(parsed):
+            raise ValueError("security exception ranges must be unique")
+        for previous, current in pairwise(parsed):
+            if current[0] <= previous[1]:
+                raise ValueError("security exception ranges must not overlap")
+        normalized[code] = tuple(parsed)
+    return MappingProxyType(dict(sorted(normalized.items())))
 
 
 def load_canonical_json(value: str) -> Mapping[str, object]:
@@ -461,6 +544,7 @@ __all__ = [
     "EOD_JOB_TYPE",
     "EOD_REQUEST_MANIFEST_SCHEMA",
     "EOD_REQUEST_SCHEMA",
+    "K4_EOD_CONFIG_SCHEMA",
     "LEGACY_EOD_CONFIG_SCHEMA",
     "EodBaseVersion",
     "EodDatasetConfig",

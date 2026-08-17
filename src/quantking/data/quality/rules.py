@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from itertools import pairwise
 from typing import Protocol, cast
 
@@ -27,6 +27,7 @@ from quantking.data.adapters.canonical_schema import (
 )
 from quantking.data.models import DatasetKind
 from quantking.data.quality.models import (
+    K4_DAILY_RULE_VERSION,
     S108_DAILY_RULE_VERSION,
     QualityOutcomeResult,
     QualityRequest,
@@ -280,6 +281,212 @@ def _evaluate_non_negative_volume_amount(
         "non_negative_volume_amount",
         summary=f"{bad} negative volume/amount value(s)",
         affected=bad,
+    )
+
+
+def _evaluate_pre_close_consistency(
+    *,
+    request: QualityRequest,
+    table: pa.Table,
+    reference_tables: Mapping[str, pa.Table],
+) -> QualityOutcomeResult:
+    """Require pre_close == prior row close per code; the first row per code is exempt.
+
+    The first target row's pre_close derives from the 15-day lookback context
+    outside the canonical table, so only subsequent rows can be verified.
+    """
+    del reference_tables
+    if request.dataset is not DatasetKind.DAILY_BAR_UNADJUSTED:
+        return _skipped("pre_close_consistency", summary="rule applies to daily bars only")
+    if table.num_rows == 0 and request.empty_result is not None:
+        return _passed("pre_close_consistency", summary="legal empty result has no rows")
+    rows = table.to_pylist()
+    rows.sort(key=lambda row: (str(row["code"]), row["trade_date"]))
+    previous: dict[str, float] = {}
+    bad = 0
+    for row in rows:
+        code = str(row["code"])
+        close = row["close"]
+        pre_close = row["pre_close"]
+        if code not in previous:
+            previous[code] = float(close)
+            continue
+        if pre_close != previous[code]:
+            bad += 1
+        previous[code] = float(close)
+    if bad == 0:
+        return _passed(
+            "pre_close_consistency",
+            summary="pre_close equals the prior unadjusted close for every verified row",
+        )
+    return _failed(
+        "pre_close_consistency",
+        summary=f"{bad} row(s) whose pre_close differs from the prior unadjusted close",
+        affected=bad,
+    )
+
+
+def _open_sessions(calendar_table: pa.Table, request: QualityRequest) -> dict[str, list[date]]:
+    """Return per-exchange sorted open session dates inside the coverage window."""
+    sessions: dict[str, list[date]] = {}
+    for row in calendar_table.to_pylist():
+        trade_date = row["trade_date"]
+        if (
+            row["is_open"]
+            and request.coverage_start.value <= trade_date <= request.coverage_end.value
+        ):
+            sessions.setdefault(str(row["exchange"]), []).append(trade_date)
+    return {exchange: sorted(dates) for exchange, dates in sessions.items()}
+
+
+def _evaluate_calendar_coverage(
+    *,
+    request: QualityRequest,
+    table: pa.Table,
+    reference_tables: Mapping[str, pa.Table],
+) -> QualityOutcomeResult:
+    """Require exactly one calendar record per expected exchange per natural day.
+
+    A truncated calendar must block every calendar-bound rule: missing dates
+    or missing exchanges are reference defects, never implicit holidays, and
+    ``security_exceptions`` cannot mask them.
+    """
+    del table
+    if request.dataset is not DatasetKind.DAILY_BAR_UNADJUSTED:
+        return _skipped("calendar_coverage", summary="rule applies to daily bars only")
+    calendar_table = reference_tables.get("exchange_calendar")
+    if calendar_table is None:
+        return _failed(
+            "calendar_coverage",
+            summary="exchange_calendar reference table is missing",
+            affected=1,
+        )
+    counts: dict[tuple[str, date], int] = {}
+    for row in calendar_table.to_pylist():
+        key = (str(row["exchange"]), row["trade_date"])
+        counts[key] = counts.get(key, 0) + 1
+    missing = 0
+    day = request.coverage_start.value
+    while day <= request.coverage_end.value:
+        for exchange in request.expected_exchanges:
+            if counts.get((exchange, day), 0) != 1:
+                missing += 1
+        day += timedelta(days=1)
+    if missing == 0:
+        return _passed(
+            "calendar_coverage",
+            summary=(
+                "every expected exchange has exactly one calendar record "
+                "for every natural day of the coverage window"
+            ),
+        )
+    return _failed(
+        "calendar_coverage",
+        summary=f"{missing} calendar record(s) missing or duplicated in the coverage window",
+        affected=missing,
+    )
+
+
+def _expected_sessions(
+    request: QualityRequest, sessions: Mapping[str, list[date]], code: str
+) -> list[date]:
+    exchange = code.rsplit(".", 1)[-1]
+    expected = list(sessions.get(exchange, ()))
+    exceptions = (request.security_exceptions or {}).get(code, ())
+    for start, end in exceptions:
+        expected = [
+            trade_date for trade_date in expected if not start.value <= trade_date <= end.value
+        ]
+    return expected
+
+
+def _evaluate_expected_trading_days(
+    *,
+    request: QualityRequest,
+    table: pa.Table,
+    reference_tables: Mapping[str, pa.Table],
+) -> QualityOutcomeResult:
+    """Per security: every expected open session must be present, nothing extra.
+
+    Explicit listing/suspension exceptions bound in the frozen request shrink
+    the expected session set; anything unexplained is a failure, never a guess.
+    A legal empty result only passes when the calendar proves every security
+    has no expected session — a fake ``empty_result`` cannot bypass the
+    calendar.
+    """
+    if request.dataset is not DatasetKind.DAILY_BAR_UNADJUSTED:
+        return _skipped("expected_trading_days", summary="rule applies to daily bars only")
+    calendar_table = reference_tables.get("exchange_calendar")
+    if calendar_table is None:
+        return _failed(
+            "expected_trading_days",
+            summary="exchange_calendar reference table is missing",
+            affected=1,
+        )
+    sessions = _open_sessions(calendar_table, request)
+    present: dict[str, set[date]] = {}
+    unexpected = 0
+    for row in table.to_pylist():
+        code = str(row["code"])
+        present.setdefault(code, set()).add(row["trade_date"])
+        expected = set(_expected_sessions(request, sessions, code))
+        if row["trade_date"] not in expected:
+            unexpected += 1
+    missing = 0
+    for code in request.expected_securities:
+        expected = set(_expected_sessions(request, sessions, code))
+        missing += len(expected - present.get(code, set()))
+    if unexpected == 0 and missing == 0:
+        return _passed(
+            "expected_trading_days",
+            summary="every expected open session is present and nothing unexpected exists",
+        )
+    return _failed(
+        "expected_trading_days",
+        summary=f"{missing} missing and {unexpected} unexpected session row(s)",
+        affected=missing + unexpected,
+    )
+
+
+def _evaluate_freshness(
+    *,
+    request: QualityRequest,
+    table: pa.Table,
+    reference_tables: Mapping[str, pa.Table],
+) -> QualityOutcomeResult:
+    """Per security: the latest present session equals the latest expected session.
+
+    A legal zero-row outcome only passes when every security has no expected
+    session in the calendar; an empty table while sessions are expected is a
+    freshness failure, never a free pass.
+    """
+    if request.dataset is not DatasetKind.DAILY_BAR_UNADJUSTED:
+        return _skipped("freshness", summary="rule applies to daily bars only")
+    calendar_table = reference_tables.get("exchange_calendar")
+    if calendar_table is None:
+        return _failed(
+            "freshness",
+            summary="exchange_calendar reference table is missing",
+            affected=1,
+        )
+    sessions = _open_sessions(calendar_table, request)
+    present: dict[str, set[date]] = {}
+    for row in table.to_pylist():
+        present.setdefault(str(row["code"]), set()).add(row["trade_date"])
+    stale = 0
+    for code in request.expected_securities:
+        expected = _expected_sessions(request, sessions, code)
+        if not expected:
+            continue
+        latest_expected = expected[-1]
+        if latest_expected not in present.get(code, set()):
+            stale += 1
+    if stale == 0:
+        return _passed("freshness", summary="every security is fresh through its latest session")
+    return _failed(
+        "freshness",
+        summary=f"{stale} security(ies) not fresh through their latest expected session",
+        affected=stale,
     )
 
 
@@ -650,10 +857,78 @@ def s108_daily_rule_set() -> QualityRuleSet:
     )
 
 
+_K4_DAILY_SELECTED = frozenset(
+    {
+        "schema_conformance",
+        "primary_key_uniqueness",
+        "ohlc_consistency",
+        "positive_prices",
+        "non_negative_volume_amount",
+        "calendar_membership",
+        "coverage_window",
+    }
+)
+
+
+def k4_daily_rule_set() -> QualityRuleSet:
+    """Return the K4 daily rules with the versioned calendar-bound checks.
+
+    The exchange_calendar reference is bound by version and content SHA in the
+    frozen request; expected trading days, freshness and pre_close consistency
+    are blocking, with explicit listing/suspension exceptions bound in
+    ``QualityRequest.security_exceptions``.
+    """
+    rules = tuple(rule for rule in default_rule_set().rules if rule.code in _K4_DAILY_SELECTED)
+    if {rule.code for rule in rules} != _K4_DAILY_SELECTED:
+        raise RuntimeError("K4 daily quality catalogue is incomplete")
+    scope_rule = QualityRule(
+        code="expected_scope_presence",
+        applies_to=frozenset({DatasetKind.DAILY_BAR_UNADJUSTED}),
+        requires_reference=frozenset(),
+        blocking=True,
+        evaluate=_evaluate_expected_scope_presence,
+    )
+    extra_rules = (
+        QualityRule(
+            code="pre_close_consistency",
+            applies_to=frozenset({DatasetKind.DAILY_BAR_UNADJUSTED}),
+            requires_reference=frozenset(),
+            blocking=True,
+            evaluate=_evaluate_pre_close_consistency,
+        ),
+        QualityRule(
+            code="calendar_coverage",
+            applies_to=frozenset({DatasetKind.DAILY_BAR_UNADJUSTED}),
+            requires_reference=frozenset({"exchange_calendar"}),
+            blocking=True,
+            evaluate=_evaluate_calendar_coverage,
+        ),
+        QualityRule(
+            code="expected_trading_days",
+            applies_to=frozenset({DatasetKind.DAILY_BAR_UNADJUSTED}),
+            requires_reference=frozenset({"exchange_calendar"}),
+            blocking=True,
+            evaluate=_evaluate_expected_trading_days,
+        ),
+        QualityRule(
+            code="freshness",
+            applies_to=frozenset({DatasetKind.DAILY_BAR_UNADJUSTED}),
+            requires_reference=frozenset({"exchange_calendar"}),
+            blocking=True,
+            evaluate=_evaluate_freshness,
+        ),
+    )
+    return QualityRuleSet(
+        rule_version=K4_DAILY_RULE_VERSION,
+        rules=(rules[0], rules[1], scope_rule, *rules[2:], *extra_rules),
+    )
+
+
 __all__: tuple[str, ...] = (
     "RULE_VERSION",
     "QualityRule",
     "QualityRuleSet",
     "default_rule_set",
+    "k4_daily_rule_set",
     "s108_daily_rule_set",
 )

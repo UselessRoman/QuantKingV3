@@ -31,11 +31,11 @@ from quantking.data.adapters.warehouse.manifest import (
 from quantking.data.comparison.comparator import RowClassification
 from quantking.data.comparison.thresholds import (
     K3_CANDIDATE_RULE_VERSION,
+    K4_THRESHOLD_RULE_VERSION,
     THRESHOLD_RULE_VERSION,
     canonical_decimal,
     decimal_difference,
-    default_thresholds,
-    k3_evidence_candidate_thresholds,
+    thresholds_for,
 )
 from quantking.data.models import (
     DatasetKind,
@@ -50,6 +50,7 @@ _ROW_DIFFERENCES_FILENAME = "row_differences.json"
 _MANIFEST_SCHEMA_VERSION = "difference-report-manifest.v1"
 _K2_MANIFEST_SCHEMA_VERSION = "difference-report-manifest.k2.v2"
 _K3_MANIFEST_SCHEMA_VERSION = "difference-report-manifest.k3.v3"
+K4_MANIFEST_SCHEMA_VERSION = "difference-report-manifest.k4.v4"
 _K2_BINDING_MODE = "SHARED_RESOLUTION_CANDIDATE"
 
 
@@ -341,6 +342,7 @@ class DifferenceReportVerifier:
         if manifest_schema_version in {
             _K2_MANIFEST_SCHEMA_VERSION,
             _K3_MANIFEST_SCHEMA_VERSION,
+            K4_MANIFEST_SCHEMA_VERSION,
         }:
             required.update(
                 {
@@ -352,15 +354,18 @@ class DifferenceReportVerifier:
             )
         if manifest_schema_version == _K3_MANIFEST_SCHEMA_VERSION:
             required.add("unit_policy_versions")
+        if manifest_schema_version == K4_MANIFEST_SCHEMA_VERSION:
+            required.add("unit_policy_versions")
         if set(manifest) != required:
             raise DifferenceReportVerificationError("manifest fields do not match schema")
         if manifest_schema_version not in {
             _MANIFEST_SCHEMA_VERSION,
             _K2_MANIFEST_SCHEMA_VERSION,
             _K3_MANIFEST_SCHEMA_VERSION,
+            K4_MANIFEST_SCHEMA_VERSION,
         }:
             raise DifferenceReportVerificationError("manifest schema version is unsupported")
-        if manifest_schema_version == _K3_MANIFEST_SCHEMA_VERSION:
+        if manifest_schema_version in {_K3_MANIFEST_SCHEMA_VERSION, K4_MANIFEST_SCHEMA_VERSION}:
             try:
                 primary_upstream = DataUpstream(str(manifest["primary_source"]))
                 fallback_upstream = DataUpstream(str(manifest["fallback_source"]))
@@ -377,15 +382,20 @@ class DifferenceReportVerifier:
         if manifest_schema_version in {
             _K2_MANIFEST_SCHEMA_VERSION,
             _K3_MANIFEST_SCHEMA_VERSION,
+            K4_MANIFEST_SCHEMA_VERSION,
         } and (
             manifest["binding_mode"] != _K2_BINDING_MODE
             or manifest["primary_version_id"] != manifest["fallback_version_id"]
             or manifest["dataset"] != "daily_bar_unadjusted"
             or manifest["threshold_rule_version"]
             != (
-                K3_CANDIDATE_RULE_VERSION
-                if manifest_schema_version == _K3_MANIFEST_SCHEMA_VERSION
-                else THRESHOLD_RULE_VERSION
+                K4_THRESHOLD_RULE_VERSION
+                if manifest_schema_version == K4_MANIFEST_SCHEMA_VERSION
+                else (
+                    K3_CANDIDATE_RULE_VERSION
+                    if manifest_schema_version == _K3_MANIFEST_SCHEMA_VERSION
+                    else THRESHOLD_RULE_VERSION
+                )
             )
         ):
             raise DifferenceReportVerificationError("K2 shared candidate binding is invalid")
@@ -393,6 +403,7 @@ class DifferenceReportVerifier:
         if manifest_schema_version in {
             _K2_MANIFEST_SCHEMA_VERSION,
             _K3_MANIFEST_SCHEMA_VERSION,
+            K4_MANIFEST_SCHEMA_VERSION,
         } and (
             not isinstance(comparison_keys, list)
             or any(
@@ -406,6 +417,7 @@ class DifferenceReportVerifier:
         if manifest_schema_version in {
             _K2_MANIFEST_SCHEMA_VERSION,
             _K3_MANIFEST_SCHEMA_VERSION,
+            K4_MANIFEST_SCHEMA_VERSION,
         }:
             comparison_keys = cast(list[list[str]], comparison_keys)
             normalized_scope: list[tuple[str, str]] = []
@@ -501,7 +513,11 @@ class DifferenceReportVerifier:
         units: list[VerifiedDifferenceUnit] = []
         comparison_scope = None
         manifest_schema = manifest.get("manifest_schema_version")
-        if manifest_schema in {_K2_MANIFEST_SCHEMA_VERSION, _K3_MANIFEST_SCHEMA_VERSION}:
+        if manifest_schema in {
+            _K2_MANIFEST_SCHEMA_VERSION,
+            _K3_MANIFEST_SCHEMA_VERSION,
+            K4_MANIFEST_SCHEMA_VERSION,
+        }:
             comparison_keys = cast(list[list[str]], manifest["comparison_primary_keys"])
             comparison_scope = {(item[0], item[1]) for item in comparison_keys}
         for row in rows:
@@ -539,7 +555,8 @@ class DifferenceReportVerifier:
                 raise DifferenceReportVerificationError("row-level difference must not carry field")
             _verify_numeric_evidence(
                 row,
-                decimal_strings=manifest_schema == _K3_MANIFEST_SCHEMA_VERSION,
+                decimal_strings=manifest_schema
+                in {_K3_MANIFEST_SCHEMA_VERSION, K4_MANIFEST_SCHEMA_VERSION},
                 threshold_rule_version=str(manifest["threshold_rule_version"]),
             )
             sort_key = (tuple(pk[name] for name in descriptor.primary_key), field)
@@ -583,6 +600,7 @@ def _compute_report_sha_from_manifest(manifest: dict[str, object], rows: list[ob
     if manifest.get("manifest_schema_version") in {
         _K2_MANIFEST_SCHEMA_VERSION,
         _K3_MANIFEST_SCHEMA_VERSION,
+        K4_MANIFEST_SCHEMA_VERSION,
     }:
         request["comparison_primary_keys"] = manifest["comparison_primary_keys"]
         request["primary_empty_result"] = manifest["primary_empty_result"]
@@ -681,11 +699,7 @@ def _verify_numeric_evidence(
         return
     if not isinstance(threshold, dict) or set(threshold) != {"absolute", "relative"}:
         raise DifferenceReportVerificationError("numeric threshold evidence is invalid")
-    frozen = (
-        k3_evidence_candidate_thresholds()
-        if threshold_rule_version == K3_CANDIDATE_RULE_VERSION
-        else default_thresholds()
-    )
+    frozen = thresholds_for(threshold_rule_version)
     if frozen.rule_version != threshold_rule_version:
         raise DifferenceReportVerificationError("threshold rule version is unsupported")
     expected_threshold = frozen.for_dataset(DatasetKind.DAILY_BAR_UNADJUSTED).get(str(field))

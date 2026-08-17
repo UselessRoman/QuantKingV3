@@ -1,4 +1,9 @@
-"""K2 DifferenceReport artifacts bound to one shared final candidate version."""
+"""DifferenceReport artifacts bound to one shared final candidate version.
+
+The recorder consumes the exact ``ThresholdSet`` the Resolution run used, so
+DifferenceReport comparison and Resolution arbitration share one versioned
+Decimal threshold contract.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +16,7 @@ from quantking.data.comparison.comparator import (
     CrossSourceComparator,
     CrossSourceComparisonRequest,
 )
-from quantking.data.comparison.thresholds import default_thresholds
+from quantking.data.comparison.thresholds import ThresholdSet, default_thresholds
 from quantking.data.comparison.verifier import (
     DifferenceReportVerifier,
     VerifiedDifferenceReport,
@@ -21,12 +26,20 @@ from quantking.data.resolution.service import ResolutionKey, SourceCandidate
 from quantking.data.schemas import descriptor_for
 
 
-class K2DifferenceArtifactRecorder:
+class ResolutionDifferenceArtifactRecorder:
     """Write immutable pair reports now and expose verified summaries after resolution."""
 
-    def __init__(self, *, artifacts_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        artifacts_root: Path,
+        thresholds: ThresholdSet | None = None,
+    ) -> None:
         self._writer = DifferenceReportArtifactWriter(artifacts_root=artifacts_root)
         self._verifier = DifferenceReportVerifier(artifacts_root=artifacts_root)
+        self._thresholds = thresholds or default_thresholds()
+        if not isinstance(self._thresholds, ThresholdSet):
+            raise TypeError("thresholds must be a ThresholdSet")
         self._report_ids: set[EntityId] = set()
 
     def record(
@@ -50,7 +63,7 @@ class K2DifferenceArtifactRecorder:
             or primary.content_sha256 is None
             or fallback.content_sha256 is None
         ):
-            raise ValueError("K2 comparison requires two landed shared-candidate inputs")
+            raise ValueError("comparison requires two landed shared-candidate inputs")
         descriptor = descriptor_for(DatasetKind.DAILY_BAR_UNADJUSTED.value)
         outcome = CrossSourceComparator().compare(
             request=CrossSourceComparisonRequest(
@@ -68,8 +81,8 @@ class K2DifferenceArtifactRecorder:
                 fallback_quality_run_id=fallback.quality_run_id,
                 primary_table=primary.table,
                 fallback_table=fallback.table,
-                thresholds=default_thresholds(),
-                sample_spec=("K2_AFFECTED_SCOPE",),
+                thresholds=self._thresholds,
+                sample_spec=("K4_AFFECTED_SCOPE",),
                 created_at=created_at,
                 comparison_primary_keys=tuple((item.symbol, item.trade_date) for item in keys),
                 primary_empty_result=primary.empty_result,
@@ -87,4 +100,11 @@ class K2DifferenceArtifactRecorder:
         )
 
 
-__all__ = ["K2DifferenceArtifactRecorder"]
+# Historical public name preserved for read-side callers.
+K2DifferenceArtifactRecorder = ResolutionDifferenceArtifactRecorder
+
+
+__all__ = [
+    "K2DifferenceArtifactRecorder",
+    "ResolutionDifferenceArtifactRecorder",
+]

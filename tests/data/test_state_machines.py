@@ -40,14 +40,14 @@ def _running_batch() -> IngestionBatch:
     return IngestionBatch.running(
         batch_id=new_entity_id("data_batch"),
         provider=DataProvider.AKSHARE,
-        upstream=DataUpstream.EASTMONEY,
+        upstream=DataUpstream.TENCENT,
         endpoint="stock_zh_a_hist",
         library_version="test",
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
-        adapter_version="eastmoney-probe-1",
+        adapter_version="tencent-probe-1",
         request_params={
             "provider": "AKSHARE",
-            "upstream": "EASTMONEY",
+            "upstream": "TENCENT",
             "endpoint": "stock_zh_a_hist",
             "akshare_version": "test",
             "code": "000001.SZ",
@@ -79,7 +79,7 @@ class TestIngestionBatchStateMachine:
             security_count=1,
             manifest_files=(
                 ManifestFileEntry(
-                    relative_path="raw/eastmoney/daily/000001.SZ.parquet",
+                    relative_path="raw/tencent/daily/000001.SZ.parquet",
                     size=1024,
                     sha256="a" * 64,
                 ),
@@ -332,7 +332,7 @@ class TestManagedRelativePathsOnly:
         batch_a = IngestionBatch.running(
             batch_id=new_entity_id("data_batch"),
             provider=DataProvider.AKSHARE,
-            upstream=DataUpstream.EASTMONEY,
+            upstream=DataUpstream.TENCENT,
             endpoint="stock_zh_a_hist",
             library_version="test",
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
@@ -343,7 +343,7 @@ class TestManagedRelativePathsOnly:
         batch_b = IngestionBatch.running(
             batch_id=new_entity_id("data_batch"),
             provider=DataProvider.AKSHARE,
-            upstream=DataUpstream.EASTMONEY,
+            upstream=DataUpstream.TENCENT,
             endpoint="stock_zh_a_hist",
             library_version="test",
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,

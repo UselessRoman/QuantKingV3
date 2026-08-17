@@ -265,13 +265,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             _parser().parse_args(list(arguments))
             from quantking.common.config import load_settings
-            from quantking.data.eod.release import build_s108_dry_run
+            from quantking.data.eod.release import (
+                S107K4_CODE_VERSION,
+                build_s108_dry_run,
+            )
 
             repository_root = Path(__file__).resolve().parents[3]
             settings = load_settings(repository_root / "configs" / "default.toml")
             _write(
                 sys.stdout,
-                build_s108_dry_run(settings, code_version="s1-08.v1"),
+                build_s108_dry_run(settings, code_version=S107K4_CODE_VERSION),
             )
             return 0
         except Exception:

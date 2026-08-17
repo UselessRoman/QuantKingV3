@@ -1,15 +1,24 @@
-"""Per-Job AKShare endpoint invocation budget enforced at the source boundary."""
+"""Per-Job endpoint invocation budget for the fixed three-role source route.
+
+Normal tasks plan A (BaoStock) and B (Tencent) once per chunk. C (Sina) is
+reserved as one complete exceptional set and stays 0 planned/actual whenever
+A and B agree. Insufficiency is rejected at planning time — before the first
+service call — and every actual call passes the ``before_endpoint`` guard.
+There is no application-layer retry.
+"""
 
 from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
 
-from quantking.data.adapters.sources.registry import (
-    AKSHARE_RUNTIME_UPSTREAMS,
-    PRODUCTION_UPSTREAMS,
-)
+from quantking.data.adapters.sources.registry import PRODUCTION_UPSTREAMS
 from quantking.data.models import DataUpstream
+
+_AKSHARE_HTTP_PER_ENDPOINT = {
+    DataUpstream.TENCENT: 3,
+    DataUpstream.SINA: 2,
+}
 
 
 class NetworkBudgetExceededError(RuntimeError):
@@ -21,79 +30,8 @@ class NetworkBudgetExceededError(RuntimeError):
         super().__init__(self.code)
 
 
-class EndpointInvocationBudget:
-    """Track planned and actual calls; C must be reserved as one complete set."""
-
-    def __init__(self, *, total_limit: int, c_limit: int) -> None:
-        if total_limit != 12 or c_limit != 4:
-            raise ValueError("S1-08 endpoint invocation budget must equal 12/4")
-        self._total_limit = total_limit
-        self._c_limit = c_limit
-        self._planned: Counter[DataUpstream] = Counter()
-        self._actual: Counter[DataUpstream] = Counter()
-        self._c_expected: list[tuple[str, str, str, int]] | None = None
-
-    def plan_ab(self, upstream: DataUpstream, *, chunk_count: int) -> None:
-        if upstream not in {DataUpstream.EASTMONEY, DataUpstream.TENCENT}:
-            raise ValueError("plan_ab accepts EASTMONEY or TENCENT only")
-        if chunk_count < 0 or self._planned[upstream] != 0:
-            raise ValueError("A/B invocation plan is invalid or duplicated")
-        if chunk_count > 4 or sum(self._planned.values()) + chunk_count > self._total_limit:
-            raise NetworkBudgetExceededError
-        self._planned[upstream] = chunk_count
-
-    def preflight_c(self, requests: tuple[tuple[str, str, str, int], ...]) -> None:
-        if self._c_expected is not None:
-            raise ValueError("C invocation plan was already frozen")
-        count = sum(item[3] for item in requests)
-        if count > self._c_limit or sum(self._planned.values()) + count > self._total_limit:
-            raise NetworkBudgetExceededError
-        self._planned[DataUpstream.SINA] = count
-        self._c_expected = list(requests)
-
-    def consume_c_plan(self, request: tuple[str, str, str, int]) -> None:
-        if self._c_expected is None:
-            count = request[3]
-            if (
-                count > self._c_limit
-                or self._planned[DataUpstream.SINA] + count > self._c_limit
-                or sum(self._planned.values()) + count > self._total_limit
-            ):
-                raise NetworkBudgetExceededError
-            self._planned[DataUpstream.SINA] += count
-            return
-        if not self._c_expected or self._c_expected[0] != request:
-            raise NetworkBudgetExceededError
-        self._c_expected.pop(0)
-
-    def before_endpoint(self, upstream: DataUpstream) -> None:
-        if not isinstance(upstream, DataUpstream):
-            raise TypeError("upstream must be DataUpstream")
-        if (
-            self._actual[upstream] >= self._planned[upstream]
-            or sum(self._actual.values()) >= self._total_limit
-            or (upstream is DataUpstream.SINA and self._actual[DataUpstream.SINA] >= self._c_limit)
-        ):
-            raise NetworkBudgetExceededError
-        self._actual[upstream] += 1
-
-    def summary(self) -> Mapping[str, object]:
-        return {
-            "limits": {"total": self._total_limit, "sina": self._c_limit},
-            "planned": {
-                upstream.value: self._planned[upstream] for upstream in AKSHARE_RUNTIME_UPSTREAMS
-            },
-            "actual": {
-                upstream.value: self._actual[upstream] for upstream in AKSHARE_RUNTIME_UPSTREAMS
-            },
-            "planned_total": sum(self._planned.values()),
-            "actual_total": sum(self._actual.values()),
-            "application_retries": 0,
-        }
-
-
-class K3EndpointBudget:
-    """Frozen four-source endpoint budget with separate protocol/HTTP evidence."""
+class K4EndpointBudget:
+    """Frozen three-role endpoint budget with separate protocol/HTTP evidence."""
 
     def __init__(
         self,
@@ -102,7 +40,7 @@ class K3EndpointBudget:
         total_limit: int,
     ) -> None:
         if set(per_source_limits) != set(PRODUCTION_UPSTREAMS):
-            raise ValueError("K3 budget requires exact production upstream limits")
+            raise ValueError("K4 budget requires exact production upstream limits")
         if isinstance(total_limit, bool) or not isinstance(total_limit, int) or total_limit < 0:
             raise ValueError("total_limit must be a non-negative integer")
         limits = dict(per_source_limits)
@@ -118,26 +56,20 @@ class K3EndpointBudget:
         self._planned: Counter[DataUpstream] = Counter()
         self._actual: Counter[DataUpstream] = Counter()
         self._primary_frozen: set[DataUpstream] = set()
-        self._exception_expected: dict[DataUpstream, list[tuple[str, str, str, int]]] = {}
+        self._exception_expected: list[tuple[str, str, str, int]] | None = None
 
     def freeze_primary(self, upstream: DataUpstream, *, chunk_count: int) -> None:
-        if upstream not in {DataUpstream.BAOSTOCK, DataUpstream.EASTMONEY}:
-            raise ValueError("primary source must be BAOSTOCK or EASTMONEY")
+        if upstream not in {DataUpstream.BAOSTOCK, DataUpstream.TENCENT}:
+            raise ValueError("primary source must be BAOSTOCK or TENCENT")
         if upstream in self._primary_frozen:
             raise ValueError("primary source plan is already frozen")
         self._validate_count(upstream, chunk_count)
         self._planned[upstream] = chunk_count
         self._primary_frozen.add(upstream)
 
-    def preflight_exception(
-        self,
-        upstream: DataUpstream,
-        requests: tuple[tuple[str, str, str, int], ...],
-    ) -> None:
-        if upstream not in {DataUpstream.TENCENT, DataUpstream.SINA}:
-            raise ValueError("exception source must be TENCENT or SINA")
-        if upstream in self._exception_expected:
-            raise ValueError("exception source plan is already frozen")
+    def preflight_exception(self, requests: tuple[tuple[str, str, str, int], ...]) -> None:
+        if self._exception_expected is not None:
+            raise ValueError("Sina exception plan is already frozen")
         if not isinstance(requests, tuple) or any(
             not isinstance(item, tuple)
             or len(item) != 4
@@ -149,16 +81,12 @@ class K3EndpointBudget:
         ):
             raise ValueError("exception requests are invalid")
         count = sum(item[3] for item in requests)
-        self._validate_count(upstream, count)
-        self._planned[upstream] = count
-        self._exception_expected[upstream] = list(requests)
+        self._validate_count(DataUpstream.SINA, count)
+        self._planned[DataUpstream.SINA] = count
+        self._exception_expected = list(requests)
 
-    def consume_exception(
-        self,
-        upstream: DataUpstream,
-        request: tuple[str, str, str, int],
-    ) -> None:
-        expected = self._exception_expected.get(upstream)
+    def consume_exception(self, request: tuple[str, str, str, int]) -> None:
+        expected = self._exception_expected
         if expected is None or not expected or expected[0] != request:
             raise NetworkBudgetExceededError
         expected.pop(0)
@@ -182,6 +110,8 @@ class K3EndpointBudget:
             upstream.value: self._actual[upstream] for upstream in PRODUCTION_UPSTREAMS
         }
         bao_endpoints = self._planned[DataUpstream.BAOSTOCK]
+        tencent_endpoints = self._planned[DataUpstream.TENCENT]
+        sina_endpoints = self._planned[DataUpstream.SINA]
         return {
             "endpoint_limits": {
                 "total": self._total_limit,
@@ -200,13 +130,11 @@ class K3EndpointBudget:
                 "total": bao_endpoints * 3,
             },
             "akshare_locked_source_http_upper_bound": {
-                "EASTMONEY": self._planned[DataUpstream.EASTMONEY],
-                "TENCENT": self._planned[DataUpstream.TENCENT] * 3,
-                "SINA": self._planned[DataUpstream.SINA] * 2,
+                "TENCENT": tencent_endpoints * _AKSHARE_HTTP_PER_ENDPOINT[DataUpstream.TENCENT],
+                "SINA": sina_endpoints * _AKSHARE_HTTP_PER_ENDPOINT[DataUpstream.SINA],
                 "total": (
-                    self._planned[DataUpstream.EASTMONEY]
-                    + self._planned[DataUpstream.TENCENT] * 3
-                    + self._planned[DataUpstream.SINA] * 2
+                    tencent_endpoints * _AKSHARE_HTTP_PER_ENDPOINT[DataUpstream.TENCENT]
+                    + sina_endpoints * _AKSHARE_HTTP_PER_ENDPOINT[DataUpstream.SINA]
                 ),
             },
             "application_retries": 0,
@@ -222,8 +150,4 @@ class K3EndpointBudget:
             raise NetworkBudgetExceededError
 
 
-__all__ = [
-    "EndpointInvocationBudget",
-    "K3EndpointBudget",
-    "NetworkBudgetExceededError",
-]
+__all__ = ["K4EndpointBudget", "NetworkBudgetExceededError"]

@@ -17,7 +17,11 @@ from quantking.data.adapters.sources.baostock import (
     BaostockSessionRunner,
 )
 from quantking.data.adapters.sources.baostock_worker import BAOSTOCK_FIELDS, run_session
-from quantking.data.adapters.sources.contracts import SourceAdapterError, SourceErrorCode
+from quantking.data.adapters.sources.contracts import (
+    SourceAdapterError,
+    SourceErrorCode,
+    SupplierResponse,
+)
 from quantking.data.adapters.sources.parameters import DailyBarRequest
 from quantking.data.incremental import FetchChunk
 from quantking.data.models import DataProvider, DatasetKind, DataUpstream
@@ -147,6 +151,101 @@ def test_adapter_keeps_official_preclose_raw_but_derives_canonical_previous_clos
 
 
 _FIELD_INDEX = {field: index for index, field in enumerate(BAOSTOCK_FIELDS)}
+
+
+def _suspended_row(day: str, close: str) -> tuple[str, ...]:
+    """BaoStock suspended-day placeholder (K4C-R3-R1 diagnostic shape)."""
+    values = {
+        "date": day,
+        "code": "sh.600000",
+        "open": close,
+        "high": close,
+        "low": close,
+        "close": close,
+        "preclose": close,
+        "volume": "",
+        "amount": "",
+        "adjustflag": "3",
+        "tradestatus": "0",
+        "isST": "0",
+    }
+    return tuple(values[field] for field in BAOSTOCK_FIELDS)
+
+
+def _adapter_response(
+    rows: tuple[tuple[str, ...], ...],
+    *,
+    end: date,
+) -> SupplierResponse:
+    result = BaostockSessionResult(
+        rows=rows,
+        distribution_version="0.9.3",
+        runtime_version="00.9.30",
+        login_messages=1,
+        query_messages=1,
+        logout_messages=1,
+        complete=True,
+        partial_reason=None,
+    )
+    runner = _StubRunner(result)
+    adapter = BaostockDailyBarAdapter(
+        runner=runner,  # type: ignore[arg-type]
+        clock=lambda: UtcTimestamp(datetime(2026, 8, 12, tzinfo=UTC)),
+    )
+    chunk = FetchChunk(
+        sequence=7,
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        scope=("600000.SH",),
+        start=TradingDate(end),
+        end=TradingDate(end),
+        request_sha256="a" * 64,
+    )
+    return BaostockMarketDataGateway(adapter).fetch(chunk)
+
+
+def test_suspended_placeholder_row_is_dropped_without_schema_drift() -> None:
+    response = _adapter_response(
+        (
+            _row("2026-07-15", "53.50", official_preclose="53.00"),
+            _suspended_row("2026-07-16", "53.50"),
+        ),
+        end=date(2026, 7, 16),
+    )
+    assert response.complete is True
+    assert response.records == ()  # the suspended day carries no bar
+    assert response.upstream_row_count == 2  # raw rows stay verbatim
+
+
+def test_suspended_placeholder_does_not_feed_next_pre_close() -> None:
+    response = _adapter_response(
+        (
+            _row("2026-07-15", "53.50", official_preclose="53.00"),
+            _suspended_row("2026-07-16", "60.00"),  # filled close must be ignored
+            _row("2026-07-17", "54.00", official_preclose="99.99"),
+        ),
+        end=date(2026, 7, 17),
+    )
+    assert [record["date"] for record in response.records] == ["2026-07-17"]
+    assert response.records[0]["pre_close"] == 53.5
+
+
+def test_suspended_row_with_volume_is_schema_drift() -> None:
+    row = list(_suspended_row("2026-07-16", "53.50"))
+    row[BAOSTOCK_FIELDS.index("volume")] = "100"
+    with pytest.raises(SourceAdapterError) as caught:
+        _adapter_response(
+            (_row("2026-07-15", "53.50", official_preclose="53.00"), tuple(row)),
+            end=date(2026, 7, 16),
+        )
+    assert caught.value.code is SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT
+
+
+def test_trading_row_with_empty_volume_is_schema_drift() -> None:
+    row = list(_row("2026-07-16", "53.50", official_preclose="53.00"))
+    row[BAOSTOCK_FIELDS.index("volume")] = ""
+    with pytest.raises(SourceAdapterError) as caught:
+        _adapter_response((tuple(row),), end=date(2026, 7, 16))
+    assert caught.value.code is SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT
 
 
 class _PagedResult:

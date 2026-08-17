@@ -50,12 +50,12 @@ const api = (overrides: Partial<WebApi> = {}): WebApi => ({
 });
 
 describe("Stage 1 data center", () => {
-  it("offers only the three fixed AKShare upstreams", async () => {
+  it("offers only the three fixed production upstreams", async () => {
     const getData = vi.fn(async () => ({ items: [], next_cursor: null }));
     render(<App api={api({ getData })} eventSourceFactory={() => new SilentEventSource()} />);
     fireEvent.click(screen.getByRole("button", { name: "批次" }));
     const selector = await screen.findByLabelText("batches upstream");
-    expect(selector).toHaveTextContent("EASTMONEY");
+    expect(selector).toHaveTextContent("BAOSTOCK");
     expect(selector).toHaveTextContent("TENCENT");
     expect(selector).toHaveTextContent("SINA");
     expect(screen.queryByRole("button", { name: "数据源" })).not.toBeInTheDocument();
@@ -196,7 +196,7 @@ describe("Stage 1 data center", () => {
             schema_version: "daily-bar.v1",
             rule_version: "quality.v1",
           },
-          source_batches: [{ batch_id: "data_batch:primary", upstream: "EASTMONEY" }],
+          source_batches: [{ batch_id: "data_batch:primary", upstream: "BAOSTOCK" }],
           quality_runs: [{ run_id: "data_quality:passed", status: "PASSED" }],
           difference_reports: [{ report_id: "data_diff:bound" }],
           resolution: { run_id: "data_resolution:bound", status: "PUBLISHED" },
@@ -212,7 +212,7 @@ describe("Stage 1 data center", () => {
     fireEvent.click(await screen.findByRole("button", { name: "显式预览" }));
     expect(await screen.findByText("data_version:parent")).toBeInTheDocument();
     expect(screen.getAllByText(/data_batch:primary/)).toHaveLength(2);
-    expect(screen.getByText("EASTMONEY")).toBeInTheDocument();
+    expect(screen.getByText("BAOSTOCK")).toBeInTheDocument();
     expect(screen.getByText("data_diff:bound")).toBeInTheDocument();
     expect(screen.getByText("data_resolution:bound")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "预览下一页" }));

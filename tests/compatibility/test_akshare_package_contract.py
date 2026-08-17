@@ -14,14 +14,6 @@ def _parameter_names(function: Callable[..., object]) -> tuple[str, ...]:
 
 def test_installed_akshare_version_and_endpoint_signatures_are_pinned() -> None:
     assert akshare.__version__ == "1.18.83"
-    assert _parameter_names(akshare.stock_zh_a_hist) == (
-        "symbol",
-        "period",
-        "start_date",
-        "end_date",
-        "adjust",
-        "timeout",
-    )
     assert _parameter_names(akshare.stock_zh_a_hist_tx) == (
         "symbol",
         "start_date",
@@ -38,15 +30,9 @@ def test_installed_akshare_version_and_endpoint_signatures_are_pinned() -> None:
 
 
 def test_installed_endpoint_sources_expose_expected_columns_without_pre_close() -> None:
-    eastmoney_source = inspect.getsource(akshare.stock_zh_a_hist)
     tencent_source = inspect.getsource(akshare.stock_zh_a_hist_tx)
     sina_source = inspect.getsource(akshare.stock_zh_a_daily)
 
-    assert all(
-        column in eastmoney_source
-        for column in ("日期", "开盘", "收盘", "最高", "最低", "成交量", "成交额", "涨跌额")
-    )
-    assert "昨收" not in eastmoney_source
     assert all(
         f'"{column}"' in tencent_source
         for column in ("date", "open", "close", "high", "low", "volume", "turnover", "amount")
@@ -70,12 +56,10 @@ def test_installed_endpoint_sources_expose_expected_columns_without_pre_close() 
 
 
 def test_installed_endpoint_sources_disclose_internal_http_shape_without_retry() -> None:
-    eastmoney_source = inspect.getsource(akshare.stock_zh_a_hist)
     tencent_source = inspect.getsource(akshare.stock_zh_a_hist_tx)
     tencent_start_source = inspect.getsource(tencent_module.get_tx_start_year)
     sina_source = inspect.getsource(akshare.stock_zh_a_daily)
 
-    assert eastmoney_source.count("requests.get(") == 1
     assert "get_tx_start_year(symbol=symbol)" in tencent_source
     assert "for year in tqdm(range(range_start, range_end)" in tencent_source
     assert tencent_source.count("requests.get(") == 1
@@ -87,7 +71,7 @@ def test_installed_endpoint_sources_disclose_internal_http_shape_without_retry()
     assert unadjusted_calls.count("requests.get(") == 1
     assert "zh_sina_a_stock_amount_url" in unadjusted_calls
     assert "大量抓取容易封 IP" in sina_source
-    for source in (eastmoney_source, tencent_source, tencent_start_source, sina_source):
+    for source in (tencent_source, tencent_start_source, sina_source):
         assert "retry" not in source.lower()
 
 

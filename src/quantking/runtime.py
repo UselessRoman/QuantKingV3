@@ -14,7 +14,7 @@ from quantking.common.config import AppSettings, load_settings
 from quantking.common.errors import ConfigurationError
 from quantking.common.time import utc_now
 from quantking.data.adapters.eod_base import PublishedEodBaseResolver
-from quantking.data.adapters.eod_k2 import EodWorkerHandler, register_eod_handler
+from quantking.data.adapters.eod_worker import EodWorkerHandler, register_eod_handler
 from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
@@ -49,16 +49,15 @@ from quantking.data.center import (
     ResolutionVerifierPort,
 )
 from quantking.data.comparison.verifier import DifferenceReportVerifier
-from quantking.data.eod.release import S107K3_CODE_VERSION
+from quantking.data.eod.release import S107K4_CODE_VERSION
 from quantking.data.eod.service import EodCommandService, EodExecutionConfig
 from quantking.data.models import DataUpstream
 from quantking.data.quality.artifacts import QualityArtifactWriter
 from quantking.data.quality.engine import QualityEngine
 from quantking.data.quality.references import PublishedReferenceLoader
-from quantking.data.quality.rules import s108_daily_rule_set
+from quantking.data.quality.rules import k4_daily_rule_set
 from quantking.data.quality.runner import QualityRunner
 from quantking.data.resolution.artifacts import ResolutionArtifactVerifier
-from quantking.data.resolution.models import K2_RESOLUTION_RULE_VERSION
 from quantking.jobs.adapters.persistence.sqlite import (
     SqliteUnitOfWorkFactory,
     create_sqlite_engine,
@@ -71,7 +70,7 @@ from quantking.web.app import create_app
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = _REPOSITORY_ROOT / "configs" / "default.toml"
-EOD_CODE_VERSION = S107K3_CODE_VERSION
+EOD_CODE_VERSION = S107K4_CODE_VERSION
 EXPECTED_DATABASE_REVISION = "20260810_0014"
 WORKER_LEASE_TIMEOUT = timedelta(minutes=2)
 _S108_BUSINESS_ROOTS = ("metadata", "raw", "artifacts", "warehouse")
@@ -173,17 +172,13 @@ def build_eod_runtime(
     jobs = JobService(SqliteUnitOfWorkFactory(jobs_engine), retry_policy=retry)
     data_uow = DataSqliteUnitOfWorkFactory(data_engine)
     if gateway is not None:
-        raise ConfigurationError("K3 runtime requires an explicit four-source gateways mapping")
+        raise ConfigurationError("K4 runtime requires an explicit three-role gateways mapping")
     selected_execution_config = execution_config or EodExecutionConfig.production(
         code_version=EOD_CODE_VERSION,
         settings=settings,
     )
     selected_gateways = dict(gateways or _gateways())
-    expected_upstreams = (
-        AKSHARE_RUNTIME_UPSTREAMS
-        if selected_execution_config.resolution_rule_version == K2_RESOLUTION_RULE_VERSION
-        else PRODUCTION_UPSTREAMS
-    )
+    expected_upstreams = PRODUCTION_UPSTREAMS
     if set(selected_gateways) != set(expected_upstreams):
         raise ConfigurationError("runtime gateways do not match the frozen source route")
     ingestions = {
@@ -196,12 +191,13 @@ def build_eod_runtime(
         )
         for upstream in expected_upstreams
     }
+    reference_loader = PublishedReferenceLoader(
+        data_root=data_root,
+        uow_factory=data_uow,
+    )
     selected_quality_runner = quality_runner or QualityRunner(
-        engine=QualityEngine(rule_set=s108_daily_rule_set()),
-        reference_loader=PublishedReferenceLoader(
-            data_root=data_root,
-            uow_factory=data_uow,
-        ),
+        engine=QualityEngine(rule_set=k4_daily_rule_set()),
+        reference_loader=reference_loader,
     )
     handler = EodWorkerHandler(
         ingestions=ingestions,
@@ -215,6 +211,7 @@ def build_eod_runtime(
         data_root=data_root,
         clock=utc_now,
         log_root=data_root,
+        reference_loader=reference_loader,
     )
     registry = WorkerRegistry()
     register_eod_handler(registry, handler)

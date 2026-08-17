@@ -28,6 +28,7 @@ from quantking.data.models import (
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _MANAGED_RELATIVE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./=-]*\Z")
 S108_DAILY_RULE_VERSION = "quality-rules.daily-bar-first-release.v1"
+K4_DAILY_RULE_VERSION = "quality-rules.daily-bar-unadjusted.k4.v1"
 
 
 def _sha256(value: str, *, field_name: str) -> str:
@@ -143,6 +144,7 @@ class QualityRequest:
     coverage_end: TradingDate
     reference_data: Mapping[str, ReferenceDataBinding]
     empty_result: EmptyResultInfo | None
+    security_exceptions: Mapping[str, tuple[tuple[TradingDate, TradingDate], ...]] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.dataset, DatasetKind):
@@ -194,6 +196,29 @@ class QualityRequest:
         object.__setattr__(self, "reference_data", sorted_reference_data)
         if self.empty_result is not None and not isinstance(self.empty_result, EmptyResultInfo):
             raise TypeError("empty_result must be an EmptyResultInfo or None")
+        if self.security_exceptions is not None:
+            if not isinstance(self.security_exceptions, Mapping):
+                raise TypeError("security_exceptions must be a mapping or None")
+            normalized_exceptions: dict[str, tuple[tuple[TradingDate, TradingDate], ...]] = {}
+            for code, ranges in self.security_exceptions.items():
+                if not isinstance(code, str) or not code.strip():
+                    raise ValueError("security_exceptions key must be non-empty text")
+                if not isinstance(ranges, tuple):
+                    raise TypeError("security_exceptions value must be a tuple of date ranges")
+                normalized_ranges: list[tuple[TradingDate, TradingDate]] = []
+                for start, end in ranges:
+                    if not isinstance(start, TradingDate) or not isinstance(end, TradingDate):
+                        raise TypeError("security exception bounds must be TradingDate values")
+                    if end.value < start.value:
+                        raise ValueError("security exception end must not precede start")
+                    normalized_ranges.append((start, end))
+                normalized_ranges.sort(key=lambda pair: (pair[0].value, pair[1].value))
+                normalized_exceptions[code] = tuple(normalized_ranges)
+            object.__setattr__(
+                self,
+                "security_exceptions",
+                MappingProxyType(dict(sorted(normalized_exceptions.items()))),
+            )
         # Dataset-specific required reference data.
         required = _required_reference_data(self.dataset, self.rule_version)
         missing = required - set(self.reference_data)
@@ -201,10 +226,12 @@ class QualityRequest:
             raise ValueError(
                 f"dataset {self.dataset.value} requires reference_data keys: {sorted(missing)}"
             )
+        if self.security_exceptions and self.rule_version != K4_DAILY_RULE_VERSION:
+            raise ValueError("security_exceptions are bound to the K4 daily rule version")
 
     def to_deterministic_dict(self) -> dict[str, object]:
         """Render a stable, JSON-serializable view used for run_id derivation."""
-        return {
+        value: dict[str, object] = {
             "dataset": self.dataset.value,
             "version_id": str(self.version_id),
             "rule_version": self.rule_version,
@@ -233,6 +260,12 @@ class QualityRequest:
                 }
             ),
         }
+        if self.rule_version == K4_DAILY_RULE_VERSION:
+            value["security_exceptions"] = {
+                code: [[str(start), str(end)] for start, end in ranges]
+                for code, ranges in (self.security_exceptions or {}).items()
+            }
+        return value
 
 
 def _required_reference_data(dataset: DatasetKind, rule_version: str) -> frozenset[str]:
@@ -241,6 +274,10 @@ def _required_reference_data(dataset: DatasetKind, rule_version: str) -> frozens
         if dataset is not DatasetKind.DAILY_BAR_UNADJUSTED:
             raise ValueError("S1-08 daily rule version supports daily_bar_unadjusted only")
         return frozenset()
+    if rule_version == K4_DAILY_RULE_VERSION:
+        if dataset is not DatasetKind.DAILY_BAR_UNADJUSTED:
+            raise ValueError("K4 daily rule version supports daily_bar_unadjusted only")
+        return frozenset({"exchange_calendar"})
     if dataset is DatasetKind.DAILY_BAR_UNADJUSTED:
         return frozenset({"exchange_calendar"})
     if dataset is DatasetKind.ADJUSTMENT_FACTOR:
@@ -367,6 +404,7 @@ class QualityRunArtifact:
 
 
 __all__: tuple[str, ...] = (
+    "K4_DAILY_RULE_VERSION",
     "S108_DAILY_RULE_VERSION",
     "QualityOutcomeResult",
     "QualityRequest",

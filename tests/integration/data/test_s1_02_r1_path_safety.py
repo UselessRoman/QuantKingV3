@@ -162,10 +162,10 @@ class TestRawPathComponentRejection:
     def test_unsafe_component_is_rejected(self, tmp_path: Path, field: str, value: str) -> None:
         publisher = RawBatchPublisher(data_root=tmp_path)
         kwargs: dict[str, object] = {
-            "source": "eastmoney",
+            "source": "tencent",
             "dataset": "daily_bar_unadjusted",
             "batch_id": "b-2026-07-16-001",
-            "adapter_version": "eastmoney-probe-1",
+            "adapter_version": "tencent-probe-1",
             "request_params": {"code": "000001.SZ"},
             "files": (_file("rows/000001.SZ.parquet", b"AAA"),),
         }
@@ -186,7 +186,7 @@ class TestRawPathComponentRejection:
                     source="../../escape",
                     dataset="daily_bar_unadjusted",
                     batch_id="b-2026-07-16-002",
-                    adapter_version="eastmoney-probe-1",
+                    adapter_version="tencent-probe-1",
                     request_params={"code": "000001.SZ"},
                     files=(_file("rows/000001.SZ.parquet", b"AAA"),),
                 )
@@ -203,10 +203,10 @@ class TestRawPathComponentRejection:
         """A failed root-boundary check must happen before any directory is created."""
         publisher = RawBatchPublisher(data_root=tmp_path)
         request = RawBatchPublishRequest(
-            source="eastmoney",
+            source="tencent",
             dataset="daily_bar_unadjusted",
             batch_id="b-2026-07-16-preflight",
-            adapter_version="eastmoney-probe-1",
+            adapter_version="tencent-probe-1",
             request_params={"code": "000001.SZ"},
             files=(_file("rows/000001.SZ.parquet", b"AAA"),),
         )
@@ -291,8 +291,8 @@ class TestSymlinkJunctionRejection:
         # Create the directory tree up to where the publisher would write,
         # then replace an intermediate component with a junction.
         (tmp_path / "raw").mkdir()
-        (tmp_path / "raw" / "eastmoney").mkdir()
-        junction = tmp_path / "raw" / "eastmoney" / "evil-junction"
+        (tmp_path / "raw" / "tencent").mkdir()
+        junction = tmp_path / "raw" / "tencent" / "evil-junction"
         try:
             _make_junction(junction, outside)
         except OSError as error:
@@ -305,10 +305,10 @@ class TestSymlinkJunctionRejection:
         with pytest.raises((InvalidPathError, Exception)):
             publisher.publish(
                 RawBatchPublishRequest(
-                    source="eastmoney",
+                    source="tencent",
                     dataset="evil-junction",
                     batch_id="b-2026-07-16-003",
-                    adapter_version="eastmoney-probe-1",
+                    adapter_version="tencent-probe-1",
                     request_params={"code": "000001.SZ"},
                     files=(_file("rows/000001.SZ.parquet", b"AAA"),),
                 )

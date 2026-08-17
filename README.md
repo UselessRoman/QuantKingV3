@@ -35,8 +35,23 @@ BaoStock(A) + AKShare/Tencent(B) + AKShare/Sina(C) + XTQuant legacy DATA_ONLY
 
 Stage 0 已完成。Stage 1 的 S1-01～S1-06、K1 和 K2 已完成主验收；S1-08 首次正式 Job 因
 量额零容差被阻断，没有发布版本。K3 四角色离线基线已完成；东财与 FTShare 已分别由
-ADR-021、ADR-020 退出目标路线。Stage 1 现在只按 `S1-07K4 → S1-08R2 → S1-08R3`
-顺序收口；旧根尚未读取。Stage 1 尚未完成，Stage 2 未开始。
+ADR-021、ADR-020 退出目标路线。S1-07K4 已完成三角色离线重构；K4C 第一次代表性真实三源
+实测经独立验收不通过（S1-07K4C-R1，历史事实）；此后 R1 修复、K4C-R2 真实实测（36/36
+成功、sufficient=false 如实记录）、K4C-R3（ADR-022 + Phase B 9/9）与 K4C-R4（ADR-023）
+依次交付，**K4C-R4 已于 2026-08-16 独立验收通过**，
+`comparison-thresholds.daily-bar-unadjusted.k4.v1` 已按用户决定接受重新冻结（ADR-024）。
+K4D inventory dry-run 已冻结并按其 plan SHA 完成真实只读 inventory（2026-08-16 一次授权：
+5,208 文件全部可读、零读取错误、与 Stage 0 基线 5,208 文件/527,708,270 字节差异 0/0）；
+**K4D 真实 pilot 两次 attempt 分别于 2026-08-16/08-17 获授权执行并失败即停（ADR-026；
+数据根零写入、授权已消费）**；**旧 XTQuant 日线迁移已按用户决定拒绝并完成 K4D 决策收口
+（ADR-027）：第 3 次 pilot、全量诊断与 full 均不执行，`XTQUANT_LEGACY` 不进入发布链**。
+**S1-07K4 已于 2026-08-17 经 K4E 独立验收通过并形成单一 K4 提交**
+（[S1-07K4 验收记录](docs/stage1/S1-07K4_ACCEPTANCE.md)）。
+Stage 1 现在只按
+`S1-07K4（已完成）→ S1-08R2（下一步）→ S1-08R3`
+顺序收口；旧根已完成只读清单，两次受管导入 attempt 均失败即停，迁移已按 ADR-027 拒绝。
+Stage 1 尚未完成，Stage 2
+未开始。
 
 - [总体架构](docs/ARCHITECTURE.md)
 - [架构决策](docs/DECISIONS.md)

@@ -6,13 +6,23 @@ from quantking.data.eod.contracts import EodPublishIntent, EodRunRequest
 from quantking.data.eod.fingerprint import eod_input_fingerprint
 from quantking.data.eod.frozen import FrozenEodCommand, FrozenEodDataset
 from quantking.data.models import DatasetKind
-from quantking.data.resolution.models import K2_RESOLUTION_RULE_VERSION, K3_RESOLUTION_RULE_VERSION
+from quantking.data.resolution.models import (
+    K2_RESOLUTION_RULE_VERSION,
+    K3_RESOLUTION_RULE_VERSION,
+    K4_RESOLUTION_RULE_VERSION,
+)
 
 REAL_MANIFEST_SHA = "1" * 64
 OTHER_MANIFEST_SHA = "2" * 64
 
 
-def _command(*, resolution_rule: str, legacy_sha: str | None) -> FrozenEodCommand:
+def _command(
+    *,
+    resolution_rule: str,
+    legacy_sha: str | None,
+    source_route: str = "BAO-EAST-TX-SINA.k3.v1",
+    akshare_unit_policy: str | None = None,
+) -> FrozenEodCommand:
     return FrozenEodCommand(
         request=EodRunRequest(
             start_date=date(2026, 8, 10),
@@ -27,9 +37,10 @@ def _command(*, resolution_rule: str, legacy_sha: str | None) -> FrozenEodComman
         adapter_version="baostock-akshare-daily-bar.k3.v1",
         rule_version="data-quality.daily-bar.s1-08.v1",
         resolution_rule_version=resolution_rule,
-        source_route_version="BAO-EAST-TX-SINA.k3.v1",
+        source_route_version=source_route,
         baostock_version="0.9.3",
         baostock_unit_policy_version="baostock-0.9.3-returned-units.v1",
+        akshare_unit_policy_version=akshare_unit_policy,
         planner_lookback_days=0,
         adapter_context_lookback_days=15,
         max_days_per_chunk=31,
@@ -97,3 +108,68 @@ def test_k3_fingerprint_differs_from_legacy_k2_fingerprint() -> None:
     ) == eod_input_fingerprint(
         _command(resolution_rule=K2_RESOLUTION_RULE_VERSION, legacy_sha=REAL_MANIFEST_SHA)
     )
+
+
+def test_k4_fingerprint_binds_akshare_unit_policy_version() -> None:
+    base = eod_input_fingerprint(
+        _command(
+            resolution_rule=K4_RESOLUTION_RULE_VERSION,
+            legacy_sha=REAL_MANIFEST_SHA,
+            source_route="BAO-TX-SINA.k4.v1",
+            akshare_unit_policy="akshare-1.18.83-returned-units.v1",
+        )
+    )
+    same = eod_input_fingerprint(
+        _command(
+            resolution_rule=K4_RESOLUTION_RULE_VERSION,
+            legacy_sha=REAL_MANIFEST_SHA,
+            source_route="BAO-TX-SINA.k4.v1",
+            akshare_unit_policy="akshare-1.18.83-returned-units.v1",
+        )
+    )
+    other_policy = eod_input_fingerprint(
+        _command(
+            resolution_rule=K4_RESOLUTION_RULE_VERSION,
+            legacy_sha=REAL_MANIFEST_SHA,
+            source_route="BAO-TX-SINA.k4.v1",
+            akshare_unit_policy="akshare-1.18.84-returned-units.v1",
+        )
+    )
+    assert base == same
+    assert base != other_policy
+    assert len(base) == 64
+
+
+def test_k4_fingerprint_binds_source_route() -> None:
+    base = eod_input_fingerprint(
+        _command(
+            resolution_rule=K4_RESOLUTION_RULE_VERSION,
+            legacy_sha=REAL_MANIFEST_SHA,
+            source_route="BAO-TX-SINA.k4.v1",
+            akshare_unit_policy="akshare-1.18.83-returned-units.v1",
+        )
+    )
+    other_route = eod_input_fingerprint(
+        _command(
+            resolution_rule=K4_RESOLUTION_RULE_VERSION,
+            legacy_sha=REAL_MANIFEST_SHA,
+            source_route="BAO-TX-SINA.k4.v2",
+            akshare_unit_policy="akshare-1.18.83-returned-units.v1",
+        )
+    )
+    assert base != other_route
+
+
+def test_k4_fingerprint_differs_from_k3_fingerprint() -> None:
+    k4 = eod_input_fingerprint(
+        _command(
+            resolution_rule=K4_RESOLUTION_RULE_VERSION,
+            legacy_sha=REAL_MANIFEST_SHA,
+            source_route="BAO-TX-SINA.k4.v1",
+            akshare_unit_policy="akshare-1.18.83-returned-units.v1",
+        )
+    )
+    k3 = eod_input_fingerprint(
+        _command(resolution_rule=K3_RESOLUTION_RULE_VERSION, legacy_sha=REAL_MANIFEST_SHA)
+    )
+    assert k4 != k3

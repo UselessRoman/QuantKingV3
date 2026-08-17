@@ -84,7 +84,6 @@ def uow_factory(tmp_path: Path) -> DataSqliteUnitOfWorkFactory:
 
 def _succeeded_batch(*, source: DataUpstream, batch_id=None) -> IngestionBatch:
     endpoint = {
-        DataUpstream.EASTMONEY: "stock_zh_a_hist",
         DataUpstream.TENCENT: "stock_zh_a_hist_tx",
         DataUpstream.SINA: "stock_zh_a_daily",
     }[source]
@@ -158,7 +157,7 @@ class TestDifferenceReportArtifactDirectory:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="EASTMONEY",
+            primary_source="SINA",
             fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
@@ -201,7 +200,7 @@ class TestDifferenceReportArtifactDirectory:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="EASTMONEY",
+            primary_source="SINA",
             fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
@@ -247,7 +246,7 @@ class TestDifferenceReportArtifactDirectory:
         request = CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version="daily_bar_unadjusted.v1",
-            primary_source="EASTMONEY",
+            primary_source="SINA",
             fallback_source="TENCENT",
             primary_version_id=new_entity_id("data_version"),
             fallback_version_id=new_entity_id("data_version"),
@@ -296,7 +295,7 @@ class TestDifferenceReportRepositoryBinding:
         # the DifferenceReport domain model can be constructed with valid
         # bindings. The primary_batch_id in the report will deliberately
         # reference a batch that does NOT exist in the database.
-        primary_batch = _succeeded_batch(source=DataUpstream.EASTMONEY)
+        primary_batch = _succeeded_batch(source=DataUpstream.SINA)
         fallback_batch = _succeeded_batch(source=DataUpstream.TENCENT)
         primary_version = _building_version()
         fallback_version = _building_version()
@@ -362,7 +361,7 @@ class TestDifferenceReportRepositoryBinding:
         report = DifferenceReport(
             report_id=new_entity_id("data_diff"),
             version_id=primary_version.version_id,
-            primary_source=DataUpstream.EASTMONEY,
+            primary_source=DataUpstream.SINA,
             fallback_source=DataUpstream.TENCENT,
             created_at=utc_now(),
             field_differences={},

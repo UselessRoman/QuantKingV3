@@ -8,6 +8,9 @@ __pycache__/
 .coverage
 htmlcov/
 dist/
+
+# Local sandbox scratch (left by confined gate runs; cannot be removed by confined tooling)
+.gate-tmp/
 build/
 *.egg-info/
 

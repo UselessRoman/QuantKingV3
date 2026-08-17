@@ -12,10 +12,12 @@ from typing import Protocol
 from quantking.common.config import AppSettings
 from quantking.data.adapters.sources.baostock import BAOSTOCK_UNIT_POLICY_VERSION
 from quantking.data.adapters.sources.baostock_worker import BAOSTOCK_DISTRIBUTION_VERSION
+from quantking.data.adapters.sources.units import AKSHARE_UNIT_POLICY_VERSION
 from quantking.data.eod.contracts import (
     EOD_CONFIG_SCHEMA,
     EOD_JOB_TYPE,
     EOD_REQUEST_MANIFEST_SCHEMA,
+    K4_EOD_CONFIG_SCHEMA,
     EodBaseVersion,
     EodDatasetConfig,
     EodRunRequest,
@@ -26,10 +28,11 @@ from quantking.data.eod.contracts import (
 )
 from quantking.data.eod.frozen import FrozenEodCommandError, parse_frozen_eod_command
 from quantking.data.models import DatasetKind
-from quantking.data.quality.models import S108_DAILY_RULE_VERSION
+from quantking.data.quality.models import K4_DAILY_RULE_VERSION
 from quantking.data.resolution.models import (
     K2_RESOLUTION_RULE_VERSION,
     K3_RESOLUTION_RULE_VERSION,
+    K4_RESOLUTION_RULE_VERSION,
 )
 from quantking.data.schemas import descriptor_for
 from quantking.jobs.models import JobStatus
@@ -51,6 +54,7 @@ class EodExecutionConfig:
     source_route_version: str
     baostock_version: str
     baostock_unit_policy_version: str
+    akshare_unit_policy_version: str
     planner_lookback_days: int
     adapter_context_lookback_days: int
     max_days_per_chunk: int
@@ -72,6 +76,7 @@ class EodExecutionConfig:
             "source_route_version",
             "baostock_version",
             "baostock_unit_policy_version",
+            "akshare_unit_policy_version",
         ):
             value = getattr(self, field)
             if not isinstance(value, str) or _SAFE_VERSION.fullmatch(value) is None:
@@ -116,6 +121,15 @@ class EodExecutionConfig:
                 or self.estimated_baostock_protocol_message_limit != 12
             ):
                 raise ValueError("S1-07K3 network budget must remain 16/4/4/24/12")
+        elif self.resolution_rule_version == K4_RESOLUTION_RULE_VERSION:
+            if (
+                self.endpoint_invocation_limit != 12
+                or self.c_endpoint_invocation_limit != 4
+                or self.d_endpoint_invocation_limit != 0
+                or self.estimated_http_request_limit != 20
+                or self.estimated_baostock_protocol_message_limit != 12
+            ):
+                raise ValueError("S1-07K4 network budget must remain 12/4/0/20/12")
         else:
             raise ValueError("resolution_rule_version is unsupported")
         if self.legacy_import_manifest_sha256 is not None and (
@@ -140,20 +154,21 @@ class EodExecutionConfig:
             raise TypeError("settings must be AppSettings")
         return cls(
             code_version=code_version,
-            adapter_version="baostock-akshare-daily-bar.k3.v1",
-            rule_version=S108_DAILY_RULE_VERSION,
-            resolution_rule_version=K3_RESOLUTION_RULE_VERSION,
-            source_route_version="BAO-EAST-TX-SINA.k3.v1",
+            adapter_version="baostock-akshare-daily-bar.k4.v1",
+            rule_version=K4_DAILY_RULE_VERSION,
+            resolution_rule_version=K4_RESOLUTION_RULE_VERSION,
+            source_route_version="BAO-TX-SINA.k4.v1",
             baostock_version=BAOSTOCK_DISTRIBUTION_VERSION,
             baostock_unit_policy_version=BAOSTOCK_UNIT_POLICY_VERSION,
+            akshare_unit_policy_version=AKSHARE_UNIT_POLICY_VERSION,
             planner_lookback_days=0,
             adapter_context_lookback_days=15,
             max_days_per_chunk=31,
             max_items_per_chunk=1,
-            endpoint_invocation_limit=16,
+            endpoint_invocation_limit=12,
             c_endpoint_invocation_limit=4,
-            d_endpoint_invocation_limit=4,
-            estimated_http_request_limit=24,
+            d_endpoint_invocation_limit=0,
+            estimated_http_request_limit=20,
             estimated_baostock_protocol_message_limit=12,
             legacy_import_manifest_sha256=None,
             datasets={
@@ -172,8 +187,24 @@ class EodExecutionConfig:
         missing = set(selected) - set(self.datasets)
         if missing:
             raise ValueError("selected dataset has no frozen execution config")
-        return {
-            "schema_version": EOD_CONFIG_SCHEMA,
+        config_schema = (
+            K4_EOD_CONFIG_SCHEMA
+            if self.resolution_rule_version == K4_RESOLUTION_RULE_VERSION
+            else EOD_CONFIG_SCHEMA
+        )
+        datasets: dict[str, dict[str, object]] = {}
+        for key in selected:
+            dataset = replace(
+                self.datasets[key],
+                known_coverage=(),
+                base_version=bases.get(key),
+            ).to_dict()
+            if config_schema is not K4_EOD_CONFIG_SCHEMA:
+                # Historical v2/v3 configs never carried security_exceptions.
+                dataset.pop("security_exceptions", None)
+            datasets[key] = dataset
+        payload: dict[str, object] = {
+            "schema_version": config_schema,
             "code_version": self.code_version,
             "adapter_version": self.adapter_version,
             "rule_version": self.rule_version,
@@ -193,16 +224,12 @@ class EodExecutionConfig:
                 self.estimated_baostock_protocol_message_limit
             ),
             "legacy_import_manifest_sha256": self.legacy_import_manifest_sha256,
-            "datasets": {
-                key: replace(
-                    self.datasets[key],
-                    known_coverage=(),
-                    base_version=bases.get(key),
-                ).to_dict()
-                for key in selected
-            },
+            "datasets": datasets,
             "schema_versions": {key: descriptor_for(key).schema_version for key in selected},
         }
+        if config_schema is K4_EOD_CONFIG_SCHEMA:
+            payload["akshare_unit_policy_version"] = self.akshare_unit_policy_version
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,6 +326,10 @@ class EodCommandService:
                 )
             ),
         }
+        if self._config.resolution_rule_version == K4_RESOLUTION_RULE_VERSION:
+            version_manifest["akshare_unit_policy_version"] = (
+                self._config.akshare_unit_policy_version
+            )
         if previous is not None:
             try:
                 frozen_previous = parse_frozen_eod_command(
@@ -323,13 +354,18 @@ class EodCommandService:
         }
         if retry_of_job_id is not None:
             input_manifest["retry_of_job_id"] = retry_of_job_id
+        config_manifest_schema = (
+            K4_EOD_CONFIG_SCHEMA
+            if self._config.resolution_rule_version == K4_RESOLUTION_RULE_VERSION
+            else EOD_CONFIG_SCHEMA
+        )
         outcome = self._jobs.create_job_result(
             CreateJob(
                 job_type=EOD_JOB_TYPE,
                 idempotency_key=idempotency_key,
                 input_manifest=input_manifest,
                 config_manifest={
-                    "schema_version": EOD_CONFIG_SCHEMA,
+                    "schema_version": config_manifest_schema,
                     "config_json": config_json,
                     "config_sha256": config_sha,
                 },

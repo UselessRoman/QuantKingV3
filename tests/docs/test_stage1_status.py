@@ -31,6 +31,8 @@ def _read(relative: str) -> str:
         "S1-04_ACCEPTANCE.md",
         "S1-05_ACCEPTANCE.md",
         "S1-06_ACCEPTANCE.md",
+        "S1-07K4_ACCEPTANCE.md",
+        "S1-07K4_IMPLEMENTATION.md",
     ),
 )
 def test_compact_stage1_documents_exist(name: str) -> None:
@@ -176,6 +178,32 @@ def test_successor_cards_have_single_ownership_and_strict_order() -> None:
         assert phrase in r3
 
 
+def test_k4_task_card_alone_carries_the_rejection_flow_not_the_import_route() -> None:
+    """The K4 task card itself must not mix the retired import route with ADR-027.
+
+    Reading only S1-07K4_TASK.md (never a concatenation with other docs),
+    the retired "managed import into the same ResolutionDecision" flow and
+    the old ownership sentence must be absent, while the ADR-027
+    candidate-evaluation / rejection / exclusion statements must be present.
+    This catches a task card that keeps both the new and the old wording.
+    """
+
+    normalized = " ".join(_read("docs/stage1/S1-07K4_TASK.md").split())
+    for retired in (
+        "旧 XTQuant X → DATA_ONLY 受管导入 → 同一 ResolutionDecision",
+        "本任务拥有来源适配器、仲裁语义、数据质量、代表性实测、比较规则重基线和旧数据迁移。",
+    ):
+        assert retired not in normalized
+    for required in (
+        "旧 XTQuant X → DATA_ONLY 候选评估 → inventory 成功 / pilot 失败 → ADR-027 迁移拒绝",
+        "XTQUANT_LEGACY` 不进入 ResolutionDecision、Raw、staging、Canonical、Warehouse"
+        " 或任何发布链",
+        "旧数据候选评估及拒绝处置",
+        "ADR-027",
+    ):
+        assert required in normalized
+
+
 def test_stage1_history_and_architecture_decisions_remain_auditable() -> None:
     for task in ("S1-01", "S1-02", "S1-03", "S1-04", "S1-05", "S1-06"):
         assert (_STAGE1 / f"{task}_ACCEPTANCE.md").is_file()
@@ -191,3 +219,195 @@ def test_retired_s1_07_modules_and_current_documents_are_absent() -> None:
     assert not list((_ROOT / "src" / "quantking" / "data" / "validation").glob("*.py"))
     assert not list((_ROOT / "tests" / "data" / "validation").glob("*.py"))
     assert not (_STAGE1 / "S1-07C1C1_RUNBOOK.md").exists()
+
+
+def test_current_status_docs_record_k4c_r4_acceptance_and_k4d_readiness() -> None:
+    combined = " ".join(
+        " ".join(_read(relative).split())
+        for relative in (
+            "README.md",
+            "docs/ARCHITECTURE.md",
+            "docs/IMPLEMENTATION_PLAN.md",
+            "docs/DATA_ARCHITECTURE.md",
+            "docs/ROADMAP.md",
+            "docs/stage1/README.md",
+            "docs/stage1/ACCEPTANCE.md",
+            "docs/stage1/CONTRACTS.md",
+        )
+    )
+    assert "K4C-R4 已于 2026-08-16 独立验收通过" in combined
+    assert "ADR-024" in combined
+    assert "K4D inventory dry-run" in combined
+    assert "只读 inventory 已于 2026-08-16 获授权执行" in combined
+    assert "ADR-025" in combined
+    assert "ADR-026" in combined
+    assert "真实 pilot 两次 attempt" in combined
+    assert "失败即停" in combined
+    assert "数据根零写入" in combined
+    for outdated in (
+        "样本选择 BLOCKED",
+        "阈值重新冻结建议待独立验收",
+        "阈值重新验收待独立验收",
+        "阈值重新冻结待独立验收",
+        "真实复测待授权",
+        "真实复测须另行授权",
+        "R3 Phase A 离线完成、样本选择 BLOCKED",
+        "旧根尚未读取",
+        "旧根迁移仍未授权",
+        "K4D 旧根迁移授权",
+        "真实 pilot 未执行",
+        "pilot 成功",
+        "pilot 已完成",
+        "pilot 重试/full",
+        "pilot 修复重试/full",
+        "K4D full 待授权",
+        "full 迁移仍未授权",
+        "重试待修复后授权",
+        "重试须先修复证据链留证",
+        "修订冻结预期或扩大诊断面",
+    ):
+        assert outdated not in combined
+
+
+def test_current_status_docs_record_k4d_migration_rejection_closeout() -> None:
+    """The ADR-027 rejection closeout is the single authoritative K4D state.
+
+    The docs must state that the legacy candidate evaluation finished with a
+    frozen rejection (not a successful migration), that no third pilot, full
+    scan, or full import is pending authorization, and that K4E is next.
+    """
+
+    combined = " ".join(
+        " ".join(_read(relative).split())
+        for relative in (
+            "README.md",
+            "AGENTS.md",
+            "docs/ARCHITECTURE.md",
+            "docs/IMPLEMENTATION_PLAN.md",
+            "docs/DATA_ARCHITECTURE.md",
+            "docs/ROADMAP.md",
+            "docs/DECISIONS.md",
+            "docs/stage1/README.md",
+            "docs/stage1/ACCEPTANCE.md",
+            "docs/stage1/CONTRACTS.md",
+            "docs/stage1/S1-07K4_TASK.md",
+            "docs/stage1/S1-07K4_IMPLEMENTATION.md",
+        )
+    )
+    assert "ADR-027" in combined
+    assert "拒绝旧 XTQuant 日线迁移" in combined
+    assert "K4D 决策收口" in combined
+    assert "评估完成、迁移拒绝" in combined
+    assert "XTQUANT_LEGACY` 不进入发布链" in combined or "XTQUANT_LEGACY` 不进入正式" in combined
+    assert "两次 attempt" in combined
+    assert "PILOT_CANONICAL_COUNT_UNEXPECTED" in combined
+    assert "8,609" in combined
+    for forbidden in (
+        "已成功迁移",
+        "迁移成功",
+        "迁移已完成",
+        "pilot 全部成功并完成迁移",
+        "虚假成功 evidence",
+        "第三次 pilot 已执行",
+        "第 3 次 pilot 已执行",
+    ):
+        assert forbidden not in combined
+
+
+def test_adr_027_rejection_decision_is_recorded_with_frozen_facts() -> None:
+    decisions = _read("docs/DECISIONS.md")
+    assert "ADR-027" in decisions
+    assert "拒绝旧 XTQuant DATA_ONLY 日线迁移" in decisions
+    assert "已接受" in decisions
+    assert "2026-08-17" in decisions
+    for fact in (
+        "不保证任何候选最终可迁移",
+        "8,609 行",
+        "32.9%",
+        "PILOT_CANONICAL_COUNT_UNEXPECTED",
+        "不执行第 3 次 pilot",
+        "不执行 K4D full",
+        "评估完成、迁移拒绝",
+        "不得重放任何历史 authorization_id",
+    ):
+        assert fact in decisions
+
+
+def test_k4d_inventory_dry_run_evidence_is_registered() -> None:
+    text = _read("docs/stage1/evidence/README.md")
+    assert "k4d_inventory_dry_run_2026-08-16.json" in text
+    assert "46272de4" in text
+    assert "f4fee828" in text
+
+
+def test_k4d_pilot_dry_run_evidence_is_registered() -> None:
+    text = _read("docs/stage1/evidence/README.md")
+    assert "k4d_pilot_dry_run_2026-08-16.json" in text
+    assert "c77b2d8e" in text
+    assert "76e928aa" in text
+
+
+def test_current_status_docs_record_k4e_acceptance_with_s1_08_r2_next() -> None:
+    """K4E has passed with a single K4 commit; S1-08R2 is next; Stage 1 is open.
+
+    Current-status sections must not describe K4E as pending acceptance or
+    pending commit, must not describe K4D as a successful migration, and must
+    keep S1-08R2 as the single next step. Dated historical sections that carry
+    their own supersession notes may keep the old wording.
+    """
+
+    current_status = " ".join(
+        " ".join(_read(relative).split())
+        for relative in (
+            "AGENTS.md",
+            "README.md",
+            "docs/ARCHITECTURE.md",
+            "docs/DATA_ARCHITECTURE.md",
+            "docs/IMPLEMENTATION_PLAN.md",
+            "docs/ROADMAP.md",
+            "docs/stage1/README.md",
+            "docs/stage1/ACCEPTANCE.md",
+            "docs/stage1/S1-07K4_TASK.md",
+        )
+    )
+    for required in (
+        "S1-07K4 独立验收通过",
+        "形成单一 K4 提交",
+        "下一步是 S1-08R2",
+        "Stage 1 尚未完成",
+        "Stage 2 未开始",
+    ):
+        assert required in current_status
+    for outdated in (
+        "K4E 独立验收与提交是下一步",
+        "剩余 K4E 独立验收与提交",
+        "剩余 K4E 独立提交",
+        "K4E 独立提交尚未执行",
+        "K4E 独立验收与提交待执行",
+        "K4E 独立提交与 S1-08R2/R3 仍须分别授权",
+        "K4 提交与不可变验收记录尚未完成",
+        "K4E 待验收",
+        "K4E 待提交",
+    ):
+        assert outdated not in current_status
+
+    acceptance = _read("docs/stage1/S1-07K4_ACCEPTANCE.md")
+    for phrase in (
+        "S1-07K4 独立验收通过",
+        "K4D 迁移未成功",
+        "K4D 候选评估及拒绝决策已完成",
+        "b8f4859",
+        "2026-08-17",
+        "本验收记录与 S1-07K4 全部变更位于同一个 K4 提交中",
+        "140978ea3e3f4d9139c15d641c92564af8f58928bf77017117393ce988a04ce2",
+        "b75f27b4096571f04eb790e8cd78f1da1faf174187dc44ab0ca09d20fe1c02e1",
+        "87b04863756a6e92614f62fe26cfb7d8b1b591c101bcc28d902a7fc3c1bdd300",
+        "368 passed",
+    ):
+        assert phrase in acceptance
+    for pending in ("待执行", "待验收", "待提交", "待完成"):
+        assert pending not in acceptance
+
+    matrix = _read("docs/stage1/ACCEPTANCE.md")
+    assert "S1-07K4_ACCEPTANCE.md" in matrix
+    assert "已主验收" in matrix

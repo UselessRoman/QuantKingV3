@@ -1,0 +1,540 @@
+{
+  "application_retries": 0,
+  "attempt_date": "2026-08-15",
+  "elapsed_seconds": 6.016,
+  "failure": {
+    "error_type": "AttributeError",
+    "stable_code": null
+  },
+  "invocations": [
+    {
+      "amount_unit": "cny_yuan",
+      "complete": true,
+      "content_sha256": "df55f0bcd3f4d466d62e6d523f2e1a0093dacc81a5cd1d6e6838dbd68881f523",
+      "contract_version": "baostock-daily-bar.v1",
+      "endpoint": "query_history_k_data_plus",
+      "library_version": "0.9.3",
+      "outcome": "SUCCEEDED",
+      "provider": "BAOSTOCK",
+      "role": "A",
+      "sequence": 1,
+      "stable_code": null,
+      "symbol": "000001.SZ",
+      "target_end": "2026-07-11",
+      "target_row_count": 21,
+      "target_start": "2026-06-11",
+      "unadjusted": true,
+      "unit_policy_version": "baostock-0.9.3-returned-units.v1",
+      "upstream": "BAOSTOCK",
+      "upstream_end": "2026-07-11",
+      "upstream_row_count": 32,
+      "upstream_start": "2026-05-27",
+      "volume_unit": "share"
+    },
+    {
+      "amount_unit": "cny_yuan",
+      "complete": true,
+      "content_sha256": "0bf40ad2efe791cc7a7cd63eadaba99da40d7fbc0eb4681d81207a92423a6479",
+      "contract_version": "baostock-daily-bar.v1",
+      "endpoint": "query_history_k_data_plus",
+      "library_version": "0.9.3",
+      "outcome": "SUCCEEDED",
+      "provider": "BAOSTOCK",
+      "role": "A",
+      "sequence": 2,
+      "stable_code": null,
+      "symbol": "000001.SZ",
+      "target_end": "2026-08-09",
+      "target_row_count": 20,
+      "target_start": "2026-07-12",
+      "unadjusted": true,
+      "unit_policy_version": "baostock-0.9.3-returned-units.v1",
+      "upstream": "BAOSTOCK",
+      "upstream_end": "2026-08-09",
+      "upstream_row_count": 30,
+      "upstream_start": "2026-06-27",
+      "volume_unit": "share"
+    },
+    {
+      "endpoint": "stock_zh_a_hist_tx",
+      "error_type": "AttributeError",
+      "outcome": "FAILED",
+      "provider": "AKSHARE",
+      "role": "B",
+      "sequence": 3,
+      "stable_code": null,
+      "symbol": "000001.SZ",
+      "target_end": "2026-07-11",
+      "target_start": "2026-06-11",
+      "upstream": "TENCENT",
+      "upstream_end": "2026-07-11",
+      "upstream_start": "2026-05-27"
+    }
+  ],
+  "marker": "K4C-REPRESENTATIVE-2026-08-14-v1",
+  "not_called_invocation_count": 33,
+  "plan_facts": {
+    "authorization_marker": "K4C-REPRESENTATIVE-2026-08-14-v1",
+    "chunk_policy": {
+      "max_days_per_chunk": 31,
+      "max_symbols_per_chunk": 1
+    },
+    "dataset": "daily_bar_unadjusted",
+    "hard_timeouts_seconds": {
+      "akshare_session": 60.0,
+      "baostock_session": 20.0
+    },
+    "invocations": [
+      {
+        "endpoint": "query_history_k_data_plus",
+        "provider": "BAOSTOCK",
+        "role": "A",
+        "symbol": "000001.SZ",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "BAOSTOCK",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "query_history_k_data_plus",
+        "provider": "BAOSTOCK",
+        "role": "A",
+        "symbol": "000001.SZ",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "BAOSTOCK",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "stock_zh_a_hist_tx",
+        "provider": "AKSHARE",
+        "role": "B",
+        "symbol": "000001.SZ",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "TENCENT",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "stock_zh_a_hist_tx",
+        "provider": "AKSHARE",
+        "role": "B",
+        "symbol": "000001.SZ",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "TENCENT",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "stock_zh_a_daily",
+        "provider": "AKSHARE",
+        "role": "C",
+        "symbol": "000001.SZ",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "SINA",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "stock_zh_a_daily",
+        "provider": "AKSHARE",
+        "role": "C",
+        "symbol": "000001.SZ",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "SINA",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "query_history_k_data_plus",
+        "provider": "BAOSTOCK",
+        "role": "A",
+        "symbol": "600000.SH",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "BAOSTOCK",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "query_history_k_data_plus",
+        "provider": "BAOSTOCK",
+        "role": "A",
+        "symbol": "600000.SH",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "BAOSTOCK",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "stock_zh_a_hist_tx",
+        "provider": "AKSHARE",
+        "role": "B",
+        "symbol": "600000.SH",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "TENCENT",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "stock_zh_a_hist_tx",
+        "provider": "AKSHARE",
+        "role": "B",
+        "symbol": "600000.SH",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "TENCENT",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "stock_zh_a_daily",
+        "provider": "AKSHARE",
+        "role": "C",
+        "symbol": "600000.SH",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "SINA",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "stock_zh_a_daily",
+        "provider": "AKSHARE",
+        "role": "C",
+        "symbol": "600000.SH",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "SINA",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "query_history_k_data_plus",
+        "provider": "BAOSTOCK",
+        "role": "A",
+        "symbol": "000858.SZ",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "BAOSTOCK",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "query_history_k_data_plus",
+        "provider": "BAOSTOCK",
+        "role": "A",
+        "symbol": "000858.SZ",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "BAOSTOCK",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "stock_zh_a_hist_tx",
+        "provider": "AKSHARE",
+        "role": "B",
+        "symbol": "000858.SZ",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "TENCENT",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "stock_zh_a_hist_tx",
+        "provider": "AKSHARE",
+        "role": "B",
+        "symbol": "000858.SZ",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "TENCENT",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "stock_zh_a_daily",
+        "provider": "AKSHARE",
+        "role": "C",
+        "symbol": "000858.SZ",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "SINA",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "stock_zh_a_daily",
+        "provider": "AKSHARE",
+        "role": "C",
+        "symbol": "000858.SZ",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "SINA",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "query_history_k_data_plus",
+        "provider": "BAOSTOCK",
+        "role": "A",
+        "symbol": "300750.SZ",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "BAOSTOCK",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "query_history_k_data_plus",
+        "provider": "BAOSTOCK",
+        "role": "A",
+        "symbol": "300750.SZ",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "BAOSTOCK",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "stock_zh_a_hist_tx",
+        "provider": "AKSHARE",
+        "role": "B",
+        "symbol": "300750.SZ",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "TENCENT",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "stock_zh_a_hist_tx",
+        "provider": "AKSHARE",
+        "role": "B",
+        "symbol": "300750.SZ",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "TENCENT",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "stock_zh_a_daily",
+        "provider": "AKSHARE",
+        "role": "C",
+        "symbol": "300750.SZ",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "SINA",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "stock_zh_a_daily",
+        "provider": "AKSHARE",
+        "role": "C",
+        "symbol": "300750.SZ",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "SINA",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "query_history_k_data_plus",
+        "provider": "BAOSTOCK",
+        "role": "A",
+        "symbol": "688981.SH",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "BAOSTOCK",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "query_history_k_data_plus",
+        "provider": "BAOSTOCK",
+        "role": "A",
+        "symbol": "688981.SH",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "BAOSTOCK",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "stock_zh_a_hist_tx",
+        "provider": "AKSHARE",
+        "role": "B",
+        "symbol": "688981.SH",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "TENCENT",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "stock_zh_a_hist_tx",
+        "provider": "AKSHARE",
+        "role": "B",
+        "symbol": "688981.SH",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "TENCENT",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "stock_zh_a_daily",
+        "provider": "AKSHARE",
+        "role": "C",
+        "symbol": "688981.SH",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "SINA",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "stock_zh_a_daily",
+        "provider": "AKSHARE",
+        "role": "C",
+        "symbol": "688981.SH",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "SINA",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "query_history_k_data_plus",
+        "provider": "BAOSTOCK",
+        "role": "A",
+        "symbol": "600519.SH",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "BAOSTOCK",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "query_history_k_data_plus",
+        "provider": "BAOSTOCK",
+        "role": "A",
+        "symbol": "600519.SH",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "BAOSTOCK",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "stock_zh_a_hist_tx",
+        "provider": "AKSHARE",
+        "role": "B",
+        "symbol": "600519.SH",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "TENCENT",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "stock_zh_a_hist_tx",
+        "provider": "AKSHARE",
+        "role": "B",
+        "symbol": "600519.SH",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "TENCENT",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      },
+      {
+        "endpoint": "stock_zh_a_daily",
+        "provider": "AKSHARE",
+        "role": "C",
+        "symbol": "600519.SH",
+        "target_end": "2026-07-11",
+        "target_start": "2026-06-11",
+        "upstream": "SINA",
+        "upstream_end": "2026-07-11",
+        "upstream_start": "2026-05-27"
+      },
+      {
+        "endpoint": "stock_zh_a_daily",
+        "provider": "AKSHARE",
+        "role": "C",
+        "symbol": "600519.SH",
+        "target_end": "2026-08-09",
+        "target_start": "2026-07-12",
+        "upstream": "SINA",
+        "upstream_end": "2026-08-09",
+        "upstream_start": "2026-06-27"
+      }
+    ],
+    "lookback_days": 15,
+    "network_budget": {
+      "a_baostock_endpoint_invocations": 12,
+      "application_retries": 0,
+      "b_tencent_endpoint_invocations": 12,
+      "estimated_max_akshare_http_requests": 60,
+      "estimated_max_baostock_protocol_messages": 36,
+      "fail_fast": true,
+      "max_c_sina_endpoint_invocations": 12,
+      "max_endpoint_invocations": 36
+    },
+    "requires_real_network_authorization": true,
+    "sample": {
+      "coverage": {
+        "000001.SZ": "shenzhen_mainboard_baseline",
+        "000858.SZ": "corporate_action_history",
+        "300750.SZ": "chinext_segment",
+        "600000.SH": "shanghai_mainboard_baseline",
+        "600519.SH": "high_price_volume_amount_boundaries",
+        "688981.SH": "star_market_segment"
+      },
+      "measurement_objectives": [
+        "normal_session",
+        "ex_rights_session",
+        "suspension_session",
+        "low_liquidity_session",
+        "volume_amount_boundary",
+        "missing_or_empty_upstream",
+        "shenzhen_code_segments",
+        "shanghai_code_segments"
+      ],
+      "symbols": [
+        "000001.SZ",
+        "600000.SH",
+        "000858.SZ",
+        "300750.SZ",
+        "688981.SH",
+        "600519.SH"
+      ]
+    },
+    "schema": "daily_bar_unadjusted.v1",
+    "schema_version": "s1-07k4c-probe-dry-run.v1",
+    "target_window": {
+      "end": "2026-08-09",
+      "start": "2026-06-11"
+    },
+    "unit_policies": {
+      "akshare": "akshare-1.18.83-returned-units.v1",
+      "baostock": "baostock-0.9.3-returned-units.v1"
+    }
+  },
+  "representative_evidence_sufficient": false,
+  "schema_version": "s1-07k4c-representative-probe-evidence.v1",
+  "stop_policy": "STOP_ON_FIRST_FAILURE",
+  "writes_formal_data_root": false
+}

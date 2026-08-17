@@ -16,8 +16,22 @@ from quantking.data.models import DataProvider, DatasetKind, DataUpstream
 LEGACY_IMPORT_ADAPTER_VERSION = "xtquant-legacy-data-only.k3c.v1"
 LEGACY_IMPORT_MANIFEST_SCHEMA_VERSION = "legacy-import-manifest.k3c.v1"
 LEGACY_INVENTORY_SCHEMA_VERSION = "legacy-inventory.k3c.v1"
+LEGACY_INVENTORY_DRY_RUN_SCHEMA_VERSION = "legacy-inventory-dry-run.k4d.v1"
+# Stage 0 read-only metadata baseline for E:\QuantKing\data\kline\1d. It is a
+# difference-comparison reference only and is never a pass/fail gate.
+LEGACY_STAGE0_BASELINE_FILE_COUNT = 5_208
+LEGACY_STAGE0_BASELINE_TOTAL_BYTES = 527_708_270
+# K3C historical markers remain accepted only for FULL-mode compatibility.
 K3C_SYNTHETIC_AUTHORIZATION_MARKER = "S1-07K3C-SYNTHETIC-FIXTURE-V1"
 K3C_REAL_AUTHORIZATION_MARKER = "S1-07K3C-REAL-MIGRATION-V1"
+# K4D markers: inventory, pilot and full are three separate authorizations
+# that must never be merged into one marker.
+K4D_INVENTORY_SYNTHETIC_MARKER = "S1-07K4D-INVENTORY-SYNTHETIC-FIXTURE-V1"
+K4D_INVENTORY_REAL_MARKER = "S1-07K4D-INVENTORY-REAL-READONLY-V1"
+K4D_PILOT_SYNTHETIC_MARKER = "S1-07K4D-PILOT-SYNTHETIC-FIXTURE-V1"
+K4D_PILOT_REAL_MARKER = "S1-07K4D-PILOT-REAL-MIGRATION-V1"
+K4D_FULL_SYNTHETIC_MARKER = "S1-07K4D-FULL-SYNTHETIC-FIXTURE-V1"
+K4D_FULL_REAL_MARKER = "S1-07K4D-FULL-REAL-MIGRATION-V1"
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _SAFE_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
 _CANONICAL_FIELDS = (
@@ -64,6 +78,42 @@ class LegacyImportMode(StrEnum):
     FULL = "FULL"
 
 
+_MARKERS_BY_MODE: Mapping[LegacyImportMode, frozenset[str]] = MappingProxyType(
+    {
+        LegacyImportMode.INVENTORY: frozenset(
+            {K4D_INVENTORY_SYNTHETIC_MARKER, K4D_INVENTORY_REAL_MARKER}
+        ),
+        LegacyImportMode.PILOT: frozenset({K4D_PILOT_SYNTHETIC_MARKER, K4D_PILOT_REAL_MARKER}),
+        LegacyImportMode.FULL: frozenset(
+            {
+                K4D_FULL_SYNTHETIC_MARKER,
+                K4D_FULL_REAL_MARKER,
+                K3C_SYNTHETIC_AUTHORIZATION_MARKER,
+                K3C_REAL_AUTHORIZATION_MARKER,
+            }
+        ),
+    }
+)
+_REAL_MARKERS = frozenset(
+    {
+        K4D_INVENTORY_REAL_MARKER,
+        K4D_PILOT_REAL_MARKER,
+        K4D_FULL_REAL_MARKER,
+        K3C_REAL_AUTHORIZATION_MARKER,
+    }
+)
+
+
+def marker_is_real(marker: str) -> bool:
+    return marker in _REAL_MARKERS
+
+
+def allowed_markers_for_mode(mode: LegacyImportMode) -> frozenset[str]:
+    if not isinstance(mode, LegacyImportMode):
+        raise TypeError("mode must be a LegacyImportMode")
+    return _MARKERS_BY_MODE[mode]
+
+
 class LegacyEvidenceStatus(StrEnum):
     X_ONLY_UNVERIFIED = "X_ONLY_UNVERIFIED"
     X_A_CONSENSUS = "X_A_CONSENSUS"
@@ -73,24 +123,44 @@ class LegacyEvidenceStatus(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class LegacyImportAuthorization:
-    """Exact roots and phase marker supplied by an authorised entry point."""
+    """Exact roots, phase mode and phase marker supplied by an authorised entry point.
+
+    Inventory, pilot and full are three independent authorizations: the
+    marker must belong to the declared mode and can never unlock another
+    phase. Pilot additionally freezes the fixed representative security set.
+    """
 
     source_root: Path
     staging_root: Path
+    mode: LegacyImportMode
     marker: str
+    pilot_symbols: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_root, Path) or not self.source_root.is_absolute():
             raise ValueError("source_root must be an absolute Path")
         if not isinstance(self.staging_root, Path) or not self.staging_root.is_absolute():
             raise ValueError("staging_root must be an absolute Path")
-        if self.marker not in {
-            K3C_SYNTHETIC_AUTHORIZATION_MARKER,
-            K3C_REAL_AUTHORIZATION_MARKER,
-        }:
-            raise ValueError("legacy import requires an exact explicit authorization marker")
+        if not isinstance(self.mode, LegacyImportMode):
+            raise TypeError("mode must be a LegacyImportMode")
+        if self.marker not in _MARKERS_BY_MODE[self.mode]:
+            raise ValueError("legacy import marker does not authorize the declared mode")
         if self.source_root == self.staging_root:
             raise ValueError("source_root and staging_root must be distinct")
+        if self.pilot_symbols is not None:
+            if self.mode is not LegacyImportMode.PILOT:
+                raise ValueError("pilot_symbols are bound to the PILOT mode")
+            if (
+                not isinstance(self.pilot_symbols, tuple)
+                or not self.pilot_symbols
+                or tuple(sorted(set(self.pilot_symbols))) != self.pilot_symbols
+            ):
+                raise ValueError("pilot_symbols must be a sorted unique non-empty tuple")
+            for symbol in self.pilot_symbols:
+                if not isinstance(symbol, str) or "." not in symbol or not symbol.strip():
+                    raise ValueError("pilot_symbols must be canonical security codes")
+        elif self.mode is LegacyImportMode.PILOT:
+            raise ValueError("PILOT mode requires the fixed representative security set")
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +433,55 @@ class LegacyImportDryRun:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class LegacyInventoryDryRun:
+    """Zero-read plan for a separately authorized INVENTORY execution.
+
+    Building this plan performs no filesystem access at all: it never stats,
+    resolves, walks, or opens the source root and never creates the staging
+    root. The stable ``plan_sha256`` lets a later real authorization bind to
+    exactly this plan.
+    """
+
+    source_root: Path
+    staging_root: Path
+    marker: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_root, Path) or not self.source_root.is_absolute():
+            raise ValueError("source_root must be an absolute Path")
+        if not isinstance(self.staging_root, Path) or not self.staging_root.is_absolute():
+            raise ValueError("staging_root must be an absolute Path")
+        if self.source_root == self.staging_root:
+            raise ValueError("source_root and staging_root must be distinct")
+        if self.marker not in allowed_markers_for_mode(LegacyImportMode.INVENTORY):
+            raise ValueError("inventory dry-run marker does not authorize the INVENTORY mode")
+
+    def to_payload(self) -> dict[str, object]:
+        unsigned: dict[str, object] = {
+            "schema_version": LEGACY_INVENTORY_DRY_RUN_SCHEMA_VERSION,
+            "mode": LegacyImportMode.INVENTORY.value,
+            "provider": DataProvider.XTQUANT_LEGACY.value,
+            "upstream": DataUpstream.XTQUANT.value,
+            "authorization_marker": self.marker,
+            "source_root": str(self.source_root),
+            "managed_staging_root": str(self.staging_root),
+            "candidate_rule": "recursive *.parquet",
+            "follow_symlinks_or_junctions": False,
+            "stage0_baseline_file_count": LEGACY_STAGE0_BASELINE_FILE_COUNT,
+            "stage0_baseline_bytes": LEGACY_STAGE0_BASELINE_TOTAL_BYTES,
+            "stage0_baseline_role": "difference-comparison-only",
+            "service_network_invocation_upper_bound": 0,
+            "application_retries": 0,
+            "reads_source": False,
+            "writes_source": False,
+            "writes_staging": False,
+            "publishes_warehouse": False,
+            "requires_new_authorization_for_execution": True,
+        }
+        return {**unsigned, "plan_sha256": sha256_bytes(canonical_json_bytes(unsigned))}
+
+
 def validate_idempotency_key(value: str) -> str:
     if not isinstance(value, str) or _SAFE_KEY.fullmatch(value) is None:
         raise ValueError("idempotency_key must be a safe stable identifier")
@@ -481,18 +600,30 @@ def semantics_from_payload(value: object) -> LegacyImportSemantics:
 __all__ = [
     "K3C_REAL_AUTHORIZATION_MARKER",
     "K3C_SYNTHETIC_AUTHORIZATION_MARKER",
+    "K4D_FULL_REAL_MARKER",
+    "K4D_FULL_SYNTHETIC_MARKER",
+    "K4D_INVENTORY_REAL_MARKER",
+    "K4D_INVENTORY_SYNTHETIC_MARKER",
+    "K4D_PILOT_REAL_MARKER",
+    "K4D_PILOT_SYNTHETIC_MARKER",
     "LEGACY_IMPORT_ADAPTER_VERSION",
     "LEGACY_IMPORT_MANIFEST_SCHEMA_VERSION",
+    "LEGACY_INVENTORY_DRY_RUN_SCHEMA_VERSION",
+    "LEGACY_STAGE0_BASELINE_FILE_COUNT",
+    "LEGACY_STAGE0_BASELINE_TOTAL_BYTES",
     "LegacyEvidenceStatus",
     "LegacyImportAuthorization",
     "LegacyImportDryRun",
     "LegacyImportInventory",
     "LegacyImportMode",
     "LegacyImportSemantics",
+    "LegacyInventoryDryRun",
     "LegacyInventoryEntry",
     "LegacyResolutionEvidenceSummary",
+    "allowed_markers_for_mode",
     "canonical_json_bytes",
     "inventory_from_payload",
+    "marker_is_real",
     "semantics_from_payload",
     "sha256_bytes",
     "validate_idempotency_key",

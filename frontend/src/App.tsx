@@ -50,7 +50,7 @@ const actionLabels: Partial<Record<Tab, string>> = {
 };
 
 const datasets = ["daily_bar_unadjusted"] as const;
-const upstreams = ["EASTMONEY", "TENCENT", "SINA"] as const;
+const upstreams = ["BAOSTOCK", "TENCENT", "SINA"] as const;
 const filterDefaults: Record<Tab, Record<string, string>> = {
   overview: {},
   batches: { dataset: "", upstream: "", status: "", started_from: "", started_to: "" },

@@ -1,0 +1,330 @@
+{
+  "application_retries": 0,
+  "artifact_manifest_sha256": "04401321cac84bce94c8e540ae5b6196bf8cc423f1c57b731233eb04b7321d64",
+  "artifacts_root": "E:\\QuantKingV3\\docs\\stage1\\evidence\\k4c-r2-attempts\\K4C-R2-cab803399515",
+  "attempt_id": "attempt-3135a90149554d29",
+  "authorization_id": "K4C-R2-cab803399515",
+  "authorization_marker": "K4C-REPRESENTATIVE-R2-2026-08-16-v1",
+  "contract_checks": {
+    "complete": true,
+    "dates_in_target_window": true,
+    "fields_complete": true,
+    "library_versions_frozen": true,
+    "unadjusted": true,
+    "units_verified": true
+  },
+  "cross_source": {
+    "fields": {
+      "amount": {
+        "compared_rows": 246,
+        "divergent_rows": 246,
+        "exact_rows": 0,
+        "max_absolute": {
+          "absolute_difference": "50",
+          "symbol": "000858.SZ",
+          "trade_date": "2026-07-14",
+          "values": {
+            "A": "2068769750.05",
+            "B": "2068769800",
+            "C": "2068769750"
+          }
+        },
+        "max_relative": {
+          "absolute_difference": "46",
+          "relative_difference": "0.00000010485837433603506405681832164661676529576970817819",
+          "symbol": "600000.SH",
+          "trade_date": "2026-07-09",
+          "values": {
+            "A": "438686945.99",
+            "B": "438686900",
+            "C": "438686946"
+          }
+        }
+      },
+      "close": {
+        "compared_rows": 246,
+        "divergent_rows": 0,
+        "exact_rows": 246
+      },
+      "high": {
+        "compared_rows": 246,
+        "divergent_rows": 0,
+        "exact_rows": 246
+      },
+      "low": {
+        "compared_rows": 246,
+        "divergent_rows": 0,
+        "exact_rows": 246
+      },
+      "open": {
+        "compared_rows": 246,
+        "divergent_rows": 0,
+        "exact_rows": 246
+      },
+      "pre_close": {
+        "compared_rows": 246,
+        "divergent_rows": 0,
+        "exact_rows": 246
+      },
+      "volume": {
+        "compared_rows": 246,
+        "divergent_rows": 203,
+        "exact_rows": 43,
+        "max_absolute": {
+          "absolute_difference": "50",
+          "symbol": "600000.SH",
+          "trade_date": "2026-07-15",
+          "values": {
+            "A": "104758150",
+            "B": "104758200",
+            "C": "104758150"
+          }
+        },
+        "max_relative": {
+          "absolute_difference": "44",
+          "relative_difference": "0.000013754109040075722622133362341999672402130136378243",
+          "symbol": "600519.SH",
+          "trade_date": "2026-07-27",
+          "values": {
+            "A": "3199044",
+            "B": "3199000",
+            "C": "3199044"
+          }
+        }
+      }
+    },
+    "held_rows_total": 246,
+    "rows_held_by_role_count": {
+      "3": 246
+    },
+    "schema_version": "s1-07k4c-r2-comparison-artifact.v1"
+  },
+  "fail_fast": true,
+  "failure": null,
+  "invocation_budget": 36,
+  "invocation_count": 36,
+  "not_called_invocation_count": 0,
+  "observed_objectives": [
+    {
+      "evidence_type": "held_row_fact",
+      "fact": {
+        "amount": {
+          "A": "1308133972.13",
+          "B": "1308134000",
+          "C": "1308133972"
+        },
+        "volume": {
+          "A": "115622222",
+          "B": "115622200",
+          "C": "115622222"
+        }
+      },
+      "objective": "normal_session",
+      "observed": true,
+      "reason_code": null,
+      "roles": [
+        "A",
+        "B",
+        "C"
+      ],
+      "symbol": "000001.SZ",
+      "trade_date": "2026-06-11"
+    },
+    {
+      "evidence_type": "vendor_preclose_gap",
+      "fact": {
+        "bound": "0.005",
+        "derived_pre_close": "76.4",
+        "relative_gap": "0.03376963350785340314136125654",
+        "vendor_preclose": "73.8200"
+      },
+      "objective": "ex_rights_session",
+      "observed": true,
+      "reason_code": null,
+      "roles": [
+        "A"
+      ],
+      "symbol": "000858.SZ",
+      "trade_date": "2026-07-16"
+    },
+    {
+      "evidence_type": null,
+      "fact": {},
+      "objective": "suspension_session",
+      "observed": false,
+      "reason_code": "SUSPENSION_NOT_OBSERVED",
+      "roles": [],
+      "symbol": null,
+      "trade_date": null
+    },
+    {
+      "evidence_type": null,
+      "fact": {},
+      "objective": "low_liquidity_session",
+      "observed": false,
+      "reason_code": "LOW_LIQUIDITY_NOT_OBSERVED",
+      "roles": [],
+      "symbol": null,
+      "trade_date": null
+    },
+    {
+      "evidence_type": "held_row_fact",
+      "fact": {
+        "amount": {
+          "A": "1308133972.13",
+          "B": "1308134000",
+          "C": "1308133972"
+        },
+        "bound_yuan": "1000000000"
+      },
+      "objective": "volume_amount_boundary",
+      "observed": true,
+      "reason_code": null,
+      "roles": [
+        "A",
+        "B",
+        "C"
+      ],
+      "symbol": "000001.SZ",
+      "trade_date": "2026-06-11"
+    },
+    {
+      "evidence_type": null,
+      "fact": {},
+      "objective": "missing_or_empty_upstream",
+      "observed": false,
+      "reason_code": "NO_MISSING_OR_EMPTY_OBSERVED",
+      "roles": [],
+      "symbol": null,
+      "trade_date": null
+    },
+    {
+      "evidence_type": "held_row_fact",
+      "fact": {
+        "close": {
+          "A": "11.3",
+          "B": "11.3",
+          "C": "11.3"
+        },
+        "volume": {
+          "A": "115622222",
+          "B": "115622200",
+          "C": "115622222"
+        }
+      },
+      "objective": "shenzhen_code_segments",
+      "observed": true,
+      "reason_code": null,
+      "roles": [
+        "A",
+        "B",
+        "C"
+      ],
+      "symbol": "000001.SZ",
+      "trade_date": "2026-06-11"
+    },
+    {
+      "evidence_type": "held_row_fact",
+      "fact": {
+        "close": {
+          "A": "9.55",
+          "B": "9.55",
+          "C": "9.55"
+        },
+        "volume": {
+          "A": "72499667",
+          "B": "72499700",
+          "C": "72499667"
+        }
+      },
+      "objective": "shanghai_code_segments",
+      "observed": true,
+      "reason_code": null,
+      "roles": [
+        "A",
+        "B",
+        "C"
+      ],
+      "symbol": "600000.SH",
+      "trade_date": "2026-06-11"
+    }
+  ],
+  "plan_sha256": "8ea2ea1f470d781309a59e4526deffe9e36dded6f6146daa29db72c4e64b3e65",
+  "planned_objectives": [
+    {
+      "bounds": null,
+      "criterion": "positive_volume_and_amount",
+      "name": "normal_session",
+      "symbols": []
+    },
+    {
+      "bounds": {
+        "relative": "0.005"
+      },
+      "criterion": "vendor_preclose_gap",
+      "name": "ex_rights_session",
+      "symbols": [
+        "000858.SZ",
+        "600519.SH"
+      ]
+    },
+    {
+      "bounds": null,
+      "criterion": "cross_sectional_missing_day",
+      "name": "suspension_session",
+      "symbols": []
+    },
+    {
+      "bounds": {
+        "amount_yuan": "250000000"
+      },
+      "criterion": "amount_below_bound",
+      "name": "low_liquidity_session",
+      "symbols": []
+    },
+    {
+      "bounds": {
+        "amount_yuan": "1000000000"
+      },
+      "criterion": "amount_above_bound",
+      "name": "volume_amount_boundary",
+      "symbols": []
+    },
+    {
+      "bounds": null,
+      "criterion": "partial_hold_or_empty_invocation",
+      "name": "missing_or_empty_upstream",
+      "symbols": []
+    },
+    {
+      "bounds": {
+        "suffix": ".SZ"
+      },
+      "criterion": "held_segment",
+      "name": "shenzhen_code_segments",
+      "symbols": []
+    },
+    {
+      "bounds": {
+        "suffix": ".SH"
+      },
+      "criterion": "held_segment",
+      "name": "shanghai_code_segments",
+      "symbols": []
+    }
+  ],
+  "representative_evidence_sufficient": false,
+  "schema_version": "s1-07k4c-r2-representative-probe-evidence.v1",
+  "sufficiency_reasons": [
+    "OBJECTIVE_UNOBSERVED:suspension_session",
+    "OBJECTIVE_UNOBSERVED:low_liquidity_session",
+    "OBJECTIVE_UNOBSERVED:missing_or_empty_upstream"
+  ],
+  "threshold_coverage": {
+    "covered": true,
+    "threshold_rule_version": "comparison-thresholds.daily-bar-unadjusted.k4.v1",
+    "thresholds_pending_reacceptance": true,
+    "uncovered_rows": []
+  },
+  "writes_formal_data_root": false
+}

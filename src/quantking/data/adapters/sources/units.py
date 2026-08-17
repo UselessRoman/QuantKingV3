@@ -14,16 +14,12 @@ _VERIFIED_AKSHARE_VERSION = "1.18.83"
 
 
 def upstream_unit_policy_version(upstream: DataUpstream) -> str:
-    """Return the fixed returned-unit policy version bound to one K3 source."""
+    """Return the fixed returned-unit policy version bound to one runtime source."""
     if upstream is DataUpstream.BAOSTOCK:
         return BAOSTOCK_UNIT_POLICY_VERSION
-    if upstream in {
-        DataUpstream.EASTMONEY,
-        DataUpstream.TENCENT,
-        DataUpstream.SINA,
-    }:
+    if upstream in {DataUpstream.TENCENT, DataUpstream.SINA}:
         return AKSHARE_UNIT_POLICY_VERSION
-    raise ValueError("upstream has no locked K3 unit policy")
+    raise ValueError("upstream has no locked runtime unit policy")
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,15 +59,15 @@ def resolve_returned_units(
         raise TypeError("library_version must be text")
     if library_version != _VERIFIED_AKSHARE_VERSION or not is_supported_a_share(symbol):
         return _UNVERIFIED
-    if upstream is DataUpstream.EASTMONEY:
-        volume_unit = VolumeUnit.LOT_100_SHARES
-    elif upstream is DataUpstream.SINA:
+    if upstream is DataUpstream.SINA:
         volume_unit = VolumeUnit.SHARE
-    elif symbol.endswith(".SZ") and symbol.startswith("000"):
+    elif upstream is DataUpstream.TENCENT and symbol.endswith(".SZ") and symbol.startswith("000"):
         # AKShare 1.18.83 excludes sz000* from its Tencent volume * 100 branch.
         volume_unit = VolumeUnit.LOT_100_SHARES
-    else:
+    elif upstream is DataUpstream.TENCENT:
         volume_unit = VolumeUnit.SHARE
+    else:
+        return _UNVERIFIED
     return ReturnedUnitPolicy(
         policy_version=AKSHARE_UNIT_POLICY_VERSION,
         volume_unit=volume_unit,

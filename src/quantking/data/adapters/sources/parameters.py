@@ -69,22 +69,16 @@ def endpoint_parameters(
     window = request.request_window
     start = window.upstream_start.strftime("%Y%m%d")
     end = window.upstream_end.strftime("%Y%m%d")
-    if upstream is DataUpstream.EASTMONEY:
-        return {
-            "symbol": digits,
-            "period": "daily",
-            "start_date": start,
-            "end_date": end,
-            "adjust": "",
-            "timeout": AKSHARE_ENDPOINT_TIMEOUT_SECONDS,
-        }
+    if upstream not in {DataUpstream.TENCENT, DataUpstream.SINA}:
+        raise SourceAdapterError(SourceErrorCode.REQUEST_REJECTED)
     parameters: dict[str, str | float] = {
         "symbol": f"{exchange}{digits}",
         "start_date": start,
         "end_date": end,
         "adjust": "",
     }
-    # AKShare 1.18.83 exposes timeout for Tencent, but not for Sina.
+    # AKShare 1.18.83 exposes timeout for Tencent, but not for Sina. The Sina
+    # wall-clock bound is enforced by the controlled subprocess session timeout.
     if upstream is DataUpstream.TENCENT:
         parameters["timeout"] = AKSHARE_ENDPOINT_TIMEOUT_SECONDS
     return parameters

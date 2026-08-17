@@ -26,15 +26,17 @@ from quantking.data.adapters.legacy_import import (
 from quantking.data.adapters.warehouse.verifier import assert_path_under_root
 from quantking.data.content import canonical_content_sha256
 from quantking.data.legacy_import.contracts import (
-    K3C_REAL_AUTHORIZATION_MARKER,
     LEGACY_IMPORT_ADAPTER_VERSION,
     LEGACY_IMPORT_MANIFEST_SCHEMA_VERSION,
     LegacyImportAuthorization,
     LegacyImportInventory,
+    LegacyImportMode,
     LegacyImportSemantics,
+    LegacyInventoryEntry,
     LegacyResolutionEvidenceSummary,
     canonical_json_bytes,
     inventory_from_payload,
+    marker_is_real,
     semantics_from_payload,
     sha256_bytes,
     validate_idempotency_key,
@@ -64,12 +66,40 @@ class LegacyManagedImportOutcome:
     canonical_row_count: int
     evidence: LegacyResolutionEvidenceSummary
     warehouse_published: bool = False
+    deferred_file_count: int = 0
+    deferred_byte_count: int = 0
 
     def __post_init__(self) -> None:
         if self.created == self.reused:
             raise ValueError("exactly one of created/reused must be true")
         if self.warehouse_published:
             raise ValueError("K3C managed imports must never publish Warehouse")
+        for field in ("deferred_file_count", "deferred_byte_count"):
+            value = getattr(self, field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{field} must be a non-negative integer")
+
+
+def _subset_inventory(
+    inventory: LegacyImportInventory, symbols: tuple[str, ...]
+) -> tuple[LegacyImportInventory, int, int]:
+    """Select the fixed pilot security subset; unreadable files are deferred."""
+    selected = set(symbols)
+    entries: list[LegacyInventoryEntry] = []
+    deferred_files = 0
+    deferred_bytes = 0
+    for entry in inventory.entries:
+        codes = tuple(code for code in (entry.code_min, entry.code_max) if code is not None)
+        included = bool(codes) and any(codes[0] <= symbol <= codes[-1] for symbol in selected)
+        if included:
+            entries.append(entry)
+        else:
+            deferred_files += 1
+            deferred_bytes += entry.size
+    if not entries:
+        raise LegacyImportQuarantined("pilot subset selects no readable legacy files")
+    subset = LegacyImportInventory(entries=tuple(entries))
+    return subset, deferred_files, deferred_bytes
 
 
 def _stable_batch_id(identity_sha256: str) -> str:
@@ -440,8 +470,11 @@ class LegacyManagedImporter:
         inventory: LegacyImportInventory,
         semantics: LegacyImportSemantics,
         idempotency_key: str,
+        selected_symbols: tuple[str, ...] | None = None,
     ) -> LegacyManagedImportOutcome:
         validate_idempotency_key(idempotency_key)
+        if selected_symbols is not None and self._authorization.mode is not LegacyImportMode.PILOT:
+            raise LegacyImportError("pilot security subset is bound to the PILOT mode")
         source_root = _safe_root(self._authorization.source_root, must_exist=True)
         staging_root = _safe_root(self._authorization.staging_root, must_exist=False)
         if (
@@ -451,7 +484,15 @@ class LegacyManagedImporter:
         ):
             raise LegacyImportError("source and managed staging roots must not overlap")
         staging_root.mkdir(parents=True, exist_ok=True)
-        identity = _manifest_identity(inventory, semantics)
+        deferred_files = 0
+        deferred_bytes = 0
+        effective_inventory = inventory
+        if self._authorization.mode is LegacyImportMode.PILOT:
+            symbols = selected_symbols or self._authorization.pilot_symbols or ()
+            effective_inventory, deferred_files, deferred_bytes = _subset_inventory(
+                inventory, symbols
+            )
+        identity = _manifest_identity(effective_inventory, semantics)
         identity_sha = sha256_bytes(canonical_json_bytes(identity))
         batch_id = _stable_batch_id(identity_sha)
         imports_root = staging_root / "legacy-imports"
@@ -478,6 +519,8 @@ class LegacyManagedImporter:
                 raw_file_count=raw_count,
                 canonical_row_count=rows,
                 evidence=LegacyResolutionEvidenceSummary(rows, rows),
+                deferred_file_count=deferred_files,
+                deferred_byte_count=deferred_bytes,
             )
         if existing_key is not None:
             raise IdempotencyConflictError("legacy idempotency key already has immutable failure")
@@ -492,10 +535,12 @@ class LegacyManagedImporter:
                 staging_root=staging_root,
                 incomplete=incomplete,
                 final=final,
-                inventory=inventory,
+                inventory=effective_inventory,
                 semantics=semantics,
                 identity_sha=identity_sha,
                 batch_id=batch_id,
+                deferred_files=deferred_files,
+                deferred_bytes=deferred_bytes,
             )
         except Exception as error:
             self._preserve_quarantine(
@@ -519,6 +564,8 @@ class LegacyManagedImporter:
         semantics: LegacyImportSemantics,
         identity_sha: str,
         batch_id: str,
+        deferred_files: int = 0,
+        deferred_bytes: int = 0,
     ) -> LegacyManagedImportOutcome:
         if any(entry.read_error is not None or entry.sha256 is None for entry in inventory.entries):
             raise LegacyImportQuarantined("legacy inventory contains unreadable candidates")
@@ -539,10 +586,7 @@ class LegacyManagedImporter:
             after = source.stat()
             if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
                 raise LegacyImportQuarantined("legacy source changed during copy")
-            if (
-                self._after_copy_hook is not None
-                and self._authorization.marker != K3C_REAL_AUTHORIZATION_MARKER
-            ):
+            if self._after_copy_hook is not None and not marker_is_real(self._authorization.marker):
                 self._after_copy_hook(raw_target)
             copied_payload = raw_target.read_bytes()
             if sha256_bytes(copied_payload) != entry.sha256:
@@ -619,6 +663,8 @@ class LegacyManagedImporter:
             raw_file_count=inventory.file_count,
             canonical_row_count=candidate.num_rows,
             evidence=evidence,
+            deferred_file_count=deferred_files,
+            deferred_byte_count=deferred_bytes,
         )
 
     @staticmethod

@@ -78,6 +78,9 @@ class MarketDataGateway(Protocol):
     def fetch(self, chunk: FetchChunk) -> SupplierResponse: ...
 
 
+ChunkEmptyResolver = Callable[[FetchChunk], EmptyResultInfo | None]
+
+
 @dataclass(frozen=True, slots=True)
 class IngestionOutcome:
     batch: IngestionBatch
@@ -113,8 +116,9 @@ class AkshareIngestionService:
         empty_result: EmptyResultInfo | None = None,
         checkpoint: Callable[[], None] | None = None,
         job_run_id: str | None = None,
-        code_version: str = "s1-07k1",
+        code_version: str = "s1-07k4.v1",
         invocation_guard: Callable[[DataUpstream], None] | None = None,
+        chunk_empty_resolver: ChunkEmptyResolver | None = None,
     ) -> IngestionOutcome:
         validate_incremental_plan(plan)
         if not isinstance(code_version, str) or not code_version.strip():
@@ -153,14 +157,19 @@ class AkshareIngestionService:
                 code_version=code_version,
             )
         responses: list[SupplierResponse] = []
+        chunk_empties: list[EmptyResultInfo | None] = []
         try:
             for chunk in plan.chunks:
                 if checkpoint is not None:
                     checkpoint()
                 if invocation_guard is not None:
                     invocation_guard(self._gateway.upstream)
+                chunk_empty = (
+                    empty_result if chunk_empty_resolver is None else chunk_empty_resolver(chunk)
+                )
                 response = self._validate_response(self._gateway.fetch(chunk), chunk)
                 responses.append(response)
+                chunk_empties.append(chunk_empty)
                 if not response.complete and self._gateway.provider is DataProvider.BAOSTOCK:
                     try:
                         partial_code = SourceErrorCode(str(response.partial_reason))
@@ -171,6 +180,7 @@ class AkshareIngestionService:
                         plan,
                         SourceAdapterError(partial_code),
                         responses=tuple(responses),
+                        chunk_empties=tuple(chunk_empties),
                         code_version=code_version,
                     )
                 if checkpoint is not None:
@@ -181,6 +191,7 @@ class AkshareIngestionService:
                 plan,
                 SourceAdapterError(SourceErrorCode.INTERNAL_PROVIDER),
                 responses=tuple(responses),
+                chunk_empties=tuple(chunk_empties),
                 code_version=code_version,
             )
             raise
@@ -194,18 +205,20 @@ class AkshareIngestionService:
                         plan.chunks[len(responses)], responses[0].contract, mapped
                     )
                 )
+                chunk_empties.append(None)
             return self._finish_failed(
                 running,
                 plan,
                 mapped,
                 responses=tuple(responses),
+                chunk_empties=tuple(chunk_empties),
                 code_version=code_version,
             )
         return self._land_success(
             running,
             plan,
             tuple(responses),
-            empty_result=empty_result,
+            chunk_empties=tuple(chunk_empties),
             code_version=code_version,
         )
 
@@ -215,7 +228,7 @@ class AkshareIngestionService:
         plan: IncrementalFetchPlan,
         responses: tuple[SupplierResponse, ...],
         *,
-        empty_result: EmptyResultInfo | None,
+        chunk_empties: tuple[EmptyResultInfo | None, ...],
         code_version: str,
     ) -> IngestionOutcome:
         raw_directory: Path | None = None
@@ -225,17 +238,26 @@ class AkshareIngestionService:
                 running,
                 plan,
                 responses,
+                chunk_empties=chunk_empties,
                 code_version=code_version,
             )
             manifest_files = self._manifest_entries(raw_directory, verified.files)
             rebuilt = self._rebuild_responses(verified, plan)
             if rebuilt != responses:
                 raise SourceAdapterError(SourceErrorCode.PARSE)
+            if len(chunk_empties) != len(rebuilt):
+                raise SourceAdapterError(SourceErrorCode.PARSE)
             tables = tuple(
-                normalize_market_data_response(plan.dataset, response, empty_result=empty_result)
-                for response in rebuilt
+                normalize_market_data_response(plan.dataset, response, empty_result=chunk_empty)
+                for response, chunk_empty in zip(rebuilt, chunk_empties, strict=True)
             )
             candidate = ensure_sorted(plan.dataset.value, pa.concat_tables(tables))
+            classified = tuple(item for item in chunk_empties if item is not None)
+            batch_empty = (
+                classified[0]
+                if len(classified) == len(rebuilt) and candidate.num_rows == 0
+                else None
+            )
             succeeded = transition_batch(
                 running,
                 IngestionBatchStatus.SUCCEEDED,
@@ -243,7 +265,7 @@ class AkshareIngestionService:
                 row_count=candidate.num_rows,
                 security_count=len(set(candidate.column("code").to_pylist())),
                 manifest_files=manifest_files,
-                empty_result=empty_result,
+                empty_result=batch_empty,
             )
             self._save_terminal(succeeded)
             return IngestionOutcome(succeeded, candidate, raw_directory)
@@ -345,6 +367,7 @@ class AkshareIngestionService:
         error: SourceAdapterError,
         *,
         responses: tuple[SupplierResponse, ...],
+        chunk_empties: tuple[EmptyResultInfo | None, ...] = (),
         code_version: str,
     ) -> IngestionOutcome:
         if responses:
@@ -353,6 +376,7 @@ class AkshareIngestionService:
                     running,
                     plan,
                     responses,
+                    chunk_empties=chunk_empties,
                     code_version=code_version,
                 )
                 manifest_files = self._manifest_entries(raw_directory, verified.files)
@@ -413,6 +437,7 @@ class AkshareIngestionService:
         plan: IncrementalFetchPlan,
         responses: tuple[SupplierResponse, ...],
         *,
+        chunk_empties: tuple[EmptyResultInfo | None, ...],
         code_version: str,
     ) -> tuple[Path, VerifiedDirectory]:
         files = tuple(
@@ -432,6 +457,7 @@ class AkshareIngestionService:
                 running,
                 plan,
                 responses,
+                chunk_empties=chunk_empties,
                 payload=b"".join(item.payload for item in files),
                 upstream_row_count=sum(item.row_count for item in files),
                 canonical_row_count=sum(len(response.records) for response in responses),
@@ -449,6 +475,7 @@ class AkshareIngestionService:
         plan: IncrementalFetchPlan,
         responses: tuple[SupplierResponse, ...],
         *,
+        chunk_empties: tuple[EmptyResultInfo | None, ...] = (),
         payload: bytes,
         upstream_row_count: int,
         canonical_row_count: int,
@@ -482,6 +509,11 @@ class AkshareIngestionService:
             if request_windows
             else "NONE"
         )
+        legal_empty_by_chunk = {
+            f"chunk-{index:05d}": item.classification.value
+            for index, item in enumerate(chunk_empties)
+            if item is not None
+        }
         return {
             **dict(plan.request_params),
             "provider": running.provider.value,
@@ -499,6 +531,12 @@ class AkshareIngestionService:
             "row_count": str(upstream_row_count),
             "upstream_row_count": str(upstream_row_count),
             "canonical_row_count": str(canonical_row_count),
+            "legal_empty_by_chunk": json.dumps(
+                legal_empty_by_chunk,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
             "content_sha256": hashlib.sha256(payload).hexdigest(),
         }
 
@@ -621,6 +659,7 @@ MarketDataIngestionService = AkshareIngestionService
 
 __all__ = [
     "AkshareIngestionService",
+    "ChunkEmptyResolver",
     "IngestionOutcome",
     "MarketDataGateway",
     "MarketDataIngestionService",

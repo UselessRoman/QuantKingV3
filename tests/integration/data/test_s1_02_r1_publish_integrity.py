@@ -311,15 +311,15 @@ class TestRawFileChangeBreaksIdempotency:
     def test_mutated_payload_raises_conflict(self, tmp_path: Path) -> None:
         publisher = RawBatchPublisher(data_root=tmp_path)
         request = RawBatchPublishRequest(
-            source="eastmoney",
+            source="tencent",
             dataset="daily_bar_unadjusted",
             batch_id="b-2026-07-16-r1-001",
-            adapter_version="eastmoney-probe-1",
+            adapter_version="tencent-probe-1",
             request_params={"code": "000001.SZ"},
             files=(_file("rows/000001.SZ.parquet", b"AAA"),),
         )
         publisher.publish(request)
-        final = tmp_path / "raw" / "eastmoney" / "daily_bar_unadjusted" / request.batch_id
+        final = tmp_path / "raw" / "tencent" / "daily_bar_unadjusted" / request.batch_id
         # Mutate the on-disk payload after the successful publish. The
         # next idempotent reconcile must detect the byte-level drift and
         # raise IdempotencyConflictError rather than silently succeeding.

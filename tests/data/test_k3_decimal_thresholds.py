@@ -22,12 +22,18 @@ from quantking.data.comparison.comparator import (
 )
 from quantking.data.comparison.thresholds import (
     K3_CANDIDATE_RULE_VERSION,
+    K4_THRESHOLD_RULE_VERSION,
     THRESHOLD_RULE_VERSION,
     ThresholdSpec,
     canonical_decimal,
     default_thresholds,
     k3_evidence_candidate_thresholds,
     k3_threshold_candidate_contract,
+    k4_evidence_thresholds,
+    rows_within_threshold,
+    supported_threshold_versions,
+    thresholds_for,
+    uses_decimal_evidence,
 )
 from quantking.data.comparison.verifier import (
     DifferenceReportVerificationError,
@@ -49,7 +55,7 @@ def _canonical(value: object) -> bytes:
     ).encode()
 
 
-def _table(close: float) -> pa.Table:
+def _table(close: float, *, volume: int = 1_000_000, amount: float = 10_500_000.0) -> pa.Table:
     return ensure_sorted(
         DatasetKind.DAILY_BAR_UNADJUSTED.value,
         pa.Table.from_pylist(
@@ -62,8 +68,8 @@ def _table(close: float) -> pa.Table:
                     "low": 9.5,
                     "close": close,
                     "pre_close": 10.0,
-                    "volume": 1_000_000,
-                    "amount": 10_500_000.0,
+                    "volume": volume,
+                    "amount": amount,
                 }
             ],
             schema=canonical_schema(DatasetKind.DAILY_BAR_UNADJUSTED.value),
@@ -79,7 +85,7 @@ def _candidate_request() -> CrossSourceComparisonRequest:
         dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
         schema_version="daily_bar_unadjusted.v1",
         primary_source=DataUpstream.BAOSTOCK,
-        fallback_source=DataUpstream.EASTMONEY,
+        fallback_source=DataUpstream.TENCENT,
         primary_version_id=shared_version,
         fallback_version_id=shared_version,
         primary_batch_id=new_entity_id("data_batch"),
@@ -96,6 +102,36 @@ def _candidate_request() -> CrossSourceComparisonRequest:
         fallback_table=fallback,
         thresholds=k3_evidence_candidate_thresholds(),
         sample_spec=("K3_DECIMAL_EVIDENCE_ONLY",),
+        created_at=_CREATED,
+        comparison_primary_keys=(("600000.SH", date(2026, 8, 7)),),
+    )
+
+
+def _k4_request() -> CrossSourceComparisonRequest:
+    primary = _table(10.5)
+    fallback = _table(10.6, volume=999_900, amount=10_500_100.0)
+    shared_version = new_entity_id("data_version")
+    return CrossSourceComparisonRequest(
+        dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+        schema_version="daily_bar_unadjusted.v1",
+        primary_source=DataUpstream.BAOSTOCK,
+        fallback_source=DataUpstream.TENCENT,
+        primary_version_id=shared_version,
+        fallback_version_id=shared_version,
+        primary_batch_id=new_entity_id("data_batch"),
+        fallback_batch_id=new_entity_id("data_batch"),
+        primary_content_sha256=canonical_content_sha256(
+            DatasetKind.DAILY_BAR_UNADJUSTED, [primary]
+        ),
+        fallback_content_sha256=canonical_content_sha256(
+            DatasetKind.DAILY_BAR_UNADJUSTED, [fallback]
+        ),
+        primary_quality_run_id=new_entity_id("data_quality"),
+        fallback_quality_run_id=new_entity_id("data_quality"),
+        primary_table=primary,
+        fallback_table=fallback,
+        thresholds=k4_evidence_thresholds(),
+        sample_spec=("K4_AFFECTED_SCOPE",),
         created_at=_CREATED,
         comparison_primary_keys=(("600000.SH", date(2026, 8, 7)),),
     )
@@ -132,6 +168,95 @@ def test_candidate_is_zero_only_inactive_and_never_replaces_default() -> None:
         spec.absolute == 0 and spec.relative == 0
         for spec in candidate.thresholds.for_dataset(DatasetKind.DAILY_BAR_UNADJUSTED).values()
     )
+
+
+def test_threshold_version_registry_resolves_production_and_candidate_only() -> None:
+    assert supported_threshold_versions() == frozenset(
+        {THRESHOLD_RULE_VERSION, K3_CANDIDATE_RULE_VERSION, K4_THRESHOLD_RULE_VERSION}
+    )
+
+    production = thresholds_for(THRESHOLD_RULE_VERSION)
+    assert production.rule_version == THRESHOLD_RULE_VERSION
+    assert production.rule_version == default_thresholds().rule_version
+
+    # k3-candidate resolves to the non-production zero-only set, never the default.
+    candidate = thresholds_for(K3_CANDIDATE_RULE_VERSION)
+    assert candidate.rule_version == K3_CANDIDATE_RULE_VERSION
+    assert candidate.rule_version != default_thresholds().rule_version
+    assert all(
+        spec.absolute == 0 and spec.relative == 0
+        for spec in candidate.for_dataset(DatasetKind.DAILY_BAR_UNADJUSTED).values()
+    )
+
+    # k4 is the evidence-backed production successor; k1/k3-candidate stay replayable.
+    k4 = thresholds_for(K4_THRESHOLD_RULE_VERSION)
+    assert k4.rule_version == K4_THRESHOLD_RULE_VERSION
+    assert default_thresholds().rule_version == THRESHOLD_RULE_VERSION
+
+    with pytest.raises(ValueError, match="unsupported"):
+        thresholds_for("comparison-thresholds.daily-bar-unadjusted.k9.v1")
+
+
+def test_k4_rule_freezes_ohlc_zero_and_volume_amount_50_bounds() -> None:
+    k4 = k4_evidence_thresholds()
+    assert k4.rule_version == K4_THRESHOLD_RULE_VERSION
+    assert K4_THRESHOLD_RULE_VERSION == "comparison-thresholds.daily-bar-unadjusted.k4.v1"
+    fields = k4.for_dataset(DatasetKind.DAILY_BAR_UNADJUSTED)
+    for field in ("open", "high", "low", "close", "pre_close"):
+        assert fields[field] == ThresholdSpec(Decimal("0"), Decimal("0"))
+    for field in ("volume", "amount"):
+        assert fields[field] == ThresholdSpec(Decimal("50"), Decimal("0"))
+    assert uses_decimal_evidence(K4_THRESHOLD_RULE_VERSION) is True
+    assert uses_decimal_evidence(THRESHOLD_RULE_VERSION) is False
+
+
+def _held_rows(
+    left: dict[str, object], right: dict[str, object]
+) -> tuple[dict[str, object], dict[str, object]]:
+    base = {
+        "code": "600000.SH",
+        "trade_date": "2026-07-15",
+        "open": 10.0,
+        "high": 10.5,
+        "low": 9.8,
+        "close": 10.2,
+        "pre_close": 10.1,
+        "volume": 1000000,
+        "amount": 10200000.0,
+    }
+    return ({**base, **left}, {**base, **right})
+
+
+def test_k4_boundary_rows_within_threshold_accepts_50_and_rejects_beyond() -> None:
+    k4 = k4_evidence_thresholds()
+    fields = ("open", "high", "low", "close", "pre_close", "volume", "amount")
+
+    # Exactly at the frozen 50-share/50-yuan bound: within threshold.
+    left, right = _held_rows(
+        {"volume": 1000000, "amount": 10200000.0},
+        {"volume": 999950, "amount": 10200050.0},
+    )
+    assert rows_within_threshold(k4, left, right, fields) is True
+
+    # One smallest step beyond the bound must fail.
+    left, right = _held_rows(
+        {"volume": 1000000, "amount": 10200000.0},
+        {"volume": 999949.999999, "amount": 10200050.000001},
+    )
+    assert rows_within_threshold(k4, left, right, fields) is False
+
+    # OHLC/pre_close remain zero tolerance under the K4 rule.
+    left, right = _held_rows({"close": 10.2}, {"close": 10.200001})
+    assert rows_within_threshold(k4, left, right, fields) is False
+
+
+def test_k4_boundary_volume_amount_equality_passes_with_zero_diff() -> None:
+    k4 = k4_evidence_thresholds()
+    fields = ("open", "high", "low", "close", "pre_close", "volume", "amount")
+    left, right = _held_rows({}, {})
+    assert rows_within_threshold(k4, left, right, fields) is True
+    # A held row on only one side never agrees, also under the K4 rule.
+    assert rows_within_threshold(k4, left, None, fields) is False
 
 
 def test_decimal_evidence_and_sha_ignore_mutated_global_decimal_context() -> None:
@@ -172,6 +297,48 @@ def test_k3_v3_artifact_round_trip_uses_canonical_decimal_strings(tmp_path: Path
     assert rows[0]["threshold"] == {"absolute": "0", "relative": "0"}
     verified = DifferenceReportVerifier(artifacts_root=tmp_path).verify(report_id=outcome.report_id)
     assert verified.report_sha256 == outcome.report_sha256
+
+
+def test_k4_v4_artifact_round_trip_binds_frozen_thresholds(tmp_path: Path) -> None:
+    outcome = CrossSourceComparator().compare(request=_k4_request())
+    directory = DifferenceReportArtifactWriter(artifacts_root=tmp_path).write(outcome=outcome)
+    manifest = json.loads((directory / "manifest.json").read_bytes())
+    rows = json.loads((directory / "row_differences.json").read_bytes())["rows"]
+    assert manifest["manifest_schema_version"] == "difference-report-manifest.k4.v4"
+    assert manifest["threshold_rule_version"] == K4_THRESHOLD_RULE_VERSION
+    assert manifest["binding_mode"] == "SHARED_RESOLUTION_CANDIDATE"
+    assert manifest["unit_policy_versions"] == {
+        "primary": "baostock-0.9.3-returned-units.v1",
+        "fallback": "akshare-1.18.83-returned-units.v1",
+    }
+    by_field = {row["field"]: row for row in rows}
+    assert by_field["close"]["threshold"] == {"absolute": "0", "relative": "0"}
+    assert by_field["volume"]["threshold"] == {"absolute": "50", "relative": "0"}
+    assert by_field["volume"]["absolute_difference"] == "100"
+    assert by_field["amount"]["threshold"] == {"absolute": "50", "relative": "0"}
+    assert by_field["amount"]["absolute_difference"] == "100"
+    verified = DifferenceReportVerifier(artifacts_root=tmp_path).verify(report_id=outcome.report_id)
+    assert verified.report_sha256 == outcome.report_sha256
+    assert verified.threshold_rule_version == K4_THRESHOLD_RULE_VERSION
+
+
+def _resign_manifest_version(directory: Path, value: object) -> EntityId:
+    manifest_path = directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["threshold_rule_version"] = value
+    manifest.pop("manifest_sha256")
+    digest = hashlib.sha256(_canonical(manifest)).hexdigest()
+    manifest_path.write_bytes(_canonical({**manifest, "manifest_sha256": digest}))
+    (directory / "COMPLETE").write_bytes(_canonical({"manifest_sha256": digest}))
+    return parse_entity_id(str(manifest["report_id"]))
+
+
+def test_k4_v4_manifest_pins_the_k4_threshold_rule_version(tmp_path: Path) -> None:
+    outcome = CrossSourceComparator().compare(request=_k4_request())
+    directory = DifferenceReportArtifactWriter(artifacts_root=tmp_path).write(outcome=outcome)
+    report_id = _resign_manifest_version(directory, THRESHOLD_RULE_VERSION)
+    with pytest.raises(DifferenceReportVerificationError, match="shared candidate"):
+        DifferenceReportVerifier(artifacts_root=tmp_path).verify(report_id=report_id)
 
 
 def _resign_unit_policy(directory: Path, value: object) -> EntityId:

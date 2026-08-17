@@ -1,28 +1,34 @@
 from __future__ import annotations
 
 import json
-import socket
 import subprocess
 import sys
 from datetime import UTC, date, datetime
+from typing import Any
 
 import pytest
 
 from quantking.common.time import TradingDate, UtcTimestamp
 from quantking.data.adapters.sources.akshare import (
+    AKSHARE_UNIT_POLICY_VERSION,
     AkshareDailyBarAdapter,
     AkshareMarketDataGateway,
+    AkshareSessionEnvelope,
+    AkshareSessionRunner,
 )
+from quantking.data.adapters.sources.akshare_worker import run_request
 from quantking.data.adapters.sources.contracts import (
     AmountUnit,
     SourceAdapterError,
     SourceErrorCode,
+    SourceLineage,
+    SupplierResponse,
+    SupplierResponseContract,
     VolumeUnit,
 )
-from quantking.data.adapters.sources.ipv4_resolution import EASTMONEY_RESOLUTION_POLICY_VERSION
 from quantking.data.adapters.sources.parameters import DailyBarRequest
 from quantking.data.adapters.sources.registry import AKSHARE_RUNTIME_UPSTREAMS, source_registry
-from quantking.data.adapters.sources.units import AKSHARE_UNIT_POLICY_VERSION
+from quantking.data.adapters.sources.request_window import fixed_akshare_request_window
 from quantking.data.incremental import FetchChunk
 from quantking.data.models import DataProvider, DatasetKind, DataUpstream
 
@@ -48,9 +54,6 @@ class FakeModule:
         self.calls.append((endpoint, kwargs))
         return FakeFrame(self.rows)
 
-    def stock_zh_a_hist(self, **kwargs: str | float) -> FakeFrame:
-        return self._call("stock_zh_a_hist", kwargs)
-
     def stock_zh_a_hist_tx(self, **kwargs: str | float) -> FakeFrame:
         return self._call("stock_zh_a_hist_tx", kwargs)
 
@@ -63,39 +66,146 @@ def _clock() -> UtcTimestamp:
 
 
 def _rows(upstream: DataUpstream) -> list[dict[str, object]]:
-    if upstream is DataUpstream.EASTMONEY:
-        return [
-            {
-                "日期": "2026-08-07",
-                "开盘": 10.0,
-                "最高": 10.5,
-                "最低": 9.9,
-                "收盘": 10.2,
-                "昨收": 10.0,
-                "成交量": 123,
-                "成交额": 456.0,
-            }
-        ]
+    context: dict[str, object] = {
+        "date": date(2026, 7, 31),
+        "open": 9.4,
+        "high": 9.6,
+        "low": 9.3,
+        "close": 9.5,
+        "pre_close": 9.4,  # vendor reference value must never become Canonical
+        "volume": 10_000,
+        "amount": 95_000.0,
+        "turnover": 0.1,
+    }
+    if upstream is DataUpstream.SINA:
+        context["outstanding_share"] = 1_000_000.0
     row: dict[str, object] = {
         "date": date(2026, 8, 7),
         "open": 10.0,
         "high": 10.5,
         "low": 9.9,
         "close": 10.2,
-        "pre_close": 10.0,
+        "pre_close": 99.9,  # vendor reference value must never become Canonical
         "volume": 12_300,
         "amount": 456.0,
         "turnover": 0.1,
     }
     if upstream is DataUpstream.SINA:
         row["outstanding_share"] = 1_000_000.0
-    return [row]
+    return [context, row]
+
+
+class FakeRunner:
+    """Run the real in-process worker core with a FakeModule loader."""
+
+    def __init__(self, module: FakeModule, *, library_version: str | None = None) -> None:
+        self._module = module
+        self._library_version = library_version
+
+    def run(self, request: DailyBarRequest, upstream: DataUpstream) -> AkshareSessionEnvelope:
+        envelope = run_request(
+            {
+                "upstream": upstream.value,
+                "symbol": request.symbol,
+                "start_date": request.start_date.isoformat(),
+                "end_date": request.end_date.isoformat(),
+            },
+            module_loader=lambda: self._module,
+        )
+        if not envelope["ok"]:
+            stable = SourceErrorCode(str(envelope["error_code"]))
+            raise SourceAdapterError(stable)
+        return AkshareSessionEnvelope(
+            rows=tuple({str(key): item for key, item in row.items()} for row in envelope["rows"]),
+            library_version=str(self._library_version or envelope["library_version"]),
+            upstream_row_count=int(envelope["row_count"]),
+        )
+
+
+class FakeMarketDataGateway:
+    """Provider-neutral gateway fixture for ingestion/worker tests (no subprocess)."""
+
+    def __init__(
+        self,
+        *,
+        upstream: DataUpstream,
+        records: list[dict[str, object]],
+        row_count: int | None = None,
+        complete: bool = True,
+        partial_reason: str | None = None,
+    ) -> None:
+        self._upstream = upstream
+        self._records = records
+        self._row_count = row_count if row_count is not None else len(records)
+        self._complete = complete
+        self._partial_reason = partial_reason
+
+    @property
+    def provider(self) -> DataProvider:
+        return DataProvider.AKSHARE
+
+    @property
+    def upstream(self) -> DataUpstream:
+        return self._upstream
+
+    @property
+    def endpoint(self) -> str:
+        return source_registry_dict()[self._upstream]
+
+    def library_version(self) -> str:
+        return "1.18.83"
+
+    def fetch(self, chunk: FetchChunk) -> SupplierResponse:
+        window = fixed_akshare_request_window(chunk.start.value, chunk.end.value)
+        return SupplierResponse.create_bound(
+            chunk=chunk,
+            records=tuple(self._records),
+            contract=SupplierResponseContract(
+                dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+                contract_version="akshare-daily-bar.v2",
+                required_fields=(
+                    "stock_code",
+                    "date",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "pre_close",
+                    "volume",
+                    "amount",
+                ),
+                volume_unit=VolumeUnit.SHARE,
+                amount_unit=AmountUnit.CNY_YUAN,
+                unadjusted=True,
+                lineage=SourceLineage(
+                    provider=self.provider,
+                    upstream=self._upstream,
+                    endpoint=self.endpoint,
+                    library_version=self.library_version(),
+                    fetched_at="2026-08-08T01:02:03Z",
+                ),
+            ),
+            complete=self._complete,
+            partial_reason=self._partial_reason,
+            provider_payload={"records": list(self._records), "row_count": self._row_count},
+            request_window=window,
+            upstream_row_count=self._row_count,
+        )
+
+
+def source_registry_dict() -> dict[DataUpstream, str]:
+    return {item.upstream: item.endpoint for item in source_registry()}
 
 
 @pytest.mark.parametrize("upstream", AKSHARE_RUNTIME_UPSTREAMS)
 def test_each_adapter_calls_only_its_fixed_endpoint_once(upstream: DataUpstream) -> None:
     module = FakeModule(_rows(upstream))
-    adapter = AkshareDailyBarAdapter(upstream, module_loader=lambda: module, clock=_clock)
+    adapter = AkshareDailyBarAdapter(
+        upstream,
+        runner=FakeRunner(module),
+        module_loader=lambda: module,
+        clock=_clock,
+    )
 
     result = adapter.fetch(DailyBarRequest("600000.SH", date(2026, 8, 1), date(2026, 8, 8)))
 
@@ -115,16 +225,63 @@ def test_each_adapter_calls_only_its_fixed_endpoint_once(upstream: DataUpstream)
     assert result.lineage.library_version == "1.18.83"
     assert result.lineage.fetched_at == "2026-08-08T01:02:03Z"
     assert result.records[0]["stock_code"] == "600000.SH"
-    assert result.records[0]["pre_close"] == 10.0
+    assert result.records[0]["pre_close"] == 9.5  # derived from the 07-31 close
     assert result.complete is True
-    expected_volume_unit = (
-        VolumeUnit.LOT_100_SHARES if upstream is DataUpstream.EASTMONEY else VolumeUnit.SHARE
-    )
-    assert result.volume_unit is expected_volume_unit
+    assert result.volume_unit is VolumeUnit.SHARE
     assert result.amount_unit is AmountUnit.CNY_YUAN
     assert result.unit_policy_version == AKSHARE_UNIT_POLICY_VERSION
     assert result.units_verified is True
     assert len(result.content_sha256) == 64
+
+
+@pytest.mark.parametrize("upstream", AKSHARE_RUNTIME_UPSTREAMS)
+def test_vendor_pre_close_column_never_becomes_canonical(upstream: DataUpstream) -> None:
+    """K4B: Canonical pre_close derives only from the prior unadjusted close."""
+    module = FakeModule(
+        [
+            {
+                "date": date(2026, 8, 5),
+                "open": 9.7,
+                "high": 9.9,
+                "low": 9.6,
+                "close": 9.8,
+                "pre_close": 999.0,
+                "volume": 10_000,
+                "amount": 98_000.0,
+            },
+            {
+                "date": date(2026, 8, 6),
+                "open": 9.8,
+                "high": 10.1,
+                "low": 9.7,
+                "close": 10.0,
+                "pre_close": 888.0,
+                "volume": 11_000,
+                "amount": 110_000.0,
+            },
+            {
+                "date": date(2026, 8, 7),
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.9,
+                "close": 10.2,
+                "pre_close": 777.0,
+                "volume": 12_300,
+                "amount": 125_000.0,
+            },
+        ]
+    )
+    adapter = AkshareDailyBarAdapter(
+        upstream,
+        runner=FakeRunner(module),
+        module_loader=lambda: module,
+        clock=_clock,
+    )
+
+    result = adapter.fetch(DailyBarRequest("600000.SH", date(2026, 8, 6), date(2026, 8, 8)))
+
+    assert tuple(record["pre_close"] for record in result.records) == (9.8, 10.0)
+    assert tuple(row["pre_close"] for row in result.provider_payload) == (999.0, 888.0, 777.0)
 
 
 def test_context_seeds_target_pre_close_and_is_excluded_from_canonical() -> None:
@@ -161,6 +318,7 @@ def test_context_seeds_target_pre_close_and_is_excluded_from_canonical() -> None
     )
     adapter = AkshareDailyBarAdapter(
         DataUpstream.SINA,
+        runner=FakeRunner(module),
         module_loader=lambda: module,
         clock=_clock,
     )
@@ -192,6 +350,7 @@ def test_context_without_any_target_rows_is_complete_empty_target() -> None:
     )
     adapter = AkshareDailyBarAdapter(
         DataUpstream.SINA,
+        runner=FakeRunner(module),
         module_loader=lambda: module,
         clock=_clock,
     )
@@ -204,22 +363,23 @@ def test_context_without_any_target_rows_is_complete_empty_target() -> None:
     assert result.partial_reason is None
 
 
-def test_registry_has_only_three_daily_akshare_upstreams() -> None:
+def test_registry_has_only_the_two_runtime_akshare_upstreams() -> None:
     registry = source_registry()
     assert tuple(item.upstream for item in registry) == AKSHARE_RUNTIME_UPSTREAMS
     assert {item.provider for item in registry} == {DataProvider.AKSHARE}
     assert {item.dataset for item in registry} == {DatasetKind.DAILY_BAR_UNADJUSTED}
-    assert {item.endpoint for item in registry} == {
-        "stock_zh_a_hist",
-        "stock_zh_a_hist_tx",
-        "stock_zh_a_daily",
-    }
+    assert {item.endpoint for item in registry} == {"stock_zh_a_hist_tx", "stock_zh_a_daily"}
+    from quantking.data.adapters.sources.registry import source_spec
+
+    with pytest.raises(ValueError):
+        source_spec(DataUpstream.EASTMONEY)
 
 
 def test_unverified_package_version_fails_before_endpoint_call() -> None:
-    module = FakeModule(_rows(DataUpstream.EASTMONEY), version="1.18.84")
+    module = FakeModule(_rows(DataUpstream.TENCENT), version="1.18.84")
     adapter = AkshareDailyBarAdapter(
-        DataUpstream.EASTMONEY,
+        DataUpstream.TENCENT,
+        runner=FakeRunner(module),
         module_loader=lambda: module,
         clock=_clock,
     )
@@ -233,7 +393,12 @@ def test_unverified_package_version_fails_before_endpoint_call() -> None:
 
 def test_empty_frame_preserves_lineage_for_explicit_ingestion_classification() -> None:
     empty = FakeModule([])
-    adapter = AkshareDailyBarAdapter(DataUpstream.SINA, module_loader=lambda: empty, clock=_clock)
+    adapter = AkshareDailyBarAdapter(
+        DataUpstream.SINA,
+        runner=FakeRunner(empty),
+        module_loader=lambda: empty,
+        clock=_clock,
+    )
     request = DailyBarRequest("000001.SZ", date(2026, 8, 1), date(2026, 8, 8))
     result = adapter.fetch(request)
 
@@ -249,7 +414,12 @@ def test_schema_drift_and_rate_limit_have_stable_errors() -> None:
     request = DailyBarRequest("000001.SZ", date(2026, 8, 1), date(2026, 8, 8))
 
     drift = FakeModule([{"date": "2026-08-07"}])
-    adapter = AkshareDailyBarAdapter(DataUpstream.SINA, module_loader=lambda: drift, clock=_clock)
+    adapter = AkshareDailyBarAdapter(
+        DataUpstream.SINA,
+        runner=FakeRunner(drift),
+        module_loader=lambda: drift,
+        clock=_clock,
+    )
     with pytest.raises(SourceAdapterError) as caught:
         adapter.fetch(request)
     assert caught.value.code is SourceErrorCode.SCHEMA_DRIFT
@@ -265,7 +435,12 @@ def test_schema_drift_and_rate_limit_have_stable_errors() -> None:
             raise error
 
     limited = LimitedModule(_rows(DataUpstream.SINA))
-    adapter = AkshareDailyBarAdapter(DataUpstream.SINA, module_loader=lambda: limited, clock=_clock)
+    adapter = AkshareDailyBarAdapter(
+        DataUpstream.SINA,
+        runner=FakeRunner(limited),
+        module_loader=lambda: limited,
+        clock=_clock,
+    )
     with pytest.raises(SourceAdapterError) as caught:
         adapter.fetch(request)
     assert caught.value.code is SourceErrorCode.RATE_LIMITED
@@ -297,6 +472,7 @@ def test_missing_first_pre_close_is_explicit_partial_and_later_row_is_safely_der
     )
     adapter = AkshareDailyBarAdapter(
         DataUpstream.SINA,
+        runner=FakeRunner(module),
         module_loader=lambda: module,
         clock=_clock,
     )
@@ -328,87 +504,47 @@ def test_import_is_offline_and_does_not_import_akshare() -> None:
     assert result.returncode == 0, result.stderr
 
 
-class ResolvingModule(FakeModule):
-    """Record which address families ``localhost`` resolution returns during a call."""
-
-    def __init__(self, rows: list[dict[str, object]]) -> None:
-        super().__init__(rows)
-        self.observed_families: set[int] = set()
-
-    def _call(self, endpoint: str, kwargs: dict[str, str | float]) -> FakeFrame:
-        results = socket.getaddrinfo("localhost", 443, 0, socket.SOCK_STREAM)
-        self.observed_families = {item[0] for item in results}
-        return super()._call(endpoint, kwargs)
+def test_session_runner_hard_timeout_raises_stable_network_error() -> None:
+    runner = AkshareSessionRunner(
+        timeout_seconds=0.5,
+        command=(sys.executable, "-c", "import time; time.sleep(5)"),
+    )
+    request = DailyBarRequest("600000.SH", date(2026, 8, 1), date(2026, 8, 8))
+    with pytest.raises(SourceAdapterError) as caught:
+        runner.run(request, DataUpstream.TENCENT)
+    assert caught.value.code is SourceErrorCode.NETWORK
 
 
-def _mixed_getaddrinfo(
-    host: object,
-    port: object,
-    family: object = socket.AF_UNSPEC,
-    type: object = socket.SOCK_STREAM,
-    proto: object = 0,
-    flags: object = 0,
-) -> list[tuple[object, ...]]:
-    del host, port, family, type, proto, flags
-    return [
-        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 443, 0, 0)),
-        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
-    ]
+def test_session_runner_rejects_failed_subprocess() -> None:
+    runner = AkshareSessionRunner(
+        timeout_seconds=10.0,
+        command=(sys.executable, "-c", "import sys; sys.exit(3)"),
+    )
+    request = DailyBarRequest("600000.SH", date(2026, 8, 1), date(2026, 8, 8))
+    with pytest.raises(SourceAdapterError) as caught:
+        runner.run(request, DataUpstream.TENCENT)
+    assert caught.value.code is SourceErrorCode.INTERNAL_PROVIDER
 
 
-def test_eastmoney_fetch_forces_ipv4_only_during_vendor_call(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(socket, "getaddrinfo", _mixed_getaddrinfo)
-    module = ResolvingModule(_rows(DataUpstream.EASTMONEY))
+def test_worker_mismatched_library_version_is_rejected_by_adapter() -> None:
+    module = FakeModule(_rows(DataUpstream.SINA))
     adapter = AkshareDailyBarAdapter(
-        DataUpstream.EASTMONEY,
+        DataUpstream.SINA,
+        runner=FakeRunner(module, library_version="1.18.84"),
         module_loader=lambda: module,
         clock=_clock,
     )
-    adapter.fetch(DailyBarRequest("600000.SH", date(2026, 8, 1), date(2026, 8, 8)))
-    assert module.observed_families == {socket.AF_INET}
-    after = socket.getaddrinfo("localhost", 443, 0, socket.SOCK_STREAM)
-    assert {item[0] for item in after} == {socket.AF_INET6, socket.AF_INET}
+    with pytest.raises(SourceAdapterError) as caught:
+        adapter.fetch(DailyBarRequest("600000.SH", date(2026, 8, 1), date(2026, 8, 8)))
+    assert caught.value.code is SourceErrorCode.INTERNAL_PROVIDER
 
 
-@pytest.mark.parametrize("upstream", [DataUpstream.TENCENT, DataUpstream.SINA])
-def test_other_akshare_upstreams_are_not_forced_to_ipv4(
-    upstream: DataUpstream,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(socket, "getaddrinfo", _mixed_getaddrinfo)
-    module = ResolvingModule(_rows(upstream))
-    adapter = AkshareDailyBarAdapter(
-        upstream,
-        module_loader=lambda: module,
-        clock=_clock,
-    )
-    adapter.fetch(DailyBarRequest("600000.SH", date(2026, 8, 1), date(2026, 8, 8)))
-    assert module.observed_families == {socket.AF_INET6, socket.AF_INET}
-
-
-def test_resolution_policy_version_is_bound_to_eastmoney_only() -> None:
-    eastmoney = AkshareDailyBarAdapter(
-        DataUpstream.EASTMONEY,
-        module_loader=lambda: FakeModule(_rows(DataUpstream.EASTMONEY)),
-        clock=_clock,
-    ).fetch(DailyBarRequest("600000.SH", date(2026, 8, 1), date(2026, 8, 8)))
-    assert eastmoney.resolution_policy_version == EASTMONEY_RESOLUTION_POLICY_VERSION
-    for upstream in (DataUpstream.TENCENT, DataUpstream.SINA):
-        result = AkshareDailyBarAdapter(
-            upstream,
-            module_loader=lambda module_upstream=upstream: FakeModule(_rows(module_upstream)),
-            clock=_clock,
-        ).fetch(DailyBarRequest("600000.SH", date(2026, 8, 1), date(2026, 8, 8)))
-        assert result.resolution_policy_version is None
-
-
-def test_gateway_records_resolution_policy_in_provider_payload() -> None:
+def test_gateway_binds_request_window_and_unit_policy_in_provider_payload() -> None:
     gateway = AkshareMarketDataGateway(
         AkshareDailyBarAdapter(
-            DataUpstream.EASTMONEY,
-            module_loader=lambda: FakeModule(_rows(DataUpstream.EASTMONEY)),
+            DataUpstream.TENCENT,
+            runner=FakeRunner(FakeModule(_rows(DataUpstream.TENCENT))),
+            module_loader=lambda: FakeModule(_rows(DataUpstream.TENCENT)),
             clock=_clock,
         )
     )
@@ -421,5 +557,10 @@ def test_gateway_records_resolution_policy_in_provider_payload() -> None:
         request_sha256="a" * 64,
     )
     response = gateway.fetch(chunk)
-    provider_payload = json.loads(response.raw_payload)["provider_payload"]
-    assert provider_payload["resolution_policy_version"] == EASTMONEY_RESOLUTION_POLICY_VERSION
+    provider_payload: Any = json.loads(response.raw_payload)["provider_payload"]
+    assert provider_payload["unit_policy_version"] == AKSHARE_UNIT_POLICY_VERSION
+    assert provider_payload["request"]["lookback_days"] == 15
+    assert "resolution_policy_version" not in provider_payload
+
+
+__all__ = ["FakeFrame", "FakeMarketDataGateway", "FakeModule", "FakeRunner", "_rows"]

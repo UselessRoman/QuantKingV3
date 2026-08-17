@@ -4,7 +4,7 @@ import json
 from datetime import UTC, date, datetime
 
 import pytest
-from tests.data.adapters.test_akshare_adapter import FakeModule, _rows
+from tests.data.adapters.test_akshare_adapter import FakeModule, FakeRunner, _rows
 
 from quantking.common.time import TradingDate, UtcTimestamp
 from quantking.data.adapters.sources.akshare import (
@@ -45,18 +45,26 @@ def _chunk(
     )
 
 
+def _gateway(
+    upstream: DataUpstream,
+    module: FakeModule,
+) -> AkshareMarketDataGateway:
+    return AkshareMarketDataGateway(
+        AkshareDailyBarAdapter(
+            upstream,
+            runner=FakeRunner(module),
+            module_loader=lambda: module,
+            clock=_clock,
+        )
+    )
+
+
 @pytest.mark.parametrize("upstream", AKSHARE_RUNTIME_UPSTREAMS)
 def test_gateway_maps_all_upstreams_to_same_sorted_canonical_schema(
     upstream: DataUpstream,
 ) -> None:
     module = FakeModule(_rows(upstream))
-    gateway = AkshareMarketDataGateway(
-        AkshareDailyBarAdapter(
-            upstream,
-            module_loader=lambda: module,
-            clock=_clock,
-        )
-    )
+    gateway = _gateway(upstream, module)
 
     response = gateway.fetch(_chunk())
     from quantking.data.adapters.sources.normalization import normalize_akshare_response
@@ -81,7 +89,7 @@ def test_gateway_maps_all_upstreams_to_same_sorted_canonical_schema(
             "high": 10.5,
             "low": 9.9,
             "close": 10.2,
-            "pre_close": 10.0,
+            "pre_close": 9.5,
             "volume": 12_300,
             "amount": 456.0,
         }
@@ -90,15 +98,9 @@ def test_gateway_maps_all_upstreams_to_same_sorted_canonical_schema(
 
 def test_tencent_000_sz_raw_lots_are_unchanged_until_canonical_normalization() -> None:
     rows = _rows(DataUpstream.TENCENT)
-    rows[0]["volume"] = 123
+    rows[1]["volume"] = 123
     module = FakeModule(rows)
-    gateway = AkshareMarketDataGateway(
-        AkshareDailyBarAdapter(
-            DataUpstream.TENCENT,
-            module_loader=lambda: module,
-            clock=_clock,
-        )
-    )
+    gateway = _gateway(DataUpstream.TENCENT, module)
 
     response = gateway.fetch(_chunk(symbol="000001.SZ"))
     from quantking.data.adapters.sources.normalization import normalize_akshare_response
@@ -107,7 +109,7 @@ def test_tencent_000_sz_raw_lots_are_unchanged_until_canonical_normalization() -
     raw_envelope = json.loads(response.raw_payload)
     provider_records = raw_envelope["provider_payload"]["records"]
     assert isinstance(provider_records, list)
-    assert provider_records[0]["volume"] == 123
+    assert provider_records[1]["volume"] == 123
     table = normalize_akshare_response(DatasetKind.DAILY_BAR_UNADJUSTED, response)
     assert table.to_pylist()[0]["volume"] == 12_300
     assert table.to_pylist()[0]["code"] == "000001.SZ"
@@ -116,7 +118,6 @@ def test_tencent_000_sz_raw_lots_are_unchanged_until_canonical_normalization() -
 @pytest.mark.parametrize(
     ("upstream", "raw_volume", "volume_column"),
     (
-        (DataUpstream.EASTMONEY, 123, "成交量"),
         (DataUpstream.TENCENT, 123, "volume"),
         (DataUpstream.SINA, 12_300, "volume"),
     ),
@@ -127,17 +128,15 @@ def test_000_sz_all_upstreams_normalize_to_shares_without_mutating_raw(
     volume_column: str,
 ) -> None:
     rows = _rows(upstream)
-    rows[0][volume_column] = raw_volume
+    rows[1][volume_column] = raw_volume
     module = FakeModule(rows)
-    gateway = AkshareMarketDataGateway(
-        AkshareDailyBarAdapter(upstream, module_loader=lambda: module, clock=_clock)
-    )
+    gateway = _gateway(upstream, module)
 
     response = gateway.fetch(_chunk(symbol="000001.SZ"))
     from quantking.data.adapters.sources.normalization import normalize_akshare_response
 
     raw_envelope = json.loads(response.raw_payload)
-    assert raw_envelope["provider_payload"]["records"][0][volume_column] == raw_volume
+    assert raw_envelope["provider_payload"]["records"][1][volume_column] == raw_volume
     assert raw_envelope["provider_payload"]["request"] == {
         "lookback_days": 15,
         "symbol": "000001.SZ",
@@ -164,13 +163,7 @@ def test_empty_target_with_context_still_requires_explicit_empty_classification(
             }
         ]
     )
-    gateway = AkshareMarketDataGateway(
-        AkshareDailyBarAdapter(
-            DataUpstream.SINA,
-            module_loader=lambda: module,
-            clock=_clock,
-        )
-    )
+    gateway = _gateway(DataUpstream.SINA, module)
     response = gateway.fetch(_chunk())
     from quantking.data.adapters.sources.normalization import normalize_akshare_response
 
@@ -193,14 +186,8 @@ def test_empty_target_with_context_still_requires_explicit_empty_classification(
 
 
 def test_raw_rebuild_rejects_tampered_request_window_binding() -> None:
-    module = FakeModule(_rows(DataUpstream.EASTMONEY))
-    gateway = AkshareMarketDataGateway(
-        AkshareDailyBarAdapter(
-            DataUpstream.EASTMONEY,
-            module_loader=lambda: module,
-            clock=_clock,
-        )
-    )
+    module = FakeModule(_rows(DataUpstream.TENCENT))
+    gateway = _gateway(DataUpstream.TENCENT, module)
     chunk = _chunk()
     response = gateway.fetch(chunk)
     envelope = json.loads(response.raw_payload)
@@ -213,10 +200,8 @@ def test_raw_rebuild_rejects_tampered_request_window_binding() -> None:
 
 
 def test_gateway_rejects_non_daily_dataset_before_endpoint_call() -> None:
-    module = FakeModule(_rows(DataUpstream.EASTMONEY))
-    gateway = AkshareMarketDataGateway(
-        AkshareDailyBarAdapter(DataUpstream.EASTMONEY, module_loader=lambda: module, clock=_clock)
-    )
+    module = FakeModule(_rows(DataUpstream.TENCENT))
+    gateway = _gateway(DataUpstream.TENCENT, module)
     with pytest.raises(SourceAdapterError) as caught:
         gateway.fetch(_chunk(DatasetKind.EXCHANGE_CALENDAR))
     assert caught.value.code is SourceErrorCode.REQUEST_REJECTED
@@ -224,10 +209,8 @@ def test_gateway_rejects_non_daily_dataset_before_endpoint_call() -> None:
 
 
 def test_unverified_units_block_canonical_normalization() -> None:
-    module = FakeModule(_rows(DataUpstream.EASTMONEY), version="1.18.84")
-    gateway = AkshareMarketDataGateway(
-        AkshareDailyBarAdapter(DataUpstream.EASTMONEY, module_loader=lambda: module, clock=_clock)
-    )
+    module = FakeModule(_rows(DataUpstream.TENCENT), version="1.18.84")
+    gateway = _gateway(DataUpstream.TENCENT, module)
     with pytest.raises(SourceAdapterError) as caught:
         gateway.fetch(_chunk())
     assert caught.value.code is SourceErrorCode.UNIT_UNVERIFIED

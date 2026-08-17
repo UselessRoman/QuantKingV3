@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import cast
 
 from quantking.common.ids import parse_entity_id
@@ -12,6 +13,7 @@ from quantking.data.eod.contracts import (
     EOD_CONFIG_SCHEMA,
     EOD_JOB_TYPE,
     EOD_REQUEST_MANIFEST_SCHEMA,
+    K4_EOD_CONFIG_SCHEMA,
     LEGACY_EOD_CONFIG_SCHEMA,
     EodBaseVersion,
     EodDatasetConfig,
@@ -27,6 +29,7 @@ from quantking.data.models import DatasetKind
 from quantking.data.resolution.models import (
     K2_RESOLUTION_RULE_VERSION,
     K3_RESOLUTION_RULE_VERSION,
+    K4_RESOLUTION_RULE_VERSION,
 )
 from quantking.data.schemas import descriptor_for
 
@@ -43,6 +46,9 @@ class FrozenEodDataset:
     known_coverage: tuple[CoverageWindow, ...]
     base_version: EodBaseVersion | None
     references: Mapping[str, EodReferenceVersion]
+    security_exceptions: Mapping[str, tuple[tuple[TradingDate, TradingDate], ...]] = (
+        MappingProxyType({})
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +63,7 @@ class FrozenEodCommand:
     source_route_version: str
     baostock_version: str | None
     baostock_unit_policy_version: str | None
+    akshare_unit_policy_version: str | None
     planner_lookback_days: int
     adapter_context_lookback_days: int
     max_days_per_chunk: int
@@ -128,6 +135,7 @@ def parse_frozen_eod_command(
             "config_sha256",
         } or config_manifest.get("schema_version") not in {
             EOD_CONFIG_SCHEMA,
+            K4_EOD_CONFIG_SCHEMA,
             LEGACY_EOD_CONFIG_SCHEMA,
         }:
             raise FrozenEodCommandError("config manifest fields are invalid")
@@ -140,6 +148,7 @@ def parse_frozen_eod_command(
         config = load_canonical_json(config_json)
         schema_version = config.get("schema_version")
         legacy = schema_version == LEGACY_EOD_CONFIG_SCHEMA
+        k4 = schema_version == K4_EOD_CONFIG_SCHEMA
         expected_config_fields = {
             "schema_version",
             "code_version",
@@ -167,10 +176,21 @@ def parse_frozen_eod_command(
                     "legacy_import_manifest_sha256",
                 }
             )
+        config_resolution_rule = None if legacy else config.get("resolution_rule_version")
+        if k4:
+            expected_config_fields.add("akshare_unit_policy_version")
         if set(config) != expected_config_fields or schema_version != config_manifest.get(
             "schema_version"
         ):
             raise FrozenEodCommandError("config fields are invalid")
+        if (
+            not legacy
+            and schema_version == EOD_CONFIG_SCHEMA
+            and (config_resolution_rule != K3_RESOLUTION_RULE_VERSION)
+        ):
+            raise FrozenEodCommandError("v3 config schema is bound to the K3 resolution rule")
+        if k4 and config_resolution_rule != K4_RESOLUTION_RULE_VERSION:
+            raise FrozenEodCommandError("v4 config schema is bound to the K4 resolution rule")
         raw_datasets = config["datasets"]
         raw_schemas = config["schema_versions"]
         if not isinstance(raw_datasets, Mapping) or not isinstance(raw_schemas, Mapping):
@@ -183,6 +203,13 @@ def parse_frozen_eod_command(
             raw = raw_datasets[name]
             if not isinstance(raw, Mapping):
                 raise FrozenEodCommandError("dataset plan is invalid")
+            if k4:
+                if "security_exceptions" not in raw:
+                    raise FrozenEodCommandError("v4 dataset config requires security_exceptions")
+            elif "security_exceptions" in raw:
+                raise FrozenEodCommandError(
+                    "historical dataset configs must not carry security_exceptions"
+                )
             dataset_config = EodDatasetConfig.from_dict(raw)
             expected_schema = descriptor_for(name).schema_version
             if raw_schemas[name] != expected_schema:
@@ -206,6 +233,13 @@ def parse_frozen_eod_command(
                     ),
                     base_version=dataset_config.base_version,
                     references=dataset_config.references,
+                    security_exceptions={
+                        code: tuple(
+                            (TradingDate.from_iso(start), TradingDate.from_iso(end))
+                            for start, end in ranges
+                        )
+                        for code, ranges in dataset_config.security_exceptions.items()
+                    },
                 )
             )
         if frozen_ids != dict(request.base_versions):
@@ -225,6 +259,10 @@ def parse_frozen_eod_command(
                     "source_route_version": config["source_route_version"],
                 }
             )
+            if k4:
+                expected_versions["akshare_unit_policy_version"] = config[
+                    "akshare_unit_policy_version"
+                ]
         if dict(version_manifest) != expected_versions or not all(
             isinstance(item, str) and item for item in version_manifest.values()
         ):
@@ -290,19 +328,31 @@ def parse_frozen_eod_command(
                 or max_days != 31
                 or max_items != 1
                 or c_endpoint_limit != 4
-                or http_limit != 24
             )
             k2_invalid = resolution_rule == K2_RESOLUTION_RULE_VERSION and (
-                endpoint_limit != 12 or d_endpoint_limit != 0 or baostock_protocol_limit != 0
+                endpoint_limit != 12
+                or d_endpoint_limit != 0
+                or http_limit != 24
+                or baostock_protocol_limit != 0
             )
             k3_invalid = resolution_rule == K3_RESOLUTION_RULE_VERSION and (
-                endpoint_limit != 16 or d_endpoint_limit != 4 or baostock_protocol_limit != 12
+                endpoint_limit != 16
+                or d_endpoint_limit != 4
+                or http_limit != 24
+                or baostock_protocol_limit != 12
+            )
+            k4_invalid = resolution_rule == K4_RESOLUTION_RULE_VERSION and (
+                endpoint_limit != 12
+                or d_endpoint_limit != 0
+                or http_limit != 20
+                or baostock_protocol_limit != 12
             )
             unsupported = resolution_rule not in {
                 K2_RESOLUTION_RULE_VERSION,
                 K3_RESOLUTION_RULE_VERSION,
+                K4_RESOLUTION_RULE_VERSION,
             }
-            if common_invalid or unsupported or k2_invalid or k3_invalid:
+            if common_invalid or unsupported or k2_invalid or k3_invalid or k4_invalid:
                 raise FrozenEodCommandError("frozen execution policy is invalid")
         version_fields = ["code_version", "adapter_version", "rule_version"]
         if not legacy:
@@ -314,6 +364,8 @@ def parse_frozen_eod_command(
                     "baostock_unit_policy_version",
                 ]
             )
+            if k4:
+                version_fields.append("akshare_unit_policy_version")
         for field in version_fields:
             if not isinstance(config[field], str) or not config[field]:
                 raise FrozenEodCommandError(f"{field} is invalid")
@@ -345,6 +397,9 @@ def parse_frozen_eod_command(
         baostock_version=(None if legacy else cast(str, config["baostock_version"])),
         baostock_unit_policy_version=(
             None if legacy else cast(str, config["baostock_unit_policy_version"])
+        ),
+        akshare_unit_policy_version=(
+            None if not k4 else cast(str, config["akshare_unit_policy_version"])
         ),
         planner_lookback_days=planner_lookback,
         adapter_context_lookback_days=adapter_context_lookback,

@@ -93,8 +93,9 @@ def _inventory_path(tmp_path: Path) -> Path:
 def _inventory_payload(tmp_path: Path) -> dict[str, object]:
     from quantking.data.adapters.legacy_import import LegacyInventoryPlanner
     from quantking.data.legacy_import.contracts import (
-        K3C_SYNTHETIC_AUTHORIZATION_MARKER,
+        K4D_INVENTORY_SYNTHETIC_MARKER,
         LegacyImportAuthorization,
+        LegacyImportMode,
     )
 
     source_root = tmp_path / "source"
@@ -102,7 +103,8 @@ def _inventory_payload(tmp_path: Path) -> dict[str, object]:
     authorization = LegacyImportAuthorization(
         source_root=source_root,
         staging_root=staging_root,
-        marker=K3C_SYNTHETIC_AUTHORIZATION_MARKER,
+        mode=LegacyImportMode.INVENTORY,
+        marker=K4D_INVENTORY_SYNTHETIC_MARKER,
     )
     planner = LegacyInventoryPlanner(authorization)
     return planner.inventory(planner.discover()).to_payload()
@@ -195,6 +197,8 @@ def test_import_executes_then_reuses_same_batch(tmp_path: Path) -> None:
         str(_semantics_path(tmp_path)),
         "--idempotency-key",
         "pilot-1",
+        "--symbols",
+        "600000.SH",
     ]
     first_code, first = _invoke(common)
     assert first_code == 0
@@ -231,6 +235,8 @@ def test_import_quarantines_inventory_pointing_at_missing_source(tmp_path: Path)
             str(_semantics_path(tmp_path)),
             "--idempotency-key",
             "missing-source",
+            "--mode",
+            "FULL",
         ]
     )
     assert code == 1
@@ -245,3 +251,69 @@ def test_invalid_arguments_return_stable_error() -> None:
     code, payload = _invoke(["inventory", "--marker", "synthetic"])
     assert code == 2
     assert payload["error"]["code"] == "INVALID_ARGUMENT"
+
+
+def test_import_symbols_parsing_rejects_malformed_values(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    staging = tmp_path / "managed"
+    code, payload = _invoke(
+        [
+            "import",
+            "--source-root",
+            str(source_root),
+            "--staging-root",
+            str(staging),
+            "--marker",
+            "synthetic",
+            "--inventory-file",
+            str(_inventory_path(tmp_path)),
+            "--semantics-file",
+            str(_semantics_path(tmp_path)),
+            "--idempotency-key",
+            "bad-symbols",
+            "--mode",
+            "PILOT",
+            "--symbols",
+            "no-dot",
+        ]
+    )
+    assert code == 2
+    assert payload["error"]["code"] == "INVALID_ARGUMENT"
+
+
+def test_import_symbols_subset_defers_non_selected_files(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    _write_source(source_root)
+    other = source_root / "data" / "kline" / "1d" / "000001.SZ.parquet"
+    other.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.Table.from_pylist([dict(row, code="000001.SZ") for row in _rows()]),
+        other,
+    )
+    staging = tmp_path / "managed"
+    code, payload = _invoke(
+        [
+            "import",
+            "--source-root",
+            str(source_root),
+            "--staging-root",
+            str(staging),
+            "--marker",
+            "synthetic",
+            "--inventory-file",
+            str(_inventory_path(tmp_path)),
+            "--semantics-file",
+            str(_semantics_path(tmp_path)),
+            "--idempotency-key",
+            "pilot-subset-cli",
+            "--symbols",
+            "600000.SH",
+        ]
+    )
+    assert code == 0
+    assert payload["deferred_file_count"] == 1
+    assert payload["deferred_byte_count"] > 0
+    assert payload["raw_file_count"] == 1
+    assert payload["canonical_row_count"] == 2

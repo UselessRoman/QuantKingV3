@@ -8,17 +8,13 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
-from tests.data.adapters.test_akshare_adapter import FakeModule, _rows
+from tests.data.adapters.test_akshare_adapter import FakeMarketDataGateway
 
 from quantking.common.ids import new_entity_id
 from quantking.common.time import TradingDate, UtcTimestamp
 from quantking.data.adapters.persistence.sqlite import (
     DataSqliteUnitOfWorkFactory,
     create_data_engine,
-)
-from quantking.data.adapters.sources.akshare import (
-    AkshareDailyBarAdapter,
-    AkshareMarketDataGateway,
 )
 from quantking.data.adapters.sources.contracts import SourceAdapterError, SourceErrorCode
 from quantking.data.adapters.sources.ingestion import AkshareIngestionService
@@ -36,6 +32,20 @@ from quantking.data.models import (
 from quantking.jobs.adapters.persistence.sqlite import initialize_database
 
 _NOW = UtcTimestamp(datetime(2026, 8, 8, 1, 2, 3, tzinfo=UTC))
+
+_SUCCESS_RECORDS = [
+    {
+        "stock_code": "600000.SH",
+        "date": "2026-08-07",
+        "open": 10.0,
+        "high": 10.5,
+        "low": 9.9,
+        "close": 10.2,
+        "pre_close": 10.0,
+        "volume": 12_300,
+        "amount": 456.0,
+    }
+]
 
 
 def _plan(
@@ -57,26 +67,19 @@ def _plan(
             lookback_days=0,
             max_days_per_chunk=31,
             max_items_per_chunk=1,
-            adapter_version="akshare-daily-bar.v1",
+            adapter_version="akshare-daily-bar.v2",
         )
     )
 
 
 def _service(
     tmp_path: Path,
-    module: FakeModule,
+    gateway: FakeMarketDataGateway,
 ) -> tuple[AkshareIngestionService, DataSqliteUnitOfWorkFactory]:
     database = tmp_path / "data.db"
     initialize_database(database)
     engine = create_data_engine(database, busy_timeout_ms=250)
     factory = DataSqliteUnitOfWorkFactory(engine)
-    gateway = AkshareMarketDataGateway(
-        AkshareDailyBarAdapter(
-            DataUpstream.EASTMONEY,
-            module_loader=lambda: module,
-            clock=lambda: _NOW,
-        )
-    )
     return (
         AkshareIngestionService(
             gateway=gateway,
@@ -90,16 +93,16 @@ def _service(
 
 
 def test_success_persists_provider_upstream_endpoint_and_raw_lineage(tmp_path: Path) -> None:
-    module = FakeModule(_rows(DataUpstream.EASTMONEY))
-    service, factory = _service(tmp_path, module)
+    gateway = FakeMarketDataGateway(upstream=DataUpstream.TENCENT, records=_SUCCESS_RECORDS)
+    service, factory = _service(tmp_path, gateway)
     plan = _plan()
 
     outcome = service.run(plan)
 
     assert outcome.batch.status is IngestionBatchStatus.SUCCEEDED
     assert outcome.batch.provider is DataProvider.AKSHARE
-    assert outcome.batch.upstream is DataUpstream.EASTMONEY
-    assert outcome.batch.endpoint == "stock_zh_a_hist"
+    assert outcome.batch.upstream is DataUpstream.TENCENT
+    assert outcome.batch.endpoint == "stock_zh_a_hist_tx"
     assert outcome.batch.library_version == "1.18.83"
     assert outcome.canonical_table is not None
     assert outcome.canonical_table.to_pylist() == [
@@ -115,13 +118,12 @@ def test_success_persists_provider_upstream_endpoint_and_raw_lineage(tmp_path: P
             "amount": 456.0,
         }
     ]
-    assert len(module.calls) == 1
     assert outcome.raw_directory is not None
     manifest = json.loads((outcome.raw_directory / "manifest.json").read_text(encoding="utf-8"))
     params = manifest["request_params"]
     assert params["provider"] == "AKSHARE"
-    assert params["upstream"] == "EASTMONEY"
-    assert params["endpoint"] == "stock_zh_a_hist"
+    assert params["upstream"] == "TENCENT"
+    assert params["endpoint"] == "stock_zh_a_hist_tx"
     assert params["akshare_version"] == "1.18.83"
     assert params["fetched_at"] == "2026-08-08T01:02:03Z"
     assert params["request_start"] == "2026-08-01"
@@ -150,12 +152,11 @@ def test_success_persists_provider_upstream_endpoint_and_raw_lineage(tmp_path: P
 
 
 def test_empty_upstream_requires_explicit_non_trading_session(tmp_path: Path) -> None:
-    module = FakeModule([])
-    service, _ = _service(tmp_path, module)
+    gateway = FakeMarketDataGateway(upstream=DataUpstream.SINA, records=[])
+    service, _ = _service(tmp_path, gateway)
 
     outcome = service.run(_plan())
 
-    assert len(module.calls) == 1
     assert outcome.batch.status is IngestionBatchStatus.FAILED
     assert outcome.batch.failure is not None
     assert outcome.batch.failure.error_type is BatchFailureKind.UNEXPECTED_EMPTY
@@ -169,8 +170,8 @@ def test_empty_upstream_requires_explicit_non_trading_session(tmp_path: Path) ->
 def test_explicit_non_trading_session_produces_legal_zero_row_raw_and_canonical(
     tmp_path: Path,
 ) -> None:
-    module = FakeModule([])
-    service, _ = _service(tmp_path, module)
+    gateway = FakeMarketDataGateway(upstream=DataUpstream.SINA, records=[])
+    service, _ = _service(tmp_path, gateway)
     empty_result = EmptyResultInfo(
         LegalEmptyClassification.NO_TRADING_SESSION,
         "caller-verified exchange calendar has no trading session",
@@ -178,7 +179,6 @@ def test_explicit_non_trading_session_produces_legal_zero_row_raw_and_canonical(
 
     outcome = service.run(_plan(), empty_result=empty_result)
 
-    assert len(module.calls) == 1
     assert outcome.batch.status is IngestionBatchStatus.SUCCEEDED
     assert outcome.batch.empty_result == empty_result
     assert outcome.canonical_table is not None
@@ -189,29 +189,27 @@ def test_explicit_non_trading_session_produces_legal_zero_row_raw_and_canonical(
 def test_partial_pre_close_keeps_upstream_and_canonical_row_counts_distinct(
     tmp_path: Path,
 ) -> None:
-    module = FakeModule(
-        [
-            {
-                "日期": "2026-08-06",
-                "开盘": 9.8,
-                "最高": 10.1,
-                "最低": 9.7,
-                "收盘": 10.0,
-                "成交量": 100,
-                "成交额": 1_000.0,
-            },
-            {
-                "日期": "2026-08-07",
-                "开盘": 10.0,
-                "最高": 10.5,
-                "最低": 9.9,
-                "收盘": 10.2,
-                "成交量": 123,
-                "成交额": 456.0,
-            },
-        ]
+    records = [
+        {
+            "stock_code": "600000.SH",
+            "date": "2026-08-07",
+            "open": 10.0,
+            "high": 10.5,
+            "low": 9.9,
+            "close": 10.2,
+            "pre_close": 10.0,
+            "volume": 456,
+            "amount": 456.0,
+        }
+    ]
+    gateway = FakeMarketDataGateway(
+        upstream=DataUpstream.TENCENT,
+        records=records,
+        row_count=2,
+        complete=False,
+        partial_reason=SourceErrorCode.PARTIAL_RESPONSE.value,
     )
-    service, _ = _service(tmp_path, module)
+    service, _ = _service(tmp_path, gateway)
 
     outcome = service.run(_plan())
 
@@ -226,38 +224,32 @@ def test_partial_pre_close_keeps_upstream_and_canonical_row_counts_distinct(
 
 
 def test_context_is_raw_only_and_seeds_complete_target_manifest(tmp_path: Path) -> None:
-    module = FakeModule(
-        [
-            {
-                "日期": "2026-08-05",
-                "开盘": 9.7,
-                "最高": 9.9,
-                "最低": 9.6,
-                "收盘": 9.8,
-                "成交量": 100,
-                "成交额": 98_000.0,
-            },
-            {
-                "日期": "2026-08-06",
-                "开盘": 9.8,
-                "最高": 10.1,
-                "最低": 9.7,
-                "收盘": 10.0,
-                "成交量": 110,
-                "成交额": 110_000.0,
-            },
-            {
-                "日期": "2026-08-07",
-                "开盘": 10.0,
-                "最高": 10.5,
-                "最低": 9.9,
-                "收盘": 10.2,
-                "成交量": 123,
-                "成交额": 125_000.0,
-            },
-        ]
-    )
-    service, _ = _service(tmp_path, module)
+    records = [
+        {
+            "stock_code": "600000.SH",
+            "date": "2026-08-06",
+            "open": 9.8,
+            "high": 10.1,
+            "low": 9.7,
+            "close": 10.0,
+            "pre_close": 9.8,
+            "volume": 11_000,
+            "amount": 110_000.0,
+        },
+        {
+            "stock_code": "600000.SH",
+            "date": "2026-08-07",
+            "open": 10.0,
+            "high": 10.5,
+            "low": 9.9,
+            "close": 10.2,
+            "pre_close": 10.0,
+            "volume": 12_300,
+            "amount": 125_000.0,
+        },
+    ]
+    gateway = FakeMarketDataGateway(upstream=DataUpstream.SINA, records=records, row_count=3)
+    service, _ = _service(tmp_path, gateway)
 
     outcome = service.run(_plan(request_start=date(2026, 8, 6), request_end=date(2026, 8, 8)))
 
@@ -275,16 +267,16 @@ def test_context_is_raw_only_and_seeds_complete_target_manifest(tmp_path: Path) 
     raw_envelope = json.loads(
         (outcome.raw_directory / "responses" / "chunk-00000.json").read_text(encoding="utf-8")
     )
-    assert raw_envelope["provider_payload"]["records"][0]["日期"] == "2026-08-05"
+    assert raw_envelope["response"]["upstream_row_count"] == 3
+    assert len(raw_envelope["response"]["records"]) == 2
     assert raw_envelope["response"]["records"][0]["date"] == "2026-08-06"
 
 
 def test_non_daily_is_rejected_before_import_or_endpoint_call(tmp_path: Path) -> None:
-    module = FakeModule(_rows(DataUpstream.EASTMONEY))
-    service, _ = _service(tmp_path, module)
+    gateway = FakeMarketDataGateway(upstream=DataUpstream.TENCENT, records=[])
+    service, _ = _service(tmp_path, gateway)
 
     with pytest.raises(SourceAdapterError) as caught:
         service.run(_plan(DatasetKind.EXCHANGE_CALENDAR))
 
     assert caught.value.code is SourceErrorCode.REQUEST_REJECTED
-    assert module.calls == []

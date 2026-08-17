@@ -15,10 +15,10 @@ import pyarrow.parquet as pq
 
 from quantking.common.paths import is_reparse_point
 from quantking.data.legacy_import.contracts import (
-    K3C_REAL_AUTHORIZATION_MARKER,
     LegacyImportAuthorization,
     LegacyImportInventory,
     LegacyInventoryEntry,
+    marker_is_real,
     validate_relative_path,
 )
 
@@ -33,6 +33,10 @@ class LegacyImportError(RuntimeError):
 
 class LegacyRuntimeFetchRejected(LegacyImportError):
     """Raised by the deliberately absent XTQuant runtime adapter."""
+
+
+class LegacyCandidateSetChanged(LegacyImportError):
+    """The candidate set or its metadata changed during a closed inventory scan."""
 
 
 class _LegacySourceMissing(LegacyImportError):
@@ -213,6 +217,47 @@ class LegacyInventoryPlanner:
         entries = tuple(self._inventory_one(source_root, value) for value in paths)
         return LegacyImportInventory(entries=entries)
 
+    def _candidate_metadata(
+        self, source_root: Path, relative_paths: tuple[str, ...]
+    ) -> dict[str, tuple[int, int]]:
+        metadata: dict[str, tuple[int, int]] = {}
+        for relative_path in relative_paths:
+            path = _safe_source_file(source_root, relative_path)
+            stat = path.stat()
+            metadata[relative_path] = (stat.st_size, stat.st_mtime_ns)
+        return metadata
+
+    def closed_scan(self) -> LegacyImportInventory:
+        """Execute the full inventory contract with a fail-closed candidate set.
+
+        Discovers every candidate, snapshots candidate size/mtime metadata,
+        inventories each file with per-file before/after SHA protection, then
+        re-discovers and re-snapshots. Any added, removed, or mutated candidate
+        fails the whole scan so no successful inventory reaches a later phase.
+        """
+        source_root = _safe_root(self._authorization.source_root, must_exist=True)
+        _safe_root(self._authorization.staging_root, must_exist=False)
+        before_paths = self.discover()
+        try:
+            before_metadata = self._candidate_metadata(source_root, before_paths)
+        except _LegacySourceMissing as error:
+            raise LegacyCandidateSetChanged(
+                "legacy candidate disappeared before inventory"
+            ) from error
+        inventory = self.inventory(before_paths)
+        after_paths = self.discover()
+        try:
+            after_metadata = self._candidate_metadata(source_root, after_paths)
+        except _LegacySourceMissing as error:
+            raise LegacyCandidateSetChanged(
+                "legacy candidate disappeared during inventory"
+            ) from error
+        if before_paths != after_paths:
+            raise LegacyCandidateSetChanged("legacy candidate set changed during inventory")
+        if before_metadata != after_metadata:
+            raise LegacyCandidateSetChanged("legacy candidate metadata changed during inventory")
+        return inventory
+
     def _inventory_one(self, source_root: Path, relative_path: str) -> LegacyInventoryEntry:
         try:
             path = _safe_source_file(source_root, relative_path)
@@ -235,10 +280,7 @@ class LegacyInventoryPlanner:
         before = path.stat()
         try:
             digest = _sha256_file(path)
-            if (
-                self._after_hash_hook is not None
-                and self._authorization.marker != K3C_REAL_AUTHORIZATION_MARKER
-            ):
+            if self._after_hash_hook is not None and not marker_is_real(self._authorization.marker):
                 self._after_hash_hook(path)
             changed = path.stat()
             if before.st_size != changed.st_size or before.st_mtime_ns != changed.st_mtime_ns:
@@ -318,6 +360,7 @@ def assert_unchanged_inventory(before: LegacyImportInventory, after: LegacyImpor
 
 
 __all__ = [
+    "LegacyCandidateSetChanged",
     "LegacyImportError",
     "LegacyInventoryPlanner",
     "LegacyRuntimeFetchRejected",

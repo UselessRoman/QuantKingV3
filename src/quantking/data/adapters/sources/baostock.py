@@ -238,6 +238,16 @@ class BaostockDailyBarAdapter:
                 "1",
             }:
                 raise SourceAdapterError(SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT)
+            if provider_row["tradestatus"] == "0":
+                # Suspended-day placeholder (K4C-R3-R1 diagnostic, 2026-08-16):
+                # BaoStock fills OHLC with the last close and leaves
+                # volume/amount empty; such a row carries no bar and must not
+                # surface as a held row or as schema drift.
+                if provider_row["volume"] == "" and provider_row["amount"] == "":
+                    continue
+                raise SourceAdapterError(SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT)
+            if provider_row["volume"] == "" or provider_row["amount"] == "":
+                raise SourceAdapterError(SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT)
             parsed.append(
                 (
                     {

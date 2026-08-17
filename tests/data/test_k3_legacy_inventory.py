@@ -18,7 +18,8 @@ from quantking.data.adapters.legacy_import import (
     reject_xtquant_runtime_fetch,
 )
 from quantking.data.legacy_import import (
-    K3C_SYNTHETIC_AUTHORIZATION_MARKER,
+    K4D_INVENTORY_SYNTHETIC_MARKER,
+    K4D_PILOT_SYNTHETIC_MARKER,
     LegacyImportAuthorization,
     LegacyImportDryRun,
     LegacyImportMode,
@@ -31,7 +32,8 @@ def _authorization(tmp_path: Path) -> LegacyImportAuthorization:
     return LegacyImportAuthorization(
         source_root=source,
         staging_root=tmp_path / "staging",
-        marker=K3C_SYNTHETIC_AUTHORIZATION_MARKER,
+        mode=LegacyImportMode.INVENTORY,
+        marker=K4D_INVENTORY_SYNTHETIC_MARKER,
     )
 
 
@@ -223,3 +225,27 @@ def test_xtquant_legacy_runtime_fetch_rejects_without_vendor_import() -> None:
     )
     assert completed.stdout.strip() == "False"
     assert completed.stderr == ""
+
+
+def test_authorization_rejects_marker_mode_mismatch(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    with pytest.raises(ValueError, match="marker"):
+        LegacyImportAuthorization(
+            source_root=source,
+            staging_root=tmp_path / "staging",
+            mode=LegacyImportMode.INVENTORY,
+            marker=K4D_PILOT_SYNTHETIC_MARKER,
+        )
+
+
+def test_pilot_authorization_requires_pilot_symbols(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    with pytest.raises(ValueError, match="PILOT"):
+        LegacyImportAuthorization(
+            source_root=source,
+            staging_root=tmp_path / "staging",
+            mode=LegacyImportMode.PILOT,
+            marker=K4D_PILOT_SYNTHETIC_MARKER,
+        )

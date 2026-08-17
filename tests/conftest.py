@@ -26,6 +26,14 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "real_k3_sources: accesses fixed BaoStock and AKShare probe targets"
     )
+    config.addinivalue_line(
+        "markers", "real_k4c_probe: accesses the fixed K4C representative probe targets"
+    )
+    config.addinivalue_line(
+        "markers",
+        "real_k4d_pilot: reads the authorized legacy root, calls A/B/C, and writes the"
+        " authorized pilot staging root",
+    )
     config.addinivalue_line("markers", "real_legacy_data: reads the authorized legacy-data root")
     config.addinivalue_line("markers", "real_backup: writes a real data or backup root")
 
@@ -76,6 +84,8 @@ def block_external_access(
             "real_external",
             "real_akshare",
             "real_k3_sources",
+            "real_k4c_probe",
+            "real_k4d_pilot",
         )
     )
     if not network_authorized:
@@ -90,6 +100,8 @@ def block_external_access(
             "real_external",
             "real_akshare",
             "real_k3_sources",
+            "real_k4c_probe",
+            "real_k4d_pilot",
             "real_legacy_data",
             "real_backup",
         )

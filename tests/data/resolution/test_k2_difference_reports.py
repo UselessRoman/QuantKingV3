@@ -72,7 +72,7 @@ def _outcome(*, shared: bool = True) -> object:
         request=CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version=descriptor_for(DatasetKind.DAILY_BAR_UNADJUSTED.value).schema_version,
-            primary_source=DataUpstream.EASTMONEY,
+            primary_source=DataUpstream.BAOSTOCK,
             fallback_source=DataUpstream.TENCENT,
             primary_version_id=primary_version,
             fallback_version_id=fallback_version,
@@ -89,7 +89,7 @@ def _outcome(*, shared: bool = True) -> object:
             primary_table=primary,
             fallback_table=fallback,
             thresholds=default_thresholds(),
-            sample_spec=("K2_AFFECTED_SCOPE",),
+            sample_spec=("K4_AFFECTED_SCOPE",),
             created_at=_CREATED,
             comparison_primary_keys=(("600000.SH", target),) if shared else None,
         )
@@ -152,7 +152,7 @@ def _empty_outcome(*, fallback_has_row: bool) -> object:
         request=CrossSourceComparisonRequest(
             dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
             schema_version=descriptor_for(DatasetKind.DAILY_BAR_UNADJUSTED.value).schema_version,
-            primary_source=DataUpstream.EASTMONEY,
+            primary_source=DataUpstream.BAOSTOCK,
             fallback_source=DataUpstream.TENCENT,
             primary_version_id=version,
             fallback_version_id=version,
@@ -173,7 +173,7 @@ def _empty_outcome(*, fallback_has_row: bool) -> object:
             primary_table=primary,
             fallback_table=fallback,
             thresholds=default_thresholds(),
-            sample_spec=("K2_AFFECTED_SCOPE",),
+            sample_spec=("K4_AFFECTED_SCOPE",),
             created_at=_CREATED,
             comparison_primary_keys=(("600000.SH", target),),
             primary_empty_result=_EMPTY,
