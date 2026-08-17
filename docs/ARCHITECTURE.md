@@ -121,3 +121,6 @@ sufficient=false 如实记录），K4C-R3（合同修订 ADR-022 + Phase B 9/9 �
 （[S1-07K4 验收记录](stage1/S1-07K4_ACCEPTANCE.md)）。
 下一步是 [S1-08R2](stage1/S1-08R2_TASK.md) 发布引擎收口，随后
 [S1-08R3](stage1/S1-08R3_TASK.md) 唯一正式 Job 和终验。Stage 1 尚未完成，Stage 2 未开始。
+Stage 2 的精简实施路径已规划为 S2-01～S2-06（研究合同 → point-in-time 研究输入 → 股票池/
+标签 → 基础因子 → Qlib/Alpha158/诊断 → 正式终验），见
+[Stage 2 当前入口](stage2/README.md)；规划文档不构成阶段启动或外部操作授权。

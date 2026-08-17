@@ -57,6 +57,7 @@ Stage 1 尚未完成，Stage 2
 - [架构决策](docs/DECISIONS.md)
 - [实施计划](docs/IMPLEMENTATION_PLAN.md)
 - [Stage 1 当前入口](docs/stage1/README.md)
+- [Stage 2 实施路径（已规划、未开始）](docs/stage2/README.md)
 - [路线图](docs/ROADMAP.md)
 
 默认质量门：
