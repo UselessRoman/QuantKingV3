@@ -7,9 +7,10 @@ import random
 import sqlite3
 import time
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import replace
 from pathlib import Path
-from typing import Self, TypeVar
+from typing import Any, Self, TypeVar
 
 from alembic import command
 from alembic.config import Config
@@ -860,39 +861,96 @@ class SqliteUnitOfWork:
             self._session.rollback()
 
 
+def is_sqlite_lock_error(error: OperationalError) -> bool:
+    """Whether an OperationalError is a replay-safe SQLITE_BUSY/SQLITE_LOCKED."""
+    original = error.orig
+    if not isinstance(original, sqlite3.OperationalError):
+        return False
+    code = getattr(original, "sqlite_errorcode", None)
+    if isinstance(code, int) and (code & 0xFF) in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }:
+        return True
+    message = str(original).casefold()
+    return message in {
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+    }
+
+
+def retry_delay_seconds(
+    policy: RetryPolicy,
+    attempt: int,
+    *,
+    jitter: Callable[[float, float], float] = random.uniform,
+) -> float:
+    """Bounded exponential backoff with jitter, in seconds."""
+    bounded_ms = min(policy.cap_delay_ms, policy.base_delay_ms * (2**attempt))
+    jittered = float(bounded_ms) * (1.0 + float(jitter(-policy.jitter_ratio, policy.jitter_ratio)))
+    return max(0.0, jittered) / 1000.0
+
+
+def execute_with_retry[ResultT](
+    *,
+    open_uow: Callable[[], AbstractContextManager[Any]],
+    operation: Callable[[Any], ResultT],
+    commit: Callable[[Any], None],
+    policy: RetryPolicy,
+    sleeper: Callable[[float], None] = time.sleep,
+    jitter: Callable[[float, float], float] = random.uniform,
+) -> ResultT:
+    """Run a replay-safe short transaction with bounded BUSY/LOCKED retries.
+
+    Only pure database short transactions may be retried: each attempt opens a
+    fresh unit of work, so callers must not carry filesystem or provider side
+    effects inside ``operation``. Constraint, data and unknown errors are
+    re-raised immediately; exhaustion raises :class:`PersistenceBusyError`.
+    """
+    last_error: OperationalError | None = None
+    for attempt in range(policy.max_attempts):
+        try:
+            with open_uow() as unit_of_work:
+                result = operation(unit_of_work)
+                commit(unit_of_work)
+                return result
+        except OperationalError as error:
+            if not is_sqlite_lock_error(error):
+                raise
+            last_error = error
+            if attempt + 1 < policy.max_attempts:
+                sleeper(retry_delay_seconds(policy, attempt, jitter=jitter))
+    raise PersistenceBusyError(
+        "SQLite remained busy after bounded retries",
+        context={"attempts": str(policy.max_attempts)},
+    ) from last_error
+
+
 class SqliteUnitOfWorkFactory:
     """Callable unit-of-work factory safe to share within one process."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        sleeper: Callable[[float], None] = time.sleep,
+        jitter: Callable[[float, float], float] = random.uniform,
+    ) -> None:
         self._session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        self._sleeper = sleeper
+        self._jitter = jitter
 
     def __call__(self) -> SqliteUnitOfWork:
         return SqliteUnitOfWork(self._session_factory)
 
     @staticmethod
     def _is_lock_error(error: OperationalError) -> bool:
-        original = error.orig
-        if not isinstance(original, sqlite3.OperationalError):
-            return False
-        code = getattr(original, "sqlite_errorcode", None)
-        if isinstance(code, int) and (code & 0xFF) in {
-            sqlite3.SQLITE_BUSY,
-            sqlite3.SQLITE_LOCKED,
-        }:
-            return True
-        message = str(original).casefold()
-        return message in {
-            "database is locked",
-            "database table is locked",
-            "database schema is locked",
-        }
+        return is_sqlite_lock_error(error)
 
     @staticmethod
     def _delay(policy: RetryPolicy, attempt: int) -> float:
-        bounded_ms = min(policy.cap_delay_ms, policy.base_delay_ms * (2**attempt))
-        jitter = float(random.uniform(-policy.jitter_ratio, policy.jitter_ratio))
-        delay_ms: float = float(bounded_ms) * (1.0 + jitter)
-        return max(0.0, delay_ms) / 1000.0
+        return retry_delay_seconds(policy, attempt)
 
     def execute(
         self,
@@ -900,20 +958,11 @@ class SqliteUnitOfWorkFactory:
         policy: RetryPolicy,
     ) -> ResultT:
         """Run a replay-safe repository operation in a fresh session per attempt."""
-        last_error: OperationalError | None = None
-        for attempt in range(policy.max_attempts):
-            try:
-                with self() as unit_of_work:
-                    result = operation(unit_of_work.jobs)
-                    unit_of_work.commit()
-                    return result
-            except OperationalError as error:
-                if not self._is_lock_error(error):
-                    raise
-                last_error = error
-                if attempt + 1 < policy.max_attempts:
-                    time.sleep(self._delay(policy, attempt))
-        raise PersistenceBusyError(
-            "SQLite remained busy after bounded retries",
-            context={"attempts": str(policy.max_attempts)},
-        ) from last_error
+        return execute_with_retry(
+            open_uow=self,
+            operation=lambda unit_of_work: operation(unit_of_work.jobs),
+            commit=lambda unit_of_work: unit_of_work.commit(),
+            policy=policy,
+            sleeper=self._sleeper,
+            jitter=self._jitter,
+        )

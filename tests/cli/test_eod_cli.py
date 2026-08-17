@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 from tests.helpers import app_settings
@@ -228,14 +229,49 @@ def test_cli_range_and_trade_date_freeze_the_same_request_shape(tmp_path: Path) 
     assert day.config_manifest["config_json"] == ranged.config_manifest["config_json"]
 
 
-def test_dry_run_subprocess_is_read_only_and_reports_fixed_budget(tmp_path: Path) -> None:
+def test_dry_run_subprocess_is_read_only_and_manifest_driven(tmp_path: Path) -> None:
+    from quantking.data.eod.release_manifest import (
+        build_release_manifest,
+        symbols_sha256,
+    )
+
     data_root = tmp_path / "must-not-exist"
     environment = dict(os.environ)
     environment["QUANTKING_DATA_ROOT"] = str(data_root.resolve())
     environment["QUANTKING_OFFSITE_BACKUP_ROOT"] = str((tmp_path / "offsite").resolve())
+    symbols = ("000001.SZ", "300750.SZ", "600000.SH")
+    manifest = build_release_manifest(
+        symbols=symbols,
+        target_start=date(2026, 6, 11),
+        target_end=date(2026, 8, 9),
+        lookback_days=15,
+        calendar_version_id="exchange-calendar-baostock.v1",
+        calendar_sha256="a" * 64,
+        source_route_version="BAO-TX-SINA.k4.v1",
+        adapter_version="baostock-akshare-daily-bar.k4.v1",
+        code_version="s1-08r2.v1",
+        quality_rule_version="quality-rules.daily-bar-unadjusted.k4.v1",
+        threshold_rule_version="comparison-thresholds.daily-bar-unadjusted.k4.v1",
+        resolution_rule_version="resolution.daily-bar-unadjusted.k4.v1",
+        unit_policy_versions={"baostock": "b", "akshare": "a"},
+    )
+    manifest_path = tmp_path / "release-manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest.to_dict(), ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
 
     completed = subprocess.run(
-        [sys.executable, "-m", "quantking.cli.eod", "eod-dry-run"],
+        [
+            sys.executable,
+            "-m",
+            "quantking.cli.eod",
+            "eod-dry-run",
+            "--manifest",
+            str(manifest_path),
+            "--data-root-label",
+            str(data_root),
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -245,24 +281,63 @@ def test_dry_run_subprocess_is_read_only_and_reports_fixed_budget(tmp_path: Path
 
     payload = json.loads(completed.stdout)
     assert completed.returncode == 0
-    assert payload["scope"] == ["000001.SZ", "600000.SH"]
-    assert payload["planner_lookback_days"] == 0
-    assert payload["adapter_context_lookback_days"] == 15
-    assert len(payload["a_chunks"]) == len(payload["b_chunks"]) == 4
-    assert len(payload["max_c_chunks"]) == 4
-    assert "max_d_chunks" not in payload
-    assert payload["network_budget"] == {
-        "a_baostock_endpoint_invocations": 4,
-        "application_retries": 0,
-        "b_tencent_endpoint_invocations": 4,
-        "estimated_max_akshare_http_requests": 20,
-        "estimated_max_baostock_protocol_messages": 12,
-        "max_c_endpoint_invocations": 4,
-        "max_endpoint_invocations": 12,
-    }
-    assert "akshare_unit_policy" in payload["versions"]
-    assert payload["idempotency_key"] == "s1-07k4-first-release-20260611-20260809-v1"
+    assert payload["symbols"] == list(symbols)
+    assert payload["symbols_sha256"] == symbols_sha256(symbols)
+    assert payload["lookback_days"] == 15
+    assert len(payload["a_chunks"]) == len(payload["b_chunks"]) == 6
+    assert len(payload["c_max_chunks"]) == 6
+    assert payload["network_budget"]["application_retries"] == 0
+    assert payload["network_budget"]["fail_fast"] is True
+    assert payload["network_budget"]["endpoint_total"] == 18
+    assert payload["requires_new_real_authorization"] is True
+    assert payload["network_invocations"] == 0
+    assert payload["writes_data_root"] is False
+    assert payload["legacy_disposition"]["status"] == "REJECTED"
+    assert payload["release_manifest_sha256"] == manifest.manifest_sha256()
     assert not data_root.exists()
+
+
+def test_dry_run_subprocess_rejects_a_tampered_manifest(tmp_path: Path) -> None:
+    from quantking.data.eod.release_manifest import build_release_manifest
+
+    manifest = build_release_manifest(
+        symbols=("000001.SZ",),
+        target_start=date(2026, 6, 11),
+        target_end=date(2026, 6, 30),
+        lookback_days=15,
+        calendar_version_id="exchange-calendar-baostock.v1",
+        calendar_sha256="a" * 64,
+        source_route_version="BAO-TX-SINA.k4.v1",
+        adapter_version="baostock-akshare-daily-bar.k4.v1",
+        code_version="s1-08r2.v1",
+        quality_rule_version="quality-rules.daily-bar-unadjusted.k4.v1",
+        threshold_rule_version="comparison-thresholds.daily-bar-unadjusted.k4.v1",
+        resolution_rule_version="resolution.daily-bar-unadjusted.k4.v1",
+        unit_policy_versions={"baostock": "b"},
+    )
+    tampered = manifest.to_dict()
+    tampered["symbols"] = ["600000.SH"]
+    manifest_path = tmp_path / "tampered.json"
+    manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "quantking.cli.eod",
+            "eod-dry-run",
+            "--manifest",
+            str(manifest_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 1
+    assert payload["error"]["code"] == "DRY_RUN_FAILED"
 
 
 def test_internal_type_error_is_runtime_failure_not_argument_error(tmp_path: Path) -> None:

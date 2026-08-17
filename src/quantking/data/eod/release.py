@@ -1,17 +1,25 @@
-"""Pure S1-08/K4C first-release planning with no persistence or provider imports."""
+"""Pure K4C historical probe planning with no persistence or provider imports.
+
+The former ``build_s108_dry_run`` fixed first-release planner was removed in
+S1-08R2: new releases plan through the frozen release manifest contract
+(``quantking.data.eod.release_manifest``). The remaining constants and the
+K4C representative probe planner are the frozen historical K4 evidence path
+and must keep producing byte-identical plans for the frozen evidence tests.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from quantking.common.config import S108_FIRST_RELEASE_SYMBOLS, AppSettings
+from quantking.common.config import AppSettings
 from quantking.data.adapters.sources.akshare import AKSHARE_SESSION_TIMEOUT_SECONDS
 from quantking.data.adapters.sources.baostock import BAOSTOCK_SESSION_TIMEOUT_SECONDS
 from quantking.data.comparison.thresholds import K4_THRESHOLD_RULE_VERSION
 from quantking.data.eod.service import EodExecutionConfig
 from quantking.data.models import DatasetKind, DataUpstream
 
+# Frozen K4C probe / S1-08 first-release target window (historical fact).
 S108_TARGET_START = date(2026, 6, 11)
 S108_TARGET_END = date(2026, 8, 9)
 S107K3_CODE_VERSION = "s1-07k3.v1"
@@ -105,87 +113,6 @@ def _chunks(
     return tuple(chunks)
 
 
-def build_s108_dry_run(settings: AppSettings, *, code_version: str) -> dict[str, object]:
-    """Return the exact fixed three-role release plan without a file or AKShare import."""
-    config = EodExecutionConfig.production(code_version=code_version, settings=settings)
-    chunks = _chunks(
-        config,
-        symbols=tuple(S108_FIRST_RELEASE_SYMBOLS),
-        target_start=S108_TARGET_START,
-        target_end=S108_TARGET_END,
-    )
-    primary_count = len(chunks)
-    c_count = len(chunks)
-    http_limit = (
-        primary_count * _HTTP_PER_ENDPOINT[DataUpstream.TENCENT]
-        + c_count * _HTTP_PER_ENDPOINT[DataUpstream.SINA]
-    )
-    baostock_protocol_limit = primary_count * 3
-    if (
-        primary_count != 4
-        or c_count != 4
-        or primary_count * 2 + c_count != config.endpoint_invocation_limit
-        or http_limit != config.estimated_http_request_limit
-        or baostock_protocol_limit != config.estimated_baostock_protocol_message_limit
-    ):
-        raise ValueError("S1-07K4 release plan no longer matches the frozen network budget")
-    return {
-        "schema_version": "s1-07k4-dry-run.v1",
-        "dataset": DatasetKind.DAILY_BAR_UNADJUSTED.value,
-        "schema": "daily_bar_unadjusted.v1",
-        "scope": list(settings.eod_symbols),
-        "target_window": {
-            "start": S108_TARGET_START.isoformat(),
-            "end": S108_TARGET_END.isoformat(),
-        },
-        "upstream_window": {
-            "start": (
-                S108_TARGET_START - timedelta(days=config.adapter_context_lookback_days)
-            ).isoformat(),
-            "end": S108_TARGET_END.isoformat(),
-        },
-        "planner_lookback_days": config.planner_lookback_days,
-        "adapter_context_lookback_days": config.adapter_context_lookback_days,
-        "chunk_policy": {
-            "max_days_per_chunk": config.max_days_per_chunk,
-            "max_symbols_per_chunk": config.max_items_per_chunk,
-        },
-        "a_chunks": [item.to_dict() for item in chunks],
-        "b_chunks": [item.to_dict() for item in chunks],
-        "max_c_chunks": [item.to_dict() for item in chunks],
-        "network_budget": {
-            "a_baostock_endpoint_invocations": primary_count,
-            "b_tencent_endpoint_invocations": primary_count,
-            "estimated_max_baostock_protocol_messages": baostock_protocol_limit,
-            "estimated_max_akshare_http_requests": http_limit,
-            "max_c_endpoint_invocations": c_count,
-            "max_endpoint_invocations": config.endpoint_invocation_limit,
-            "application_retries": 0,
-        },
-        "versions": {
-            "code": config.code_version,
-            "adapter": config.adapter_version,
-            "quality_rules": config.rule_version,
-            "baostock": config.baostock_version,
-            "baostock_unit_policy": config.baostock_unit_policy_version,
-            "akshare_unit_policy": config.akshare_unit_policy_version,
-            "source_route": config.source_route_version,
-            "legacy_import_manifest_sha256": config.legacy_import_manifest_sha256,
-            "threshold_rules": K4_THRESHOLD_RULE_VERSION,
-            "resolution_rules": config.resolution_rule_version,
-        },
-        "security_exceptions": {
-            code: [[start, end] for start, end in ranges]
-            for code, ranges in config.datasets[
-                DatasetKind.DAILY_BAR_UNADJUSTED.value
-            ].security_exceptions.items()
-        },
-        "publish_intent": "PUBLISH_AFTER_QUALITY",
-        "idempotency_key": S107K4_IDEMPOTENCY_KEY,
-        "data_root": str(settings.paths.data_root),
-    }
-
-
 def build_k4c_representative_dry_run(
     settings: AppSettings,
     *,
@@ -199,7 +126,7 @@ def build_k4c_representative_dry_run(
     deliberately performs no provider call and cannot be converted into one
     under the same authorization.
     """
-    config = EodExecutionConfig.production(code_version=code_version, settings=settings)
+    config = EodExecutionConfig.production_k4(code_version=code_version, settings=settings)
     chunks = _chunks(
         config,
         symbols=K4C_REPRESENTATIVE_SYMBOLS,
@@ -287,5 +214,4 @@ __all__ = [
     "S108_TARGET_START",
     "ReleaseChunk",
     "build_k4c_representative_dry_run",
-    "build_s108_dry_run",
 ]

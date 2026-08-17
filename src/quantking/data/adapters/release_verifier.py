@@ -16,12 +16,11 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from quantking.common.config import S108_FIRST_RELEASE_SYMBOLS
 from quantking.common.errors import InvalidIdError
 from quantking.common.ids import parse_entity_id
 from quantking.common.paths import resolve_under
@@ -47,6 +46,7 @@ from quantking.data.adapters.warehouse.manifest import path_safe_id
 from quantking.data.adapters.warehouse.publish_coordinator import compute_content_sha256
 from quantking.data.adapters.warehouse.query import CanonicalQueryAdapter
 from quantking.data.adapters.warehouse.verifier import (
+    VerifiedDirectory,
     verify_canonical_directory,
     verify_raw_directory,
 )
@@ -67,6 +67,10 @@ from quantking.data.eod.release import (
     S108_TARGET_END,
     S108_TARGET_START,
 )
+from quantking.data.eod.release_manifest import (
+    RELEASE_MANIFEST_CANONICAL_SCHEMA,
+    ReleaseManifest,
+)
 from quantking.data.incremental import IncrementalPlanRequest, build_incremental_plan
 from quantking.data.models import DatasetKind, DataUpstream
 from quantking.data.quality.models import K4_DAILY_RULE_VERSION
@@ -79,6 +83,8 @@ from quantking.data.resolution.models import K4_RESOLUTION_RULE_VERSION
 
 S108_RELEASE_REVISION = "20260810_0014"
 S107K4_ADAPTER_VERSION = "baostock-akshare-daily-bar.k4.v1"
+# Historical frozen first-release scope of the fixed S1-08/K4 route verifier.
+S108_FIRST_RELEASE_SYMBOLS = ("000001.SZ", "600000.SH")
 _DATASET = DatasetKind.DAILY_BAR_UNADJUSTED.value
 _ENDPOINTS = {
     DataUpstream.BAOSTOCK.value: "query_history_k_data_plus",
@@ -1331,8 +1337,288 @@ def verify_s108_release(*, data_root: Path, version_id: str) -> dict[str, object
         ) from error
 
 
+class ManifestReleaseVerificationError(ValueError):
+    """Stable fail-closed error for the manifest-driven R2 release verifier."""
+
+
+def _manifest_fail(message: str) -> NoReturn:
+    raise ManifestReleaseVerificationError(message)
+
+
+def verify_manifest_release(
+    *,
+    data_root: Path,
+    version_id: str,
+    manifest: ReleaseManifest,
+) -> dict[str, object]:
+    """Verify one explicit PUBLISHED version against its frozen R2 manifest.
+
+    Strictly read-only: the metadata database opens through ``mode=ro&
+    immutable=1`` with ``PRAGMA query_only=ON`` and refuses any active
+    sidecar, so verification can never create or mutate DB/WAL/SHM files.
+    Scope, budgets and lineage caps derive from the frozen manifest, never
+    from first-release constants. Any inconsistency fails closed with a
+    sanitized stable error.
+    """
+    try:
+        canonical_id = _release_version_id(version_id)
+    except S108ReleaseVerificationError as error:
+        raise ManifestReleaseVerificationError(str(error)) from error
+    if not isinstance(data_root, Path) or not data_root.is_absolute():
+        raise ManifestReleaseVerificationError("data_root must be an absolute Path")
+    if not isinstance(manifest, ReleaseManifest):
+        raise ManifestReleaseVerificationError("manifest must be a ReleaseManifest")
+    try:
+        directory = data_root / "warehouse" / _DATASET / path_safe_id(canonical_id)
+        verified = verify_canonical_directory(directory, data_root=data_root)
+        with _readonly_database(data_root / "metadata" / "quantking.db") as connection:
+            return _verify_manifest_release(connection, data_root, canonical_id, manifest, verified)
+    except (ManifestReleaseVerificationError, S108ReleaseVerificationError):
+        raise
+    except (
+        DifferenceReportVerificationError,
+        FrozenEodCommandError,
+        ManifestIntegrityError,
+        OSError,
+        ResolutionArtifactVerificationError,
+        pa.ArrowInvalid,
+    ) as error:
+        raise ManifestReleaseVerificationError("manifest release verification failed") from error
+
+
+def _verify_manifest_release(
+    connection: sqlite3.Connection,
+    data_root: Path,
+    version_id: str,
+    manifest: ReleaseManifest,
+    verified: VerifiedDirectory,
+) -> dict[str, object]:
+    from quantking.data.models import DataProvider
+
+    warehouse_manifest = verified.manifest
+    # -- DatasetVersion ------------------------------------------------------
+    version = _one(
+        connection,
+        "SELECT version_id, dataset, status, schema_version, code_version,"
+        " rule_version, content_sha256, manifest_sha256, failure_json,"
+        " published_at, coverage_start, coverage_end, security_count,"
+        " input_batch_ids_json"
+        " FROM dataset_versions WHERE version_id = ?",
+        (version_id,),
+        label="dataset version",
+    )
+    if version["status"] != "PUBLISHED":
+        _manifest_fail("dataset version is not PUBLISHED")
+    if version["dataset"] != _DATASET:
+        _manifest_fail("dataset version dataset does not match the manifest")
+    if version["schema_version"] != RELEASE_MANIFEST_CANONICAL_SCHEMA:
+        _manifest_fail("dataset version schema does not match the manifest")
+    if version["code_version"] != manifest.code_version:
+        _manifest_fail("dataset version code_version does not match the manifest")
+    if version["rule_version"] != manifest.quality_rule_version:
+        _manifest_fail("dataset version rule_version does not match the manifest")
+    if version["failure_json"] is not None or not version["published_at"]:
+        _manifest_fail("dataset version carries failure or missing publish time")
+    if warehouse_manifest.get("content_sha256") != version["content_sha256"]:
+        _manifest_fail("warehouse content SHA does not match the database row")
+    if verified.manifest_sha != version["manifest_sha256"]:
+        _manifest_fail("warehouse manifest SHA does not match the database row")
+    coverage_start = str(warehouse_manifest.get("coverage_start") or "")
+    coverage_end = str(warehouse_manifest.get("coverage_end") or "")
+    if coverage_start and coverage_start < manifest.upstream_start.isoformat():
+        _manifest_fail("published coverage precedes the frozen upstream window")
+    if coverage_end and coverage_end > manifest.target_end.isoformat():
+        _manifest_fail("published coverage extends past the frozen target window")
+    coverage_summary = warehouse_manifest.get("coverage_summary")
+    security_count = 0
+    if isinstance(coverage_summary, Mapping):
+        raw_count = coverage_summary.get("security_count", "0")
+        if isinstance(raw_count, (str, int)):
+            security_count = int(raw_count)
+    if security_count != len(manifest.symbols):
+        _manifest_fail("published security count does not match the manifest scope")
+
+    # -- Job / frozen command / input fingerprint -----------------------------
+    resolution = _one(
+        connection,
+        "SELECT run_id, created_job_id, input_fingerprint, candidate_version_id,"
+        " conflict_count, blocker_count FROM resolution_runs"
+        " WHERE candidate_version_id = ?",
+        (version_id,),
+        label="resolution run",
+    )
+    if resolution["candidate_version_id"] != version_id:
+        _manifest_fail("resolution run is bound to a different version")
+    if resolution["conflict_count"] or resolution["blocker_count"]:
+        _manifest_fail("resolution run carries conflicts or blockers")
+    job = _one(
+        connection,
+        "SELECT job_id, job_type, status, failure_json, input_manifest_json,"
+        " config_manifest_json, version_manifest_json FROM job_runs WHERE job_id = ?",
+        (resolution["created_job_id"],),
+        label="EOD job",
+    )
+    if job["job_type"] != "data.eod.v1" or job["status"] != "SUCCEEDED":
+        _manifest_fail("EOD job is not SUCCEEDED")
+    if job["failure_json"] is not None:
+        _manifest_fail("EOD job carries failure evidence")
+    frozen = parse_frozen_eod_command(
+        job_type=job["job_type"],
+        input_manifest=_json_object(job["input_manifest_json"], label="job input manifest"),
+        config_manifest=_json_object(job["config_manifest_json"], label="job config manifest"),
+        version_manifest=_json_object(job["version_manifest_json"], label="job version manifest"),
+    )
+    if frozen.code_version != manifest.code_version:
+        _manifest_fail("frozen command code_version does not match the manifest")
+    for dataset in frozen.datasets:
+        if dataset.dataset.value != _DATASET:
+            continue
+        if dataset.scope != manifest.symbols:
+            _manifest_fail("frozen command scope does not match the manifest symbols")
+    if (
+        frozen.release_manifest_sha256 is not None
+        and frozen.release_manifest_sha256 != manifest.manifest_sha256()
+    ):
+        _manifest_fail("frozen command manifest SHA does not match the manifest")
+    if eod_input_fingerprint(frozen) != resolution["input_fingerprint"]:
+        _manifest_fail("input fingerprint does not match the frozen command")
+
+    # -- Batch lineage, budgets and caps --------------------------------------
+    batch_rows = _rows(
+        connection,
+        "SELECT batch_id, dataset, status, request_params_json, request_params_sha256,"
+        " manifest_files_json"
+        " FROM ingestion_batches WHERE job_run_id = ? ORDER BY batch_id",
+        (job["job_id"],),
+    )
+    input_batch_ids = [
+        str(item) for item in _json_list(version["input_batch_ids_json"], label="version batches")
+    ]
+    lineage_rows = _rows(
+        connection,
+        "SELECT batch_id, ordinal FROM dataset_version_batches"
+        " WHERE version_id = ? ORDER BY ordinal",
+        (version_id,),
+    )
+    if [row["batch_id"] for row in lineage_rows] != input_batch_ids:
+        _manifest_fail("DatasetVersion batch lineage is inconsistent")
+    if set(input_batch_ids) != {row["batch_id"] for row in batch_rows}:
+        _manifest_fail("release lineage differs from the EOD Job batches")
+    per_upstream: dict[str, int] = {}
+    endpoints_per_upstream: dict[str, int] = {}
+    for row in batch_rows:
+        if row["dataset"] != _DATASET:
+            _manifest_fail("release Raw batch dataset is invalid")
+        params = _json_object(row["request_params_json"], label="Raw request parameters")
+        upstream = params.get("upstream")
+        provider = params.get("provider")
+        if not isinstance(upstream, str) or not isinstance(provider, str):
+            _manifest_fail("Raw provider/upstream binding is invalid")
+        if provider == DataProvider.XTQUANT_LEGACY.value or upstream == "XTQUANT":
+            _manifest_fail("XTQUANT_LEGACY batch entered the release lineage")
+        if upstream not in {
+            DataUpstream.BAOSTOCK.value,
+            DataUpstream.TENCENT.value,
+            DataUpstream.SINA.value,
+        }:
+            _manifest_fail("release lineage contains non-production upstreams")
+        per_upstream[upstream] = per_upstream.get(upstream, 0) + 1
+        manifest_files = _json_list(row["manifest_files_json"], label="Raw manifest files")
+        endpoints_per_upstream[upstream] = endpoints_per_upstream.get(upstream, 0) + len(
+            manifest_files
+        )
+    caps = manifest.lineage_caps
+    budgets = manifest.budgets
+    # Endpoint conservation: every planned chunk invocation must be covered by
+    # exactly one raw manifest file; C stays at zero unless its exception path
+    # actually fired (bounded by the manifest's maximum).
+    if (
+        endpoints_per_upstream.get(DataUpstream.BAOSTOCK.value, 0)
+        != budgets["a_baostock_endpoints"]
+    ):
+        _manifest_fail("actual BaoStock endpoint inventory does not match the A budget")
+    if endpoints_per_upstream.get(DataUpstream.TENCENT.value, 0) != budgets["b_tencent_endpoints"]:
+        _manifest_fail("actual Tencent endpoint inventory does not match the B budget")
+    if endpoints_per_upstream.get(DataUpstream.SINA.value, 0) > budgets["c_sina_max_endpoints"]:
+        _manifest_fail("actual Sina endpoint inventory exceeds the maximum C budget")
+    if len(batch_rows) > caps["raw_batches"]:
+        _manifest_fail("raw batch lineage exceeds the manifest cap")
+
+    quality_rows = _rows(
+        connection,
+        "SELECT run_id, status, rule_version, version_id FROM quality_runs WHERE version_id = ?",
+        (version_id,),
+    )
+    if len(quality_rows) > caps["quality_runs"]:
+        _manifest_fail("quality run lineage exceeds the manifest cap")
+    if not any(
+        row["status"] == "PASSED" and row["rule_version"] == manifest.quality_rule_version
+        for row in quality_rows
+    ):
+        _manifest_fail("no PASSED quality run bound to the manifest rule version")
+
+    difference_rows = _rows(
+        connection,
+        "SELECT report_id FROM difference_reports WHERE primary_version_id = ?",
+        (version_id,),
+    )
+    if len(difference_rows) > caps["difference_reports"]:
+        _manifest_fail("difference report lineage exceeds the manifest cap")
+
+    # -- Per-security two-source coverage -------------------------------------
+    directory = data_root / "warehouse" / _DATASET / path_safe_id(version_id)
+    files = verified.files
+    table = pa.concat_tables(
+        [
+            pa.parquet.read_table(  # type: ignore[no-untyped-call]
+                directory / file.relative_path
+            )
+            for file in files
+        ]
+    )
+    published_codes = set(table.column("code").to_pylist())
+    if published_codes != set(manifest.symbols):
+        _manifest_fail("published securities do not match the manifest symbol set")
+    per_code_counts: dict[str, int] = {}
+    for code in table.column("code").to_pylist():
+        per_code_counts[str(code)] = per_code_counts.get(str(code), 0) + 1
+    coverage_by_symbol = {plan.symbol: plan for plan in manifest.security_coverage}
+    for symbol in manifest.symbols:
+        if symbol not in per_code_counts:
+            _manifest_fail("manifest symbol missing from the published rows")
+        plan = coverage_by_symbol.get(symbol)
+        if plan is not None and not plan.segments:
+            # Zero rows are only legal when an exemption (e.g. pre-listing)
+            # covers the entire target window for that security.
+            fully_exempt = any(
+                start <= manifest.target_start and end >= manifest.target_end
+                for start, end, _reason in plan.exemptions
+            )
+            if fully_exempt and per_code_counts[symbol] != 0:
+                _manifest_fail("exempt-only symbol published unexpected rows")
+
+    return {
+        "version_id": version_id,
+        "manifest_sha256": manifest.manifest_sha256(),
+        "symbols": list(manifest.symbols),
+        "budgets_planned": dict(manifest.budgets),
+        "batches_actual_per_upstream": dict(sorted(per_upstream.items())),
+        "endpoints_actual_per_upstream": dict(sorted(endpoints_per_upstream.items())),
+        "lineage_counts": {
+            "raw_batches": len(batch_rows),
+            "quality_runs": len(quality_rows),
+            "difference_reports": len(difference_rows),
+            "resolution_runs": 1,
+        },
+        "legacy_disposition": manifest.legacy.to_dict(),
+        "rows_per_security": dict(sorted(per_code_counts.items())),
+    }
+
+
 __all__ = [
     "S108_RELEASE_REVISION",
+    "ManifestReleaseVerificationError",
     "S108ReleaseVerificationError",
+    "verify_manifest_release",
     "verify_s108_release",
 ]

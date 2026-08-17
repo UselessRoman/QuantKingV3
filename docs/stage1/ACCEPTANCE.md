@@ -17,8 +17,8 @@ AKShare 三源范围，不证明 2026-08-12 接受的 BaoStock、历史四角色
 | S1-06 | 已主验收 | [验收记录](S1-06_ACCEPTANCE.md) |
 | S1-07K3 | 历史基线完成 | [历史记录](S1-07K3_TASK.md) |
 | S1-07K4 | 已主验收（2026-08-17：**S1-07K4 独立验收通过**，形成单一 K4 提交）：K4A/K4B 离线实现完成；K4C-R1（当时独立验收不通过，历史事实）修复、R2 真实实测、R3（ADR-022 + Phase B 9/9）与 R4（ADR-023）依次交付，**K4C-R4 已于 2026-08-16 独立验收通过**，k4 阈值已按 ADR-024 接受重新冻结；**K4D 真实只读 inventory 已于 2026-08-16 获授权执行一次并成功**（5,208 文件、零读取错误、Stage 0 基线差异 0/0）；**K4D 真实 pilot 两次 attempt 均失败即停（2026-08-16/08-17，ADR-026，数据根零写入、授权已消费）**；**旧 XTQuant 迁移已按 ADR-027 拒绝并完成 K4D 决策收口（第 3 次 pilot、全量诊断与 full 均不执行）** | [验收记录](S1-07K4_ACCEPTANCE.md)、[任务卡](S1-07K4_TASK.md)、[实施记录](S1-07K4_IMPLEMENTATION.md) |
-| S1-08R2 | 待开发 | [任务卡](S1-08R2_TASK.md)；存储恢复、manifest、verifier/DataCenter |
-| S1-08R3 | 被前两项阻断 | [任务卡](S1-08R3_TASK.md)；正式发布与最终验收 |
+| S1-08R2 | 已独立验收（2026-08-17：**S1-08R2 独立只读验收通过**）：SQLite BUSY/LOCKED 有界重试、合法空版本幂等收敛、跨进程单发布者锁、硬中断恢复、manifest 驱动（`s1-08r2-release-manifest.v1` + `RELEASE_SAFETY_CAPS`）的范围/预算/血缘、只读 manifest verifier 与 DataCenter 来源投影/逐证券 coverage 均以合成数据验收；R2 零真实网络、零旧根读取、零正式数据根写入、零 F 盘访问 | [验收记录](S1-08R2_ACCEPTANCE.md)、[任务卡](S1-08R2_TASK.md)、[实施记录](S1-08R2_IMPLEMENTATION.md) |
+| S1-08R3 | 待授权（前置 S1-07K4 与 S1-08R2 均已验收通过） | [任务卡](S1-08R3_TASK.md)；正式发布与最终验收 |
 
 ## S1-07K1 验收
 

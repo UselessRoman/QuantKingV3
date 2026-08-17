@@ -53,6 +53,75 @@ class _DataCenter:
             "resolution": {"run_id": "data_resolution:resolution"},
         }
 
+    def get_version_source_projection(self, version_id: str) -> dict[str, object]:
+        return {
+            "version_id": version_id,
+            "release_manifest_sha256": "a" * 64,
+            "sources": [
+                {
+                    "role": "A",
+                    "upstream": "BAOSTOCK/BAOSTOCK",
+                    "planned_endpoints": 4,
+                    "actual_endpoints": 4,
+                    "batches": 2,
+                    "rows": 240,
+                    "latest_status": "SUCCEEDED",
+                    "latest_ended_at": None,
+                },
+                {
+                    "role": "B",
+                    "upstream": "AKSHARE/TENCENT",
+                    "planned_endpoints": 4,
+                    "actual_endpoints": 4,
+                    "batches": 2,
+                    "rows": 240,
+                    "latest_status": "SUCCEEDED",
+                    "latest_ended_at": None,
+                },
+                {
+                    "role": "C",
+                    "upstream": "AKSHARE/SINA",
+                    "planned_endpoints": 4,
+                    "actual_endpoints": 0,
+                    "batches": 0,
+                    "rows": 0,
+                    "latest_status": None,
+                    "latest_ended_at": None,
+                },
+            ],
+            "legacy_disposition": {
+                "source": "XTQUANT_LEGACY",
+                "status": "REJECTED",
+                "adr": "ADR-027",
+                "included_batches": 0,
+                "published_count": 0,
+            },
+        }
+
+    def get_version_security_coverage(
+        self, version_id: str, *, cursor: str | None, limit: int
+    ) -> DataCenterPage:
+        assert cursor is None
+        assert limit == 25
+        return DataCenterPage(
+            items=(
+                {
+                    "code": "000001.SZ",
+                    "segments": [{"start": "2026-06-11", "end": "2026-08-09"}],
+                    "row_count": 60,
+                },
+                {
+                    "code": "300750.SZ",
+                    "segments": [
+                        {"start": "2026-06-11", "end": "2026-06-30"},
+                        {"start": "2026-07-04", "end": "2026-08-09"},
+                    ],
+                    "row_count": 57,
+                },
+            ),
+            next_cursor=None,
+        )
+
 
 def test_data_center_routes_are_injected_without_source_readiness_api() -> None:
     app = create_app(_Jobs(), data_center_port=_DataCenter())
@@ -119,6 +188,56 @@ def test_explicit_version_lineage_route_preserves_safe_projection() -> None:
         "E:\\secret",
     ):
         assert forbidden not in serialized
+
+
+def test_version_sources_route_projects_roles_budgets_and_legacy_rejection() -> None:
+    version_id = "data_version:00000000-0000-4000-8000-000000000006"
+    app = create_app(_Jobs(), data_center_port=_DataCenter())
+    with TestClient(app) as client:
+        response = client.get(f"/api/data/versions/{version_id}/sources")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [source["upstream"] for source in body["sources"]] == [
+        "BAOSTOCK/BAOSTOCK",
+        "AKSHARE/TENCENT",
+        "AKSHARE/SINA",
+    ]
+    for source in body["sources"]:
+        assert source["actual_endpoints"] <= source["planned_endpoints"]
+    assert body["legacy_disposition"] == {
+        "source": "XTQUANT_LEGACY",
+        "status": "REJECTED",
+        "adr": "ADR-027",
+        "included_batches": 0,
+        "published_count": 0,
+    }
+    serialized = response.text
+    for forbidden in ("artifact_relative_path", "provider_payload", "data_root", "E:\\"):
+        assert forbidden not in serialized
+
+
+def test_version_security_coverage_route_pages_per_symbol_segments_and_gaps() -> None:
+    version_id = "data_version:00000000-0000-4000-8000-000000000006"
+    app = create_app(_Jobs(), data_center_port=_DataCenter())
+    with TestClient(app) as client:
+        coverage = client.get(f"/api/data/versions/{version_id}/security-coverage?limit=25")
+        bad_cursor = client.get(
+            f"/api/data/versions/{version_id}/security-coverage?cursor=not-a-cursor"
+        )
+        bad_limit = client.get(f"/api/data/versions/{version_id}/security-coverage?limit=101")
+
+    assert coverage.status_code == 200
+    items = coverage.json()["items"]
+    assert [item["code"] for item in items] == ["000001.SZ", "300750.SZ"]
+    assert items[0]["segments"] == [{"start": "2026-06-11", "end": "2026-08-09"}]
+    assert items[1]["segments"] == [
+        {"start": "2026-06-11", "end": "2026-06-30"},
+        {"start": "2026-07-04", "end": "2026-08-09"},
+    ]
+    assert coverage.json()["next_cursor"] is None
+    assert bad_cursor.status_code == 400
+    assert bad_limit.status_code == 422
 
 
 def test_read_lineage_corruption_maps_to_stable_sanitized_409() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -28,7 +29,10 @@ _EXPECTED_KEYS: Mapping[str, frozenset[str]] = {
         }
     ),
 }
-S108_FIRST_RELEASE_SYMBOLS = ("000001.SZ", "600000.SH")
+# Independent safety hard cap for the configured EOD scope (S1-08R2): the
+# release manifest may plan fewer symbols, but never more than this bound.
+EOD_SYMBOLS_MAX = 64
+_EOD_SCOPE = re.compile(r"(?:SZ|SH|BJ|\d{6}\.(?:SZ|SH|BJ))\Z")
 _RESERVED_PROCESS_KEYS = frozenset(
     {
         "QUANTKING_TOOLCHAIN_ROOT",
@@ -69,7 +73,7 @@ class AppSettings:
     sqlite_retry_jitter_ratio: float
     job_heartbeat_min_interval_ms: int
     job_progress_min_interval_ms: int
-    eod_symbols: tuple[str, ...] = S108_FIRST_RELEASE_SYMBOLS
+    eod_symbols: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.paths, RuntimePaths):
@@ -131,9 +135,19 @@ class AppSettings:
             raise ConfigurationError(
                 "eod_symbols must be a tuple", context={"field": "eod_symbols"}
             )
-        if self.eod_symbols != S108_FIRST_RELEASE_SYMBOLS:
+        if not self.eod_symbols or len(self.eod_symbols) > EOD_SYMBOLS_MAX:
             raise ConfigurationError(
-                "eod_symbols must equal the fixed S1-08 first-release scope",
+                "eod_symbols must contain between 1 and EOD_SYMBOLS_MAX symbols",
+                context={"field": "eod_symbols", "max": str(EOD_SYMBOLS_MAX)},
+            )
+        if any(_EOD_SCOPE.fullmatch(item) is None for item in self.eod_symbols):
+            raise ConfigurationError(
+                "eod_symbols must contain canonical exchanges or security codes",
+                context={"field": "eod_symbols"},
+            )
+        if tuple(sorted(set(self.eod_symbols))) != self.eod_symbols:
+            raise ConfigurationError(
+                "eod_symbols must be sorted and unique",
                 context={"field": "eod_symbols"},
             )
 
@@ -212,13 +226,15 @@ def _symbols(value: object) -> tuple[str, ...]:
         raise ValueError("eod.symbols must be a non-empty array")
     if any(not isinstance(item, str) or not item for item in value):
         raise ValueError("eod.symbols must contain non-empty text")
+    if len(value) > EOD_SYMBOLS_MAX:
+        raise ValueError("eod.symbols must not exceed EOD_SYMBOLS_MAX entries")
+    if any(_EOD_SCOPE.fullmatch(item) is None for item in value):
+        raise ValueError("eod.symbols must contain canonical exchanges or security codes")
     result = tuple(value)
     if len(set(result)) != len(result):
         raise ValueError("eod.symbols must not contain duplicates")
     if result != tuple(sorted(result)):
         raise ValueError("eod.symbols must use canonical sorting")
-    if result != S108_FIRST_RELEASE_SYMBOLS:
-        raise ValueError("eod.symbols must equal the fixed S1-08 first-release scope")
     return result
 
 

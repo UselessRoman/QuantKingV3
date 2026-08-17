@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+import random
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Self
+from typing import Self, TypeVar
 
 from sqlalchemy import Engine, and_, delete, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
@@ -69,7 +71,12 @@ from quantking.jobs.adapters.persistence.models import AuditRecordRow
 from quantking.jobs.adapters.persistence.sqlite import (
     create_sqlite_engine as _create_jobs_engine,
 )
-from quantking.jobs.models import AuditRecord
+from quantking.jobs.adapters.persistence.sqlite import (
+    execute_with_retry,
+)
+from quantking.jobs.models import AuditRecord, RetryPolicy
+
+ResultT = TypeVar("ResultT")
 
 _IMMUTABLE_VERSION_STATUSES = frozenset({DatasetVersionStatus.PUBLISHED})
 _TERMINAL_BATCH_STATUSES = frozenset(
@@ -1280,10 +1287,45 @@ class DataSqliteUnitOfWork:
 
 
 class DataSqliteUnitOfWorkFactory:
-    """Callable unit-of-work factory safe to share within one process."""
+    """Callable unit-of-work factory safe to share within one process.
 
-    def __init__(self, engine: Engine) -> None:
+    ``execute`` delegates to the exact retry boundary shared with the jobs
+    adapter (``execute_with_retry``): bounded exponential backoff with jitter
+    for replay-safe ``SQLITE_BUSY``/``SQLITE_LOCKED`` short transactions and a
+    fail-closed :class:`PersistenceBusyError` after exhaustion. The sleeper
+    and jitter are injectable so retry behavior stays deterministic in tests.
+    """
+
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        sleeper: Callable[[float], None] = time.sleep,
+        jitter: Callable[[float, float], float] = random.uniform,
+    ) -> None:
         self._session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+        self._sleeper = sleeper
+        self._jitter = jitter
 
     def __call__(self) -> DataSqliteUnitOfWork:
         return DataSqliteUnitOfWork(self._session_factory)
+
+    def execute(
+        self,
+        operation: Callable[[DataRepository], ResultT],
+        policy: RetryPolicy,
+    ) -> ResultT:
+        """Run a replay-safe data operation in a fresh session per attempt.
+
+        The operation must be a pure database short transaction: each attempt
+        re-executes it against a fresh session, so it must not carry
+        filesystem, network or provider side effects.
+        """
+        return execute_with_retry(
+            open_uow=self,
+            operation=lambda unit_of_work: operation(unit_of_work.data),
+            commit=lambda unit_of_work: unit_of_work.commit(),
+            policy=policy,
+            sleeper=self._sleeper,
+            jitter=self._jitter,
+        )

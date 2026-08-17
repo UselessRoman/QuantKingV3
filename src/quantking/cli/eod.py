@@ -47,7 +47,9 @@ class _Parser(argparse.ArgumentParser):
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="quantking-data", add_help=True)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("eod-dry-run")
+    dry_run = commands.add_parser("eod-dry-run")
+    dry_run.add_argument("--manifest", required=True)
+    dry_run.add_argument("--data-root-label", default=r"E:\QuantKingV3Data")
     enqueue = commands.add_parser("eod-enqueue")
     dates = enqueue.add_mutually_exclusive_group(required=True)
     dates.add_argument("--trade-date")
@@ -263,18 +265,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if arguments and arguments[0] == "eod-dry-run":
         try:
-            _parser().parse_args(list(arguments))
-            from quantking.common.config import load_settings
-            from quantking.data.eod.release import (
-                S107K4_CODE_VERSION,
-                build_s108_dry_run,
+            parsed = _parser().parse_args(list(arguments))
+            from quantking.data.eod.release_manifest import (
+                ReleaseManifest,
+                build_zero_network_dry_run,
             )
 
-            repository_root = Path(__file__).resolve().parents[3]
-            settings = load_settings(repository_root / "configs" / "default.toml")
+            manifest = ReleaseManifest.from_dict(
+                json.loads(Path(parsed.manifest).read_text(encoding="utf-8"))
+            )
             _write(
                 sys.stdout,
-                build_s108_dry_run(settings, code_version=S107K4_CODE_VERSION),
+                build_zero_network_dry_run(
+                    manifest,
+                    data_root_label=parsed.data_root_label,
+                ),
             )
             return 0
         except Exception:
@@ -283,7 +288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {
                     "error": {
                         "code": "DRY_RUN_FAILED",
-                        "message": "The S1-08 dry-run plan could not be produced.",
+                        "message": "The release dry-run plan could not be produced.",
                     }
                 },
             )

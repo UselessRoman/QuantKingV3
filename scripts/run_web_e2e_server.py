@@ -409,6 +409,7 @@ def main() -> int:
                     sqlite_retry_jitter_ratio=0.0,
                     job_heartbeat_min_interval_ms=1000,
                     job_progress_min_interval_ms=250,
+                    eod_symbols=("000001.SZ", "600000.SH"),
                 ),
             ),
             base_resolver=_BaseResolver(),

@@ -119,8 +119,13 @@ sufficient=false 如实记录），K4C-R3（合同修订 ADR-022 + Phase B 9/9 �
 （ADR-027）：第 3 次 pilot、全量诊断与 full 均不执行，`XTQUANT_LEGACY` 不进入发布链**。
 **S1-07K4 已于 2026-08-17 经 K4E 独立验收通过并形成单一 K4 提交**
 （[S1-07K4 验收记录](stage1/S1-07K4_ACCEPTANCE.md)）。
-下一步是 [S1-08R2](stage1/S1-08R2_TASK.md) 发布引擎收口，随后
-[S1-08R3](stage1/S1-08R3_TASK.md) 唯一正式 Job 和终验。Stage 1 尚未完成，Stage 2 未开始。
+**S1-08R2（发布引擎离线收口）已于 2026-08-17 独立只读验收通过**
+（[S1-08R2 验收记录](stage1/S1-08R2_ACCEPTANCE.md)、
+[实施记录](stage1/S1-08R2_IMPLEMENTATION.md)）：存储重试/幂等/单发布者/恢复合同、
+manifest 驱动的范围与预算、只读 verifier 与 DataCenter 读侧扩展均完成离线验收，
+R2 零真实网络、零正式数据根写入。
+下一步是 [S1-08R3](stage1/S1-08R3_TASK.md) 唯一正式 Job 和终验，须由单独任务与新
+授权启动。Stage 1 尚未完成，Stage 2 未开始。
 Stage 2 的精简实施路径已规划为 S2-01～S2-06（研究合同 → point-in-time 研究输入 → 股票池/
 标签 → 基础因子 → Qlib/Alpha158/诊断 → 正式终验），见
 [Stage 2 当前入口](stage2/README.md)；规划文档不构成阶段启动或外部操作授权。

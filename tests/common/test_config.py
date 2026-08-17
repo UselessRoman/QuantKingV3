@@ -113,13 +113,14 @@ def test_load_settings_accepts_only_reserved_toolchain_process_keys(tmp_path: Pa
         "[]",
         '["000001.SZ", "000001.SZ"]',
         '["600000.SH", "000001.SZ"]',
-        '["000001.SZ", "601398.SH"]',
         '["000001", "600000.SH"]',
+        (
+            '["000001.SZ", "600000.SH", "000858.SZ", "300750.SZ",'
+            ' "688981.SH", "600519.SH", "601398.SH"]'
+        ),
     ],
 )
-def test_load_settings_rejects_noncanonical_or_nonrelease_eod_scope(
-    tmp_path: Path, symbols: str
-) -> None:
+def test_load_settings_rejects_noncanonical_eod_scope(tmp_path: Path, symbols: str) -> None:
     config_path = tmp_path / "default.toml"
     _write_defaults(config_path)
     text = config_path.read_text(encoding="utf-8")
@@ -130,6 +131,29 @@ def test_load_settings_rejects_noncanonical_or_nonrelease_eod_scope(
 
     with pytest.raises(ConfigurationError):
         load_settings(config_path, environ={})
+
+
+def test_load_settings_accepts_arbitrary_canonical_sorted_scope(tmp_path: Path) -> None:
+    config_path = tmp_path / "default.toml"
+    _write_defaults(config_path)
+    text = config_path.read_text(encoding="utf-8")
+    config_path.write_text(
+        text.replace(
+            'symbols = ["000001.SZ", "600000.SH"]',
+            'symbols = ["000001.SZ", "000858.SZ", "300750.SZ", "600000.SH", "688981.SH"]',
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(config_path, environ={})
+
+    assert settings.eod_symbols == (
+        "000001.SZ",
+        "000858.SZ",
+        "300750.SZ",
+        "600000.SH",
+        "688981.SH",
+    )
 
 
 def test_load_settings_wraps_invalid_path_with_stable_error_chain(tmp_path: Path) -> None:

@@ -26,7 +26,7 @@ def _service(tmp_path: Path) -> tuple[EodCommandService, JobService]:
     return (
         EodCommandService(
             jobs,
-            config=EodExecutionConfig.production(
+            config=EodExecutionConfig.production_k4(
                 code_version="test-code", settings=app_settings(tmp_path)
             ),
         ),
@@ -147,8 +147,46 @@ def _finish(jobs: JobService, job_id: str, status: JobStatus) -> None:
         )
 
 
+def test_production_config_is_r2_capped_and_freezes_roundtrip(tmp_path: Path) -> None:
+    from quantking.data.eod.contracts import R2_EOD_CONFIG_SCHEMA
+    from quantking.data.eod.frozen import parse_frozen_eod_command
+    from quantking.data.eod.release_manifest import RELEASE_SAFETY_CAPS
+
+    database = tmp_path / "jobs-r2.db"
+    initialize_database(database)
+    jobs = JobService(SqliteUnitOfWorkFactory(create_sqlite_engine(database, busy_timeout_ms=250)))
+    config = EodExecutionConfig.production(code_version="test-r2", settings=app_settings(tmp_path))
+    assert config.is_r2
+    cap = RELEASE_SAFETY_CAPS["endpoint_invocations_per_role"]
+    assert config.a_baostock_endpoint_limit == cap
+    assert config.b_tencent_endpoint_limit == cap
+    assert config.endpoint_invocation_limit == cap * 3
+    assert config.estimated_http_request_limit == cap * 3 + cap * 2
+    assert config.release_manifest_sha256 is None
+    assert config.legacy_import_manifest_sha256 is None
+
+    rendered = config.to_dict(selected=("daily_bar_unadjusted",), bases={})
+    assert rendered["schema_version"] == R2_EOD_CONFIG_SCHEMA
+    assert rendered["release_manifest_sha256"] is None
+    assert rendered["a_baostock_endpoint_limit"] == cap
+
+    command = EodCommandService(jobs, config=config)
+    created = command.enqueue(_request(), idempotency_key="r2-cap", requester="pytest")
+    job = jobs.get_job(created.job_id)
+    assert job.version_manifest["akshare_unit_policy_version"]
+    frozen = parse_frozen_eod_command(
+        job_type=job.job_type,
+        input_manifest=job.input_manifest,
+        config_manifest=job.config_manifest,
+        version_manifest=job.version_manifest,
+    )
+    assert frozen.a_baostock_endpoint_limit == cap
+    assert frozen.b_tencent_endpoint_limit == cap
+    assert frozen.release_manifest_sha256 is None
+
+
 def test_production_config_freezes_k4_constants_and_manifest(tmp_path: Path) -> None:
-    config = EodExecutionConfig.production(
+    config = EodExecutionConfig.production_k4(
         code_version="test-code", settings=app_settings(tmp_path)
     )
     assert config.adapter_version == "baostock-akshare-daily-bar.k4.v1"
@@ -230,7 +268,7 @@ def test_retry_rejects_changed_request_or_execution_versions(tmp_path: Path) -> 
 
     changed = EodCommandService(
         jobs,
-        config=EodExecutionConfig.production(
+        config=EodExecutionConfig.production_k4(
             code_version="changed-code", settings=app_settings(tmp_path)
         ),
     )

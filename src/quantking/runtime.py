@@ -49,7 +49,6 @@ from quantking.data.center import (
     ResolutionVerifierPort,
 )
 from quantking.data.comparison.verifier import DifferenceReportVerifier
-from quantking.data.eod.release import S107K4_CODE_VERSION
 from quantking.data.eod.service import EodCommandService, EodExecutionConfig
 from quantking.data.models import DataUpstream
 from quantking.data.quality.artifacts import QualityArtifactWriter
@@ -70,7 +69,7 @@ from quantking.web.app import create_app
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = _REPOSITORY_ROOT / "configs" / "default.toml"
-EOD_CODE_VERSION = S107K4_CODE_VERSION
+EOD_CODE_VERSION = "s1-08r2.v1"
 EXPECTED_DATABASE_REVISION = "20260810_0014"
 WORKER_LEASE_TIMEOUT = timedelta(minutes=2)
 _S108_BUSINESS_ROOTS = ("metadata", "raw", "artifacts", "warehouse")

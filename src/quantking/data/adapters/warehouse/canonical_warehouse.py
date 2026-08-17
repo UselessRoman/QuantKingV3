@@ -43,7 +43,8 @@ import json
 import os
 import re
 import threading
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -74,6 +75,11 @@ from quantking.data.adapters.warehouse.manifest import (
 )
 from quantking.data.adapters.warehouse.partitioning import (
     partition_scheme_for,
+)
+from quantking.data.adapters.warehouse.publish_lock import (
+    PublishInProgressError,
+    VersionPublishLock,
+    lock_path_for,
 )
 from quantking.data.adapters.warehouse.verifier import (
     assert_path_under_root,
@@ -182,8 +188,16 @@ class CanonicalWarehouse:
     published.
     """
 
-    def __init__(self, *, data_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        data_root: Path,
+        lock_sleeper: Callable[[float], None] = time.sleep,
+        lock_timeout_seconds: float = 30.0,
+    ) -> None:
         self._data_root = verify_data_root(data_root)
+        self._lock_sleeper = lock_sleeper
+        self._lock_timeout_seconds = lock_timeout_seconds
 
     @property
     def data_root(self) -> Path:
@@ -210,24 +224,96 @@ class CanonicalWarehouse:
         with publish_lock:
             self._assert_managed_target(self._data_root, final)
             self._assert_managed_target(self._data_root, incomplete)
-            if final.exists():
-                self._validate_inputs(request)
-                return self._reconcile_existing(final, request)
-            self._validate_request_credentials(request)
+            directory_name = path_safe_id(str(request.version.version_id))
+            inter_process_lock = VersionPublishLock(
+                lock_path_for(
+                    self._data_root,
+                    request.version.dataset.value,
+                    directory_name,
+                )
+            )
+            self._acquire_with_bounded_wait(inter_process_lock)
             try:
-                incomplete.mkdir(parents=True, exist_ok=False)
-            except OSError as error:
-                raise CanonicalWarehouseError(
-                    "failed to create incomplete directory",
-                    context={"version_id": str(request.version.version_id)},
-                ) from error
+                if final.exists():
+                    self._validate_inputs(request)
+                    return self._reconcile_existing(final, request)
+                self._validate_request_credentials(request)
+                try:
+                    incomplete.mkdir(parents=True, exist_ok=False)
+                except OSError as error:
+                    raise CanonicalWarehouseError(
+                        "failed to create incomplete directory",
+                        context={"version_id": str(request.version.version_id)},
+                    ) from error
+                try:
+                    self._write_input_listing(incomplete, request)
+                    self._validate_inputs(request)
+                except CanonicalWarehouseError as error:
+                    self._preserve_failure(incomplete, request, error)
+                    raise
+                return self._publish_fresh(request, final)
+            finally:
+                inter_process_lock.release()
+
+    def _acquire_with_bounded_wait(self, lock: VersionPublishLock) -> None:
+        """Acquire the cross-process lock, bounded-waiting on a live holder.
+
+        While another live process owns the publish we wait in small
+        increments; after the bounded timeout we fail closed with the stable
+        ``PUBLISH_LOCK_HELD`` error so the caller can converge idempotently on
+        a later attempt. The injected sleeper keeps the wait deterministic in
+        tests.
+        """
+        deadline = self._lock_timeout_seconds
+        waited = 0.0
+        interval = 0.05
+        while True:
             try:
-                self._write_input_listing(incomplete, request)
-                self._validate_inputs(request)
-            except CanonicalWarehouseError as error:
-                self._preserve_failure(incomplete, request, error)
-                raise
-            return self._publish_fresh(request, final)
+                lock.acquire()
+                return
+            except PublishInProgressError:
+                if waited >= deadline:
+                    raise
+                self._lock_sleeper(interval)
+                waited += interval
+
+    def recover_stale_incomplete(
+        self,
+        version: DatasetVersion,
+        *,
+        now_iso: str | None = None,
+    ) -> dict[str, str]:
+        """Classify and close a leftover ``.incomplete`` directory (S1-08R2 A4).
+
+        A hard interruption can leave a staging ``.incomplete`` directory
+        behind. This explicit recovery flow preserves the forensic content by
+        renaming it to ``<name>.incomplete.interrupted-<utc>`` so a new task
+        may rerun the publish; the content idempotency key is released without
+        deleting any evidence. Returns a stable classification summary.
+        """
+        final = self._final_path_for(version.dataset.value, str(version.version_id))
+        incomplete = final.with_name(final.name + ".incomplete")
+        if not incomplete.exists():
+            return {"status": "absent", "version_id": str(version.version_id)}
+        if final.exists():
+            classification = "orphaned-after-publish"
+        elif (incomplete / WAREHOUSE_COMPLETE_FILENAME).exists():
+            classification = "promotion-interrupted"
+        else:
+            classification = "staging-interrupted"
+        stamp = (now_iso or _now_iso()).replace(":", "").replace("+", "-")
+        preserved = incomplete.with_name(f"{incomplete.name}.interrupted-{stamp}")
+        os.replace(incomplete, preserved)
+        return {
+            "status": "recovered",
+            "classification": classification,
+            "version_id": str(version.version_id),
+            "preserved_directory": preserved.name,
+        }
+
+    def _final_path_for(self, dataset_value: str, version_id: str) -> Path:
+        directory_name = path_safe_id(version_id)
+        return self._data_root / "warehouse" / dataset_value / directory_name
 
     # -- internals ----------------------------------------------------------
 
@@ -464,7 +550,11 @@ class CanonicalWarehouse:
             )
         # Compare the content_sha256 to detect any byte-level drift in
         # the publishable data, even if the file layout is unchanged.
-        previous_content_sha = self._compute_content_sha(request.version.dataset, request.tables)
+        previous_content_sha = self._compute_content_sha(
+            request.version.dataset,
+            request.tables,
+            empty_result=request.empty_result,
+        )
         if previous.get("content_sha256") != previous_content_sha:
             raise IdempotencyConflictError(
                 "content mismatch against existing manifest",
@@ -634,12 +724,21 @@ class CanonicalWarehouse:
         )
 
     @staticmethod
-    def _compute_content_sha(dataset: object, tables: Sequence[pa.Table]) -> str:
+    def _compute_content_sha(
+        dataset: object,
+        tables: Sequence[pa.Table],
+        *,
+        empty_result: object = None,
+    ) -> str:
         """Compatibility wrapper around the shared logical-content digest."""
-        from quantking.data.models import DatasetKind
+        from quantking.data.models import DatasetKind, EmptyResultInfo
 
         kind = dataset if isinstance(dataset, DatasetKind) else DatasetKind(str(dataset))
-        return canonical_content_sha256(kind, tables)
+        return canonical_content_sha256(
+            kind,
+            tables,
+            empty_result=empty_result if isinstance(empty_result, EmptyResultInfo) else None,
+        )
 
     def _write_manifest(self, directory: Path, manifest: CanonicalManifest) -> None:
         target = directory / WAREHOUSE_MANIFEST_FILENAME

@@ -743,7 +743,7 @@ export function App({ api = webApi, eventSourceFactory = defaultEventSourceFacto
                   {baseMode === "mapping" && selected.map((dataset) => <label key={dataset}>{dataset}<input aria-label={`${dataset} version`} placeholder="data_version:…" value={baseVersions[dataset] ?? ""} onChange={(event) => setBaseVersions((value) => ({ ...value, [dataset]: event.target.value }))} /></label>)}
                 </fieldset>
                 <p className="notice">发布意图固定为 <code>PUBLISH_AFTER_QUALITY</code>；POST 只入队，不启动 Worker。</p>
-                <p className="notice">首发 scope 由服务端固定为 <code>000001.SZ</code>、<code>600000.SH</code>，浏览器不能提交或扩大证券范围。</p>
+                <p className="notice">证券 scope 由服务端配置（<code>eod.symbols</code>）冻结，浏览器不能提交或扩大证券范围。</p>
                 <button type="submit">入队 EOD</button>
               </form>
               {eodMessage && <p role="status">{eodMessage}</p>}

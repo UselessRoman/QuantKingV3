@@ -47,8 +47,13 @@ K4D inventory dry-run 已冻结并按其 plan SHA 完成真实只读 inventory�
 （ADR-027）：第 3 次 pilot、全量诊断与 full 均不执行，`XTQUANT_LEGACY` 不进入发布链**。
 **S1-07K4 已于 2026-08-17 经 K4E 独立验收通过并形成单一 K4 提交**
 （[S1-07K4 验收记录](docs/stage1/S1-07K4_ACCEPTANCE.md)）。
+**S1-08R2（发布引擎离线收口）已于 2026-08-17 独立只读验收通过**
+（[S1-08R2 验收记录](docs/stage1/S1-08R2_ACCEPTANCE.md)）：SQLite BUSY/LOCKED 有界
+重试、合法空版本幂等收敛、跨进程单发布者锁、manifest 驱动的证券集合/coverage/分块/
+预算/血缘、只读 manifest verifier 与 DataCenter 来源投影、逐证券 coverage 分页均以
+合成数据与临时目录验收；R2 零真实网络、零旧根读取、零正式数据根写入。
 Stage 1 现在只按
-`S1-07K4（已完成）→ S1-08R2（下一步）→ S1-08R3`
+`S1-07K4（已完成）→ S1-08R2（已完成）→ S1-08R3（下一步，须由单独任务与新授权启动）`
 顺序收口；旧根已完成只读清单，两次受管导入 attempt 均失败即停，迁移已按 ADR-027 拒绝。
 Stage 1 尚未完成，Stage 2
 未开始。

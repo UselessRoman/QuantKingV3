@@ -33,6 +33,8 @@ def _read(relative: str) -> str:
         "S1-06_ACCEPTANCE.md",
         "S1-07K4_ACCEPTANCE.md",
         "S1-07K4_IMPLEMENTATION.md",
+        "S1-08R2_IMPLEMENTATION.md",
+        "S1-08R2_ACCEPTANCE.md",
     ),
 )
 def test_compact_stage1_documents_exist(name: str) -> None:
@@ -347,13 +349,14 @@ def test_k4d_pilot_dry_run_evidence_is_registered() -> None:
     assert "76e928aa" in text
 
 
-def test_current_status_docs_record_k4e_acceptance_with_s1_08_r2_next() -> None:
-    """K4E has passed with a single K4 commit; S1-08R2 is next; Stage 1 is open.
+def test_current_status_docs_record_k4e_and_s1_08_r2_acceptance_with_r3_next() -> None:
+    """K4E and S1-08R2 have passed; S1-08R3 is next; Stage 1 remains open.
 
-    Current-status sections must not describe K4E as pending acceptance or
-    pending commit, must not describe K4D as a successful migration, and must
-    keep S1-08R2 as the single next step. Dated historical sections that carry
-    their own supersession notes may keep the old wording.
+    Current-status sections must not describe K4E or S1-08R2 as pending
+    acceptance, must not describe K4D as a successful migration, and must keep
+    S1-08R3 as the single next step requiring a new task and authorization.
+    Dated historical sections that carry their own supersession notes may keep
+    the old wording.
     """
 
     current_status = " ".join(
@@ -373,7 +376,8 @@ def test_current_status_docs_record_k4e_acceptance_with_s1_08_r2_next() -> None:
     for required in (
         "S1-07K4 独立验收通过",
         "形成单一 K4 提交",
-        "下一步是 S1-08R2",
+        "S1-08R2 独立只读验收通过",
+        "下一步是 S1-08R3",
         "Stage 1 尚未完成",
         "Stage 2 未开始",
     ):
@@ -388,6 +392,8 @@ def test_current_status_docs_record_k4e_acceptance_with_s1_08_r2_next() -> None:
         "K4 提交与不可变验收记录尚未完成",
         "K4E 待验收",
         "K4E 待提交",
+        "S1-08R2 待开发",
+        "下一步是 S1-08R2",
     ):
         assert outdated not in current_status
 
@@ -411,3 +417,40 @@ def test_current_status_docs_record_k4e_acceptance_with_s1_08_r2_next() -> None:
     matrix = _read("docs/stage1/ACCEPTANCE.md")
     assert "S1-07K4_ACCEPTANCE.md" in matrix
     assert "已主验收" in matrix
+
+
+def test_s1_08_r2_acceptance_record_is_frozen_with_real_gate_numbers() -> None:
+    """The R2 acceptance record must carry the independently rerun numbers.
+
+    The record must state the pass verdict, the baseline commit, the offline
+    scope (zero network / legacy root / data-root writes / F drive), the
+    independently rerun full-suite count, and the R3 authorization boundary.
+    """
+
+    acceptance = _read("docs/stage1/S1-08R2_ACCEPTANCE.md")
+    for phrase in (
+        "S1-08R2 独立验收通过",
+        "2026-08-17",
+        "48d8180",
+        "1309 passed",
+        "1 passed",
+        "纯离线只读验收",
+        "零真实网络",
+        "零旧根读取",
+        "零正式数据根写入",
+        "零 F 盘访问",
+        "e7b9ca1c869dded7c12602f14067d1125423a55293dc2a7a392b4693098d3b9e",
+        "f3786ef74aef7939e0807a6da19c78655cb40e62af1cac0ac9f3521f24ed3230",
+        "下一步是 S1-08R3",
+        "须由单独任务与新授权启动",
+        "Stage 1 尚未完成",
+        "Stage 2 未开始",
+    ):
+        assert phrase in acceptance
+    for pending in ("待验收", "待提交", "待完成", "验收不通过"):
+        assert pending not in acceptance
+
+    matrix = _read("docs/stage1/ACCEPTANCE.md")
+    assert "S1-08R2_ACCEPTANCE.md" in matrix
+    task = _read("docs/stage1/S1-08R2_TASK.md")
+    assert "已验收" in task

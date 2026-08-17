@@ -130,6 +130,25 @@ def create_api_router(
         def data_version_lineage(version_id: str) -> object:
             return data_center_port.get_version_lineage(version_id)
 
+        @router.get("/data/versions/{version_id}/sources")
+        def data_version_sources(version_id: str) -> object:
+            return data_center_port.get_version_source_projection(version_id)
+
+        @router.get("/data/versions/{version_id}/security-coverage")
+        def data_version_security_coverage(
+            version_id: str,
+            cursor: str | None = None,
+            limit: int = Query(default=50, ge=1, le=100),
+        ) -> object:
+            validate_cursor(cursor, f"security-coverage:{version_id}")
+            return page(
+                data_center_port.get_version_security_coverage(
+                    version_id,
+                    cursor=cursor,
+                    limit=limit,
+                )
+            )
+
         @router.get("/data/versions/{version_id}/preview")
         def data_preview(
             version_id: str,

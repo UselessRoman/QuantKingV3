@@ -207,7 +207,7 @@ def _execution_config(
     calendar_sha: str,
     security_exceptions: Mapping[str, tuple[tuple[str, str], ...]] | None = None,
 ) -> EodExecutionConfig:
-    config = EodExecutionConfig.production(code_version=S107K4_CODE_VERSION, settings=settings)
+    config = EodExecutionConfig.production_k4(code_version=S107K4_CODE_VERSION, settings=settings)
     return replace(
         config,
         datasets={
@@ -408,6 +408,7 @@ def _settings(tmp_path: Path) -> AppSettings:
         sqlite_retry_jitter_ratio=0.0,
         job_heartbeat_min_interval_ms=1000,
         job_progress_min_interval_ms=250,
+        eod_symbols=_SYMBOLS,
     )
 
 

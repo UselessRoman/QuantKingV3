@@ -162,7 +162,11 @@ class EodWorkerHandler:
             if command.resolution_rule_version != K4_RESOLUTION_RULE_VERSION:
                 raise EodExecutionError("FROZEN_SOURCE_ROUTE_INVALID")
             endpoint_budget = K4EndpointBudget(
-                per_source_limits={upstream: 4 for upstream in PRODUCTION_UPSTREAMS},
+                per_source_limits={
+                    DataUpstream.BAOSTOCK: command.a_baostock_endpoint_limit,
+                    DataUpstream.TENCENT: command.b_tencent_endpoint_limit,
+                    DataUpstream.SINA: command.c_endpoint_invocation_limit,
+                },
                 total_limit=command.endpoint_invocation_limit,
             )
             logger.info(

@@ -38,7 +38,12 @@ K4D 评估已完成并收口（ADR-027）：只读 inventory 已于 2026-08-16 �
 `XTQUANT_LEGACY` 不进入正式 Raw、Canonical、Warehouse 或发布候选。**S1-07K4 已于
 2026-08-17 经 K4E 独立验收通过并形成单一 K4 提交**
 （[S1-07K4 验收记录](stage1/S1-07K4_ACCEPTANCE.md)），该验收不构成新的
-真实运行授权。东财和 FTShare 不得进入正式来源。
+真实运行授权。**S1-08R2（发布引擎离线收口）已于 2026-08-17 独立只读验收通过**
+（[S1-08R2 验收记录](stage1/S1-08R2_ACCEPTANCE.md)）：发布范围/预算/血缘由冻结
+release manifest（`s1-08r2-release-manifest.v1` + 独立 `RELEASE_SAFETY_CAPS`）驱动，
+SQLite 锁重试、合法空版本幂等、跨进程单发布者、硬中断恢复、逐证券真实 coverage 与
+只读 verifier 均有合成回归；R2 零真实网络、零正式数据根写入，下一步 S1-08R3 须由
+单独任务与新授权启动。东财和 FTShare 不得进入正式来源。
 
 ## 分层
 

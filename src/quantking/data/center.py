@@ -8,7 +8,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Protocol, Self
 
@@ -726,6 +726,186 @@ class DataCenterQueryService:
             "difference_reports": [_report(item) for item in verified_reports],
             "resolution": _resolution(resolution),
         }
+
+    def get_version_source_projection(self, version_id: str) -> Mapping[str, object]:
+        """Per-upstream planned/actual coverage, health and freshness (S1-08R2).
+
+        Bounded and path-free: planned budgets come from the release Job's
+        frozen config manifest, actual counts from the version's batch
+        lineage, freshness from the published coverage end. The
+        ``XTQUANT_LEGACY`` disposition is the frozen ADR-027 rejection — it
+        is displayed as excluded, never as a production source.
+        """
+        try:
+            parsed = parse_entity_id(version_id)
+        except InvalidIdError as error:
+            raise InvalidDataCenterQueryError("version_id is invalid") from error
+        if parsed.namespace != "data_version" or str(parsed) != version_id:
+            raise InvalidDataCenterQueryError("version_id is invalid")
+        with self._uow_factory() as uow:
+            version = uow.data.get_version(version_id)
+            if version.status is not DatasetVersionStatus.PUBLISHED:
+                raise DataCenterReadIntegrityError("source projection requires a PUBLISHED version")
+            batches = [uow.data.get_batch(str(item)) for item in version.input_batch_ids]
+            resolutions = uow.data.find_resolution_runs_by_candidate_version_id(version_id)
+        if len(resolutions) != 1:
+            raise DataCenterReadIntegrityError("version resolution lineage is ambiguous")
+        planned: dict[str, int | None] = {"A": None, "B": None, "C": None}
+        release_manifest_sha256: str | None = None
+        try:
+            job = self._jobs.get_job(str(resolutions[0].created_job_id))
+            config = json.loads(str(job.config_manifest.get("config_json", "{}")))
+            planned = {
+                "A": config.get("a_baostock_endpoint_limit"),
+                "B": config.get("b_tencent_endpoint_limit"),
+                "C": config.get("c_endpoint_invocation_limit"),
+            }
+            release_manifest_sha256 = job.version_manifest.get("release_manifest_sha256")
+        except (ValueError, TypeError, KeyError):
+            planned = {"A": None, "B": None, "C": None}
+        role_by_upstream = {
+            "BAOSTOCK": "A",
+            "TENCENT": "B",
+            "SINA": "C",
+        }
+
+        def _source(role: str, upstream: str) -> dict[str, object]:
+            return {
+                "role": role,
+                "upstream": upstream,
+                "planned_endpoints": planned[role],
+                "actual_endpoints": 0,
+                "batches": 0,
+                "rows": 0,
+                "latest_status": None,
+                "latest_ended_at": None,
+            }
+
+        sources: dict[str, dict[str, object]] = {
+            "A": _source("A", "BAOSTOCK/BAOSTOCK"),
+            "B": _source("B", "AKSHARE/TENCENT"),
+            "C": _source("C", "AKSHARE/SINA"),
+        }
+        batch_counts = {"A": 0, "B": 0, "C": 0}
+        endpoint_counts = {"A": 0, "B": 0, "C": 0}
+        row_counts = {"A": 0, "B": 0, "C": 0}
+        for batch in batches:
+            role = role_by_upstream.get(batch.upstream.value)
+            if role is None:
+                raise DataCenterReadIntegrityError(
+                    "source projection contains a non-production upstream"
+                )
+            batch_counts[role] += 1
+            # Each raw manifest file is one chunk endpoint invocation.
+            endpoint_counts[role] += len(batch.manifest_files)
+            row_counts[role] += batch.row_count or 0
+            if batch.ended_at is not None:
+                sources[role]["latest_ended_at"] = batch.ended_at.to_iso()
+            sources[role]["latest_status"] = batch.status.value
+        for role in ("A", "B", "C"):
+            sources[role]["batches"] = batch_counts[role]
+            sources[role]["actual_endpoints"] = endpoint_counts[role]
+            sources[role]["rows"] = row_counts[role]
+        return {
+            "version_id": version_id,
+            "coverage_end": (
+                None if version.coverage_end is None else version.coverage_end.value.isoformat()
+            ),
+            "freshness_coverage_end": (
+                None if version.coverage_end is None else version.coverage_end.value.isoformat()
+            ),
+            "release_manifest_sha256": release_manifest_sha256,
+            "sources": [sources[role] for role in ("A", "B", "C")],
+            "legacy_disposition": {
+                "source": "XTQUANT_LEGACY",
+                "status": "REJECTED",
+                "adr": "ADR-027",
+                "included_batches": 0,
+                "published_count": 0,
+            },
+        }
+
+    def get_version_security_coverage(
+        self,
+        version_id: str,
+        *,
+        cursor: str | None,
+        limit: int,
+    ) -> DataCenterPage:
+        """Bounded per-security coverage segments for one PUBLISHED version."""
+        try:
+            parsed = parse_entity_id(version_id)
+        except InvalidIdError as error:
+            raise InvalidDataCenterQueryError("version_id is invalid") from error
+        if parsed.namespace != "data_version" or str(parsed) != version_id:
+            raise InvalidDataCenterQueryError("version_id is invalid")
+        fingerprint = _query_fingerprint(
+            f"security-coverage:{version_id}", {"version_id": version_id}
+        )
+        parsed_cursor = _parse_cursor(
+            cursor,
+            f"security-coverage:{version_id}",
+            query_fingerprint=fingerprint,
+            stable_namespaces=frozenset({"data_version"}),
+            sort_key_size=1,
+        )
+        with self._uow_factory() as uow:
+            version = uow.data.get_version(version_id)
+            if version.status is not DatasetVersionStatus.PUBLISHED:
+                raise DataCenterReadIntegrityError("security coverage requires a PUBLISHED version")
+            dataset = version.dataset.value
+            created_at = version.created_at.to_iso()
+        rows = self._preview.query_by_id(
+            version_id=version_id,
+            dataset=dataset,
+            fields=("code", "trade_date"),
+        ).to_pylist()
+        dates_by_code: dict[str, set[str]] = {}
+        for row in rows:
+            code = row.get("code")
+            trade_date = row.get("trade_date")
+            if isinstance(code, str) and trade_date is not None:
+                dates_by_code.setdefault(code, set()).add(str(trade_date))
+
+        def segments(values: set[str]) -> list[dict[str, str]]:
+            ordered = sorted(values)
+            runs: list[dict[str, str]] = []
+            start = previous = ordered[0]
+            for current in ordered[1:]:
+                previous_date = date.fromisoformat(previous)
+                current_date = date.fromisoformat(current)
+                if current_date != previous_date + timedelta(days=1):
+                    runs.append({"start": start, "end": previous})
+                    start = current
+                previous = current
+            runs.append({"start": start, "end": previous})
+            return runs
+
+        ordered_codes = sorted(dates_by_code)
+        start_index = 0
+        if parsed_cursor is not None:
+            after_code = parsed_cursor[2][0]
+            start_index = sum(1 for code in ordered_codes if code <= after_code)
+        page_codes = ordered_codes[start_index : start_index + limit]
+        values = [
+            {
+                "code": code,
+                "segments": segments(dates_by_code[code]),
+                "row_count": len(dates_by_code[code]),
+            }
+            for code in page_codes
+        ]
+        next_cursor = None
+        if start_index + limit < len(ordered_codes):
+            last_code = page_codes[-1] if page_codes else ""
+            next_cursor = _cursor(
+                f"security-coverage:{version_id}",
+                fingerprint,
+                created_at,
+                version_id,
+                (last_code,),
+            )
+        return DataCenterPage(items=tuple(values), next_cursor=next_cursor)
 
     def preview(
         self,

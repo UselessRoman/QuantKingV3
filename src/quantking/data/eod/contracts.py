@@ -21,6 +21,7 @@ EOD_REQUEST_MANIFEST_SCHEMA = "eod-request-manifest.v1"
 LEGACY_EOD_CONFIG_SCHEMA = "eod-execution-config.v2"
 EOD_CONFIG_SCHEMA = "eod-execution-config.v3"
 K4_EOD_CONFIG_SCHEMA = "eod-execution-config.v4"
+R2_EOD_CONFIG_SCHEMA = "eod-execution-config.r2.v5"
 
 _DATASET_ORDER = (
     DatasetKind.EXCHANGE_CALENDAR,

@@ -18,6 +18,7 @@ from quantking.data.eod.contracts import (
     EOD_JOB_TYPE,
     EOD_REQUEST_MANIFEST_SCHEMA,
     K4_EOD_CONFIG_SCHEMA,
+    R2_EOD_CONFIG_SCHEMA,
     EodBaseVersion,
     EodDatasetConfig,
     EodRunRequest,
@@ -27,6 +28,10 @@ from quantking.data.eod.contracts import (
     sha256_text,
 )
 from quantking.data.eod.frozen import FrozenEodCommandError, parse_frozen_eod_command
+from quantking.data.eod.release_manifest import (
+    RELEASE_SAFETY_CAPS,
+    ReleaseManifest,
+)
 from quantking.data.models import DatasetKind
 from quantking.data.quality.models import K4_DAILY_RULE_VERSION
 from quantking.data.resolution.models import (
@@ -66,8 +71,18 @@ class EodExecutionConfig:
     estimated_baostock_protocol_message_limit: int
     legacy_import_manifest_sha256: str | None
     datasets: Mapping[str, EodDatasetConfig]
+    release_manifest_sha256: str | None = None
+    a_baostock_endpoint_limit: int | None = None
+    b_tencent_endpoint_limit: int | None = None
 
     def __post_init__(self) -> None:
+        r2 = (
+            self.release_manifest_sha256 is not None
+            or self.a_baostock_endpoint_limit is not None
+            or self.b_tencent_endpoint_limit is not None
+        )
+        if r2 and (self.a_baostock_endpoint_limit is None or self.b_tencent_endpoint_limit is None):
+            raise ValueError("R2 execution config requires both per-role endpoint limits")
         for field in (
             "code_version",
             "adapter_version",
@@ -103,7 +118,51 @@ class EodExecutionConfig:
             raise ValueError("chunk sizes must be positive")
         if self.max_days_per_chunk != 31 or self.max_items_per_chunk != 1:
             raise ValueError("S1-08 chunk sizes must equal 31 days and one symbol")
-        if self.resolution_rule_version == K2_RESOLUTION_RULE_VERSION:
+        if self.release_manifest_sha256 is not None and (
+            not isinstance(self.release_manifest_sha256, str)
+            or _SHA256.fullmatch(self.release_manifest_sha256) is None
+        ):
+            raise ValueError("release_manifest_sha256 must be lowercase SHA-256 or None")
+        if r2:
+            caps = RELEASE_SAFETY_CAPS
+            if self.resolution_rule_version != K4_RESOLUTION_RULE_VERSION:
+                raise ValueError("R2 execution config is bound to the K4 resolution rule")
+            if self.d_endpoint_invocation_limit != 0:
+                raise ValueError("R2 execution config keeps the D role retired")
+            if self.legacy_import_manifest_sha256 is not None:
+                raise ValueError("R2 execution config keeps legacy import manifest SHA null")
+            assert self.a_baostock_endpoint_limit is not None
+            assert self.b_tencent_endpoint_limit is not None
+            for name, value in (
+                ("a_baostock_endpoint_limit", self.a_baostock_endpoint_limit),
+                ("b_tencent_endpoint_limit", self.b_tencent_endpoint_limit),
+                ("c_endpoint_invocation_limit", self.c_endpoint_invocation_limit),
+            ):
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise TypeError(f"{name} must be an integer")
+                if not 1 <= value <= caps["endpoint_invocations_per_role"]:
+                    raise ValueError(f"{name} must stay within the safety cap")
+            if self.endpoint_invocation_limit != (
+                self.a_baostock_endpoint_limit
+                + self.b_tencent_endpoint_limit
+                + self.c_endpoint_invocation_limit
+            ):
+                raise ValueError("R2 endpoint total must equal the sum of the role limits")
+            if self.endpoint_invocation_limit > caps["endpoint_invocations_total"]:
+                raise ValueError("R2 endpoint total exceeds the safety cap")
+            if self.estimated_http_request_limit != (
+                self.b_tencent_endpoint_limit * 3 + self.c_endpoint_invocation_limit * 2
+            ):
+                raise ValueError("R2 HTTP budget must be derived from the role limits")
+            if self.estimated_http_request_limit > caps["akshare_http_requests"]:
+                raise ValueError("R2 HTTP budget exceeds the safety cap")
+            if self.estimated_baostock_protocol_message_limit != (
+                self.a_baostock_endpoint_limit * 3
+            ):
+                raise ValueError("R2 protocol budget must be derived from the A role limit")
+            if self.estimated_baostock_protocol_message_limit > caps["baostock_protocol_messages"]:
+                raise ValueError("R2 protocol budget exceeds the safety cap")
+        elif self.resolution_rule_version == K2_RESOLUTION_RULE_VERSION:
             if (
                 self.endpoint_invocation_limit != 12
                 or self.c_endpoint_invocation_limit != 4
@@ -148,8 +207,13 @@ class EodExecutionConfig:
         object.__setattr__(self, "datasets", MappingProxyType(dict(sorted(normalized.items()))))
 
     @classmethod
-    def production(cls, *, code_version: str, settings: AppSettings) -> EodExecutionConfig:
-        """Freeze the only S1-08 production scope from validated application settings."""
+    def production_k4(cls, *, code_version: str, settings: AppSettings) -> EodExecutionConfig:
+        """Freeze the historical K4-route config (frozen 12/4/0/20/12 budget).
+
+        Retained for the frozen K4 evidence/probe route and its regression
+        tests; new releases use the R2 manifest-driven configs
+        (``production`` / ``from_release_manifest``).
+        """
         if not isinstance(settings, AppSettings):
             raise TypeError("settings must be AppSettings")
         return cls(
@@ -178,6 +242,106 @@ class EodExecutionConfig:
             },
         )
 
+    @classmethod
+    def production(cls, *, code_version: str, settings: AppSettings) -> EodExecutionConfig:
+        """Freeze the R2 production scope from validated application settings.
+
+        The production config no longer hardcodes the historical first-release
+        budgets: per-role budgets are bounded by the independent R2 safety hard
+        caps, and the worker preflight freezes the actual planned counts from
+        the deterministic chunk inventory before the first provider call. A
+        release manifest (``from_release_manifest``) tightens these bounds to
+        the frozen per-release plan.
+        """
+        if not isinstance(settings, AppSettings):
+            raise TypeError("settings must be AppSettings")
+        caps = RELEASE_SAFETY_CAPS
+        role_cap = caps["endpoint_invocations_per_role"]
+        return cls(
+            code_version=code_version,
+            adapter_version="baostock-akshare-daily-bar.k4.v1",
+            rule_version=K4_DAILY_RULE_VERSION,
+            resolution_rule_version=K4_RESOLUTION_RULE_VERSION,
+            source_route_version="BAO-TX-SINA.k4.v1",
+            baostock_version=BAOSTOCK_DISTRIBUTION_VERSION,
+            baostock_unit_policy_version=BAOSTOCK_UNIT_POLICY_VERSION,
+            akshare_unit_policy_version=AKSHARE_UNIT_POLICY_VERSION,
+            planner_lookback_days=0,
+            adapter_context_lookback_days=15,
+            max_days_per_chunk=31,
+            max_items_per_chunk=1,
+            endpoint_invocation_limit=role_cap * 3,
+            c_endpoint_invocation_limit=role_cap,
+            d_endpoint_invocation_limit=0,
+            estimated_http_request_limit=role_cap * 3 + role_cap * 2,
+            estimated_baostock_protocol_message_limit=role_cap * 3,
+            legacy_import_manifest_sha256=None,
+            datasets={
+                DatasetKind.DAILY_BAR_UNADJUSTED.value: EodDatasetConfig(
+                    scope=settings.eod_symbols
+                ),
+            },
+            release_manifest_sha256=None,
+            a_baostock_endpoint_limit=role_cap,
+            b_tencent_endpoint_limit=role_cap,
+        )
+
+    @classmethod
+    def from_release_manifest(
+        cls,
+        manifest: ReleaseManifest,
+        *,
+        code_version: str | None = None,
+    ) -> EodExecutionConfig:
+        """Freeze the execution config from a verified release manifest.
+
+        Budgets bind exactly to the manifest's planned chunk inventory; the
+        worker preflight re-derives the planned counts and fails closed when
+        they do not match. The manifest SHA travels in every frozen command.
+        """
+        if not isinstance(manifest, ReleaseManifest):
+            raise TypeError("manifest must be a ReleaseManifest")
+        budgets = manifest.budgets
+        return cls(
+            code_version=code_version or manifest.code_version,
+            adapter_version=manifest.adapter_version,
+            rule_version=manifest.quality_rule_version,
+            resolution_rule_version=manifest.resolution_rule_version,
+            source_route_version=manifest.source_route_version,
+            baostock_version=BAOSTOCK_DISTRIBUTION_VERSION,
+            baostock_unit_policy_version=manifest.unit_policy_versions.get(
+                "baostock", BAOSTOCK_UNIT_POLICY_VERSION
+            ),
+            akshare_unit_policy_version=manifest.unit_policy_versions.get(
+                "akshare", AKSHARE_UNIT_POLICY_VERSION
+            ),
+            planner_lookback_days=0,
+            adapter_context_lookback_days=15,
+            max_days_per_chunk=manifest.max_days_per_chunk,
+            max_items_per_chunk=1,
+            endpoint_invocation_limit=budgets["endpoint_total"],
+            c_endpoint_invocation_limit=budgets["c_sina_max_endpoints"],
+            d_endpoint_invocation_limit=0,
+            estimated_http_request_limit=budgets["akshare_http_max"],
+            estimated_baostock_protocol_message_limit=budgets["baostock_protocol_max"],
+            legacy_import_manifest_sha256=None,
+            datasets={
+                DatasetKind.DAILY_BAR_UNADJUSTED.value: EodDatasetConfig(scope=manifest.symbols),
+            },
+            release_manifest_sha256=manifest.manifest_sha256(),
+            a_baostock_endpoint_limit=budgets["a_baostock_endpoints"],
+            b_tencent_endpoint_limit=budgets["b_tencent_endpoints"],
+        )
+
+    @property
+    def is_r2(self) -> bool:
+        """Whether this config uses the R2 manifest-driven schema."""
+        return (
+            self.release_manifest_sha256 is not None
+            or self.a_baostock_endpoint_limit is not None
+            or self.b_tencent_endpoint_limit is not None
+        )
+
     def to_dict(
         self,
         *,
@@ -187,11 +351,14 @@ class EodExecutionConfig:
         missing = set(selected) - set(self.datasets)
         if missing:
             raise ValueError("selected dataset has no frozen execution config")
-        config_schema = (
-            K4_EOD_CONFIG_SCHEMA
-            if self.resolution_rule_version == K4_RESOLUTION_RULE_VERSION
-            else EOD_CONFIG_SCHEMA
-        )
+        if self.is_r2:
+            config_schema = R2_EOD_CONFIG_SCHEMA
+        else:
+            config_schema = (
+                K4_EOD_CONFIG_SCHEMA
+                if self.resolution_rule_version == K4_RESOLUTION_RULE_VERSION
+                else EOD_CONFIG_SCHEMA
+            )
         datasets: dict[str, dict[str, object]] = {}
         for key in selected:
             dataset = replace(
@@ -199,7 +366,7 @@ class EodExecutionConfig:
                 known_coverage=(),
                 base_version=bases.get(key),
             ).to_dict()
-            if config_schema is not K4_EOD_CONFIG_SCHEMA:
+            if config_schema not in {K4_EOD_CONFIG_SCHEMA, R2_EOD_CONFIG_SCHEMA}:
                 # Historical v2/v3 configs never carried security_exceptions.
                 dataset.pop("security_exceptions", None)
             datasets[key] = dataset
@@ -227,8 +394,12 @@ class EodExecutionConfig:
             "datasets": datasets,
             "schema_versions": {key: descriptor_for(key).schema_version for key in selected},
         }
-        if config_schema is K4_EOD_CONFIG_SCHEMA:
+        if config_schema is K4_EOD_CONFIG_SCHEMA or config_schema is R2_EOD_CONFIG_SCHEMA:
             payload["akshare_unit_policy_version"] = self.akshare_unit_policy_version
+        if config_schema is R2_EOD_CONFIG_SCHEMA:
+            payload["release_manifest_sha256"] = self.release_manifest_sha256
+            payload["a_baostock_endpoint_limit"] = self.a_baostock_endpoint_limit
+            payload["b_tencent_endpoint_limit"] = self.b_tencent_endpoint_limit
         return payload
 
 
@@ -330,6 +501,8 @@ class EodCommandService:
             version_manifest["akshare_unit_policy_version"] = (
                 self._config.akshare_unit_policy_version
             )
+        if self._config.release_manifest_sha256 is not None:
+            version_manifest["release_manifest_sha256"] = self._config.release_manifest_sha256
         if previous is not None:
             try:
                 frozen_previous = parse_frozen_eod_command(
@@ -354,11 +527,14 @@ class EodCommandService:
         }
         if retry_of_job_id is not None:
             input_manifest["retry_of_job_id"] = retry_of_job_id
-        config_manifest_schema = (
-            K4_EOD_CONFIG_SCHEMA
-            if self._config.resolution_rule_version == K4_RESOLUTION_RULE_VERSION
-            else EOD_CONFIG_SCHEMA
-        )
+        if self._config.is_r2:
+            config_manifest_schema = R2_EOD_CONFIG_SCHEMA
+        else:
+            config_manifest_schema = (
+                K4_EOD_CONFIG_SCHEMA
+                if self._config.resolution_rule_version == K4_RESOLUTION_RULE_VERSION
+                else EOD_CONFIG_SCHEMA
+            )
         outcome = self._jobs.create_job_result(
             CreateJob(
                 job_type=EOD_JOB_TYPE,

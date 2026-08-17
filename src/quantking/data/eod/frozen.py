@@ -15,6 +15,7 @@ from quantking.data.eod.contracts import (
     EOD_REQUEST_MANIFEST_SCHEMA,
     K4_EOD_CONFIG_SCHEMA,
     LEGACY_EOD_CONFIG_SCHEMA,
+    R2_EOD_CONFIG_SCHEMA,
     EodBaseVersion,
     EodDatasetConfig,
     EodPublishIntent,
@@ -24,6 +25,7 @@ from quantking.data.eod.contracts import (
     load_canonical_json,
     sha256_text,
 )
+from quantking.data.eod.release_manifest import RELEASE_SAFETY_CAPS
 from quantking.data.incremental import CoverageWindow
 from quantking.data.models import DatasetKind
 from quantking.data.resolution.models import (
@@ -76,6 +78,9 @@ class FrozenEodCommand:
     legacy_import_manifest_sha256: str | None
     datasets: tuple[FrozenEodDataset, ...]
     retry_of_job_id: str | None = None
+    release_manifest_sha256: str | None = None
+    a_baostock_endpoint_limit: int = 4
+    b_tencent_endpoint_limit: int = 4
 
 
 def _integer(value: object, *, field: str, minimum: int) -> int:
@@ -136,6 +141,7 @@ def parse_frozen_eod_command(
         } or config_manifest.get("schema_version") not in {
             EOD_CONFIG_SCHEMA,
             K4_EOD_CONFIG_SCHEMA,
+            R2_EOD_CONFIG_SCHEMA,
             LEGACY_EOD_CONFIG_SCHEMA,
         }:
             raise FrozenEodCommandError("config manifest fields are invalid")
@@ -149,6 +155,7 @@ def parse_frozen_eod_command(
         schema_version = config.get("schema_version")
         legacy = schema_version == LEGACY_EOD_CONFIG_SCHEMA
         k4 = schema_version == K4_EOD_CONFIG_SCHEMA
+        r2 = schema_version == R2_EOD_CONFIG_SCHEMA
         expected_config_fields = {
             "schema_version",
             "code_version",
@@ -177,8 +184,16 @@ def parse_frozen_eod_command(
                 }
             )
         config_resolution_rule = None if legacy else config.get("resolution_rule_version")
-        if k4:
+        if k4 or r2:
             expected_config_fields.add("akshare_unit_policy_version")
+        if r2:
+            expected_config_fields.update(
+                {
+                    "release_manifest_sha256",
+                    "a_baostock_endpoint_limit",
+                    "b_tencent_endpoint_limit",
+                }
+            )
         if set(config) != expected_config_fields or schema_version != config_manifest.get(
             "schema_version"
         ):
@@ -191,6 +206,8 @@ def parse_frozen_eod_command(
             raise FrozenEodCommandError("v3 config schema is bound to the K3 resolution rule")
         if k4 and config_resolution_rule != K4_RESOLUTION_RULE_VERSION:
             raise FrozenEodCommandError("v4 config schema is bound to the K4 resolution rule")
+        if r2 and config_resolution_rule != K4_RESOLUTION_RULE_VERSION:
+            raise FrozenEodCommandError("R2 config schema is bound to the K4 resolution rule")
         raw_datasets = config["datasets"]
         raw_schemas = config["schema_versions"]
         if not isinstance(raw_datasets, Mapping) or not isinstance(raw_schemas, Mapping):
@@ -206,6 +223,9 @@ def parse_frozen_eod_command(
             if k4:
                 if "security_exceptions" not in raw:
                     raise FrozenEodCommandError("v4 dataset config requires security_exceptions")
+            elif r2:
+                if "security_exceptions" not in raw:
+                    raise FrozenEodCommandError("R2 dataset config requires security_exceptions")
             elif "security_exceptions" in raw:
                 raise FrozenEodCommandError(
                     "historical dataset configs must not carry security_exceptions"
@@ -263,6 +283,12 @@ def parse_frozen_eod_command(
                 expected_versions["akshare_unit_policy_version"] = config[
                     "akshare_unit_policy_version"
                 ]
+            if r2:
+                expected_versions["akshare_unit_policy_version"] = config[
+                    "akshare_unit_policy_version"
+                ]
+                if config["release_manifest_sha256"] is not None:
+                    expected_versions["release_manifest_sha256"] = config["release_manifest_sha256"]
         if dict(version_manifest) != expected_versions or not all(
             isinstance(item, str) and item for item in version_manifest.values()
         ):
@@ -321,7 +347,44 @@ def parse_frozen_eod_command(
         ):
             raise FrozenEodCommandError("S1-08 frozen execution policy is invalid")
         resolution_rule = None if legacy else config["resolution_rule_version"]
-        if not legacy:
+        if r2:
+            caps = RELEASE_SAFETY_CAPS
+            release_manifest_sha = config["release_manifest_sha256"]
+            if release_manifest_sha is not None and (
+                not isinstance(release_manifest_sha, str) or len(release_manifest_sha) != 64
+            ):
+                raise FrozenEodCommandError("R2 release manifest SHA is invalid")
+            a_limit = _integer(
+                config["a_baostock_endpoint_limit"],
+                field="a_baostock_endpoint_limit",
+                minimum=1,
+            )
+            b_limit = _integer(
+                config["b_tencent_endpoint_limit"],
+                field="b_tencent_endpoint_limit",
+                minimum=1,
+            )
+            r2_invalid = (
+                planner_lookback != 0
+                or adapter_context_lookback != 15
+                or max_days != 31
+                or max_items != 1
+                or resolution_rule != K4_RESOLUTION_RULE_VERSION
+                or d_endpoint_limit != 0
+                or a_limit > caps["endpoint_invocations_per_role"]
+                or b_limit > caps["endpoint_invocations_per_role"]
+                or c_endpoint_limit > caps["endpoint_invocations_per_role"]
+                or endpoint_limit != a_limit + b_limit + c_endpoint_limit
+                or endpoint_limit > caps["endpoint_invocations_total"]
+                or http_limit != b_limit * 3 + c_endpoint_limit * 2
+                or http_limit > caps["akshare_http_requests"]
+                or baostock_protocol_limit != a_limit * 3
+                or baostock_protocol_limit > caps["baostock_protocol_messages"]
+                or config["legacy_import_manifest_sha256"] is not None
+            )
+            if r2_invalid:
+                raise FrozenEodCommandError("R2 frozen execution policy is invalid")
+        if not legacy and not r2:
             common_invalid = (
                 planner_lookback != 0
                 or adapter_context_lookback != 15
@@ -365,6 +428,8 @@ def parse_frozen_eod_command(
                 ]
             )
             if k4:
+                version_fields.append("akshare_unit_policy_version")
+            if r2:
                 version_fields.append("akshare_unit_policy_version")
         for field in version_fields:
             if not isinstance(config[field], str) or not config[field]:
@@ -413,6 +478,11 @@ def parse_frozen_eod_command(
         legacy_import_manifest_sha256=legacy_import_manifest_sha,
         datasets=tuple(plans),
         retry_of_job_id=retry_of_job_id,
+        release_manifest_sha256=(
+            None if not r2 else cast("str | None", config["release_manifest_sha256"])
+        ),
+        a_baostock_endpoint_limit=(4 if not r2 else a_limit),
+        b_tencent_endpoint_limit=(4 if not r2 else b_limit),
     )
 
 

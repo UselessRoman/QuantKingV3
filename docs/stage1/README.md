@@ -21,8 +21,14 @@ S1-07K4 离线实现已完成：四角色运行时（东财 B、腾讯 C、新�
 执行并失败即停（ADR-026；数据根零写入、授权已消费）**；**旧 XTQuant 日线迁移已按用户
 决定拒绝并完成 K4D 决策收口（ADR-027）：第 3 次 pilot、全量诊断与 full 均不执行，
 `XTQUANT_LEGACY` 不进入发布链**。**S1-07K4 已于 2026-08-17 经 K4E 独立验收通过并形成
-单一 K4 提交（[验收记录](S1-07K4_ACCEPTANCE.md)）**；下一步是 S1-08R2。Stage 1
-尚未完成，Stage 2 未开始。
+单一 K4 提交（[验收记录](S1-07K4_ACCEPTANCE.md)）**；**S1-08R2（发布引擎离线收口）
+已于 2026-08-17 独立只读验收通过（[验收记录](S1-08R2_ACCEPTANCE.md)、
+[实施记录](S1-08R2_IMPLEMENTATION.md)）**：SQLite BUSY/LOCKED 有界重试、合法空版本
+幂等收敛、跨进程单发布者锁、硬中断恢复合同、manifest 驱动（`s1-08r2-release-manifest.v1`
++ `RELEASE_SAFETY_CAPS`）的证券集合/逐证券 coverage/分块/预算/血缘、只读 manifest
+verifier 与 DataCenter 来源投影/逐证券 coverage 分页均以合成数据完成验收；R2 零真实
+网络、零旧根读取、零正式数据根写入、零 F 盘访问。下一步是 S1-08R3，须由单独任务与
+新的用户授权启动。Stage 1 尚未完成，Stage 2 未开始。
 2026-08-14
 两份独立数据评审确认的发布前代码缺口已分别并入 S1-07K4 与 S1-08R2，不能由后续真实运行代替修复。
 
@@ -48,7 +54,9 @@ BaoStock A + 腾讯 B → 独立 Raw/质量 → 版本化比较
 5. [S1-08R3 任务卡](S1-08R3_TASK.md)：唯一正式 Job 与 Stage 1 最终验收。
 6. [历史任务索引](S1-08_TASK.md)与 [K3 历史记录](S1-07K3_TASK.md)：只保存已执行事实。
 7. [S1-07K4 验收记录](S1-07K4_ACCEPTANCE.md)：K4E 独立验收的不可变结论。
-8. [验收记录](ACCEPTANCE.md)：历史结论与 Stage 1 最终完成条件。
+8. [S1-08R2 实施记录](S1-08R2_IMPLEMENTATION.md)与
+   [S1-08R2 验收记录](S1-08R2_ACCEPTANCE.md)：R2 离线实现与独立验收结论。
+9. [验收记录](ACCEPTANCE.md)：历史结论与 Stage 1 最终完成条件。
 
 已验收 K1/K2 的任务卡、实现交接以及重复的数据/质量/来源/收口说明已从当前文档树移除；
 其内容由提交、验收记录和 Git 历史保留。历史验收中与 ADR-018 冲突的 XTQuant、override
@@ -62,8 +70,9 @@ BaoStock A + 腾讯 B → 独立 Raw/质量 → 版本化比较
    （K4A/K4B 离线实现、K4C-R4 独立验收与 ADR-024 阈值冻结、K4D inventory 成功 +
    两次 pilot 失败即停 + ADR-027 迁移拒绝收口；详见
    [S1-07K4 验收记录](S1-07K4_ACCEPTANCE.md)）。
-2. S1-08R2（下一步）：SQLite/幂等/恢复、manifest 参数化、verifier/DataCenter 和
-   独立提交。
-3. S1-08R3：冻结范围，另行授权唯一正式 Job，独立复验、双幂等、完整门禁和最终提交。
+2. S1-08R2：**已完成——2026-08-17 独立只读验收通过**（SQLite/幂等/恢复、manifest
+   参数化、verifier/DataCenter；详见 [S1-08R2 验收记录](S1-08R2_ACCEPTANCE.md)）。
+3. S1-08R3（下一步）：冻结范围，另行授权唯一正式 Job，独立复验、双幂等、完整门禁和
+   最终提交；网络、正式数据根写入及失败重跑均未授权。
 
 真实网络、旧根读取和正式根写入仍分别另行授权；不得清理失败证据或自动开始 Stage 2。

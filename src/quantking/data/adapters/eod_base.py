@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from quantking.data.adapters.persistence.sqlite import DataSqliteUnitOfWorkFactory
@@ -74,16 +74,33 @@ class PublishedEodBaseResolver:
                 dates[item_scope].append(item_date)
         if any(not values for values in dates.values()):
             raise ValueError("base version does not cover every configured scope")
+
+        def runs(values: list[date]) -> list[tuple[date, date]]:
+            ordered = sorted(values)
+            segments: list[tuple[date, date]] = []
+            start = previous = ordered[0]
+            for current in ordered[1:]:
+                if current != previous + timedelta(days=1):
+                    segments.append((start, previous))
+                    start = current
+                previous = current
+            segments.append((start, previous))
+            return segments
+
+        # Emit each security's real contiguous coverage segments (with internal
+        # gaps preserved as separate windows) instead of collapsing to a global
+        # (min, max) pair that would fabricate continuous coverage.
+        coverage: list[tuple[str, str, str]] = []
+        for item in sorted(dates):
+            for start, end in runs(dates[item]):
+                coverage.append((item, start.isoformat(), end.isoformat()))
         return EodBaseVersion(
             version_id=version_id,
             dataset=dataset,
             schema_version=version.schema_version,
             content_sha256=version.content_sha256,
             manifest_sha256=version.manifest_sha256,
-            coverage=tuple(
-                (item, min(dates[item]).isoformat(), max(dates[item]).isoformat())
-                for item in sorted(dates)
-            ),
+            coverage=tuple(coverage),
         )
 
 
