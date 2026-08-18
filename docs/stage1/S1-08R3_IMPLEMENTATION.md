@@ -649,12 +649,12 @@ XTQUANT lineage 拒绝、raw 文件篡改拒绝）。聚焦测试 **167 passed**
   attempt ledger `s1_08r3_r3v2_attempt_2026-08-18/S1-08R3-R3V2-7e4c1b9d2a68/`
   （attempt-header.json + completed.json，append-only）。授权不可重放。
 
-**Stage 1 仍等待独立 R3D2 终验**（`S1-08_ACCEPTANCE.md` 由独立 agent 验收提交）。
+**当时状态**：R3D2 尚未形成结论；该终验后来在 R3F2 修复后通过。
 
 **明确声明**：E1 未重跑、C1 未重跑、R3C 未重跑；新 Job 0、新 DatasetVersion 0、
-新 PUBLISHED 版本 0；未创建 `S1-08_ACCEPTANCE.md`；Stage 1 尚未最终验收；Stage 2
-未授权；工作区已于 2026-08-18 经用户批准形成单一 S1-08R3 提交（仅本地，未 push，
-R3D2 验收记录将由独立 agent 另行提交）。
+新 PUBLISHED 版本 0；当时尚未创建 `S1-08_ACCEPTANCE.md`，Stage 2 未授权；工作区已于
+2026-08-18 经用户批准形成单一 S1-08R3 提交（仅本地，未 push，R3D2 验收记录随后由
+独立 agent 另行提交）。
 
 ## S1-08R3F2 最小修复轮（第一次 R3D2 发现，2026-08-18）
 
@@ -691,7 +691,16 @@ E1R/I0/R3V2 均未重跑）；evidence 修改 0（R3V2 plan/result/row proof/art
 manifest/attempt 与 E1/C1/R3C/E1R/I0 evidence 字节不变）；新 Job/DatasetVersion/
 PUBLISHED/artifact 0；R3V2 的 code tree SHA 是执行时快照，修复后当前代码树 SHA 变化
 属预期，不构成 R3V2 重跑条件；`eac4eac` 作为 R3V2 执行代码的历史提交保留，本修复
-为独立新提交。Stage 1 仍等待独立 R3D2 终验（R3D2-R2 独立复验）；Stage 2 仍未授权。
+为独立新提交。R3D2-R2 随后独立复验该提交；Stage 2 仍未授权。
+
+## R3D2-R2 最终独立验收（2026-08-18）
+
+独立验收 Agent 复核 `eac4eac..d95db32`：E1 写入面使用完整有序元组序列比较，合法模板
+通过，重复/乱序以 `ENVELOPE_WRITE_PATHS_INVALID` 在 ledger、runtime、provider 前拒绝；
+C1 使用冻结 `CALENDAR_BOOTSTRAP_NETWORK_SCOPE`，任意漂移以 `CALENDAR_PLAN_INVALID`
+拒绝。修复未修改冻结 evidence 或正式数据逻辑。定向测试 58 passed；完整门禁最终数字见
+[S1-08 / Stage 1 最终独立验收记录](S1-08_ACCEPTANCE.md)。结论：**S1-08R3D2-R2 PASS，
+S1-08 完成，Stage 1 完成。** Stage 2 前置已满足，但实施仍未授权、未开始。
 
 ## Phase A 离线门禁
 
@@ -759,4 +768,4 @@ typecheck/unit/build/Playwright E2E 1 passed/`git diff --check` 逐项通过；�
   `E:\QuantKingV3Data` **严格只读**（420 文件全量 SHA，运行前后集合/size/mtime/SHA
   完全一致；sqlite `mode=ro&immutable=1` + `query_only`，无旁车、无 checkpoint、
   无任何变更）；`E:\QuantKing` 0；F 盘 0；Git 元数据写入 0；唯一写入为仓内证据 JSON。
-- 下一步：R3D 终验由独立 agent 执行（不由本开发 agent）；任何新的数据根访问须单独授权。
+- 下一步：只有用户单独授权后才能启动 S2-01；任何新的网络或数据根访问仍须单独授权。

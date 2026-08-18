@@ -27,8 +27,8 @@ S1-07K4 离线实现已完成：四角色运行时（东财 B、腾讯 C、新�
 幂等收敛、跨进程单发布者锁、硬中断恢复合同、manifest 驱动（`s1-08r2-release-manifest.v1`
 + `RELEASE_SAFETY_CAPS`）的证券集合/逐证券 coverage/分块/预算/血缘、只读 manifest
 verifier 与 DataCenter 来源投影/逐证券 coverage 分页均以合成数据完成验收；R2 零真实
-网络、零旧根读取、零正式数据根写入、零 F 盘访问。**S1-08R3 已由单独任务执行并完成
-开发侧收口（[实施记录](S1-08R3_IMPLEMENTATION.md)）：R3A 离线收口、I0 只读清单、
+网络、零旧根读取、零正式数据根写入、零 F 盘访问。**S1-08R3 已完成（
+[实施记录](S1-08R3_IMPLEMENTATION.md)）：R3A 离线收口、I0 只读清单、
 C1-R4 日历引导（第 4 次 attempt SUCCEEDED，发布唯一 PUBLISHED `exchange_calendar`
 版本）、E1 唯一正式 Job（2026-08-17 SUCCEEDED，发布首个 PUBLISHED 日线版本，授权
 一次消费）、R3C 双幂等探针与 E1R 结果证据只读提取（2026-08-18 均成功，新基线
@@ -36,9 +36,9 @@ C1-R4 日历引导（第 4 次 attempt SUCCEEDED，发布唯一 PUBLISHED `excha
 内容绑定 token + 边界校验、C1 强类型 plan 校验、R3C 未来探针一次性 ledger（未
 重跑）、verifier 逐键 `verify_release_row_proof`）与 R3V2 纯只读复验（2026-08-18
 VERIFIED：82/82 行逐键全部 passed、PUBLISHED==selected、OHLC/`pre_close` delta 0、
-volume≤50、amount<50、零 XTQUANT_LEGACY、前后聚合根指纹全等、零网络零写入）；仅剩
-R3D2 独立终验（`S1-08_ACCEPTANCE.md`，由独立 agent 验收提交）。**
-Stage 1 尚未完成，Stage 2 未开始。
+volume≤50、amount<50、零 XTQUANT_LEGACY、前后聚合根指纹全等、零网络零写入）、R3F2
+合同守卫修复与 R3D2-R2 独立终验。**见[最终验收记录](S1-08_ACCEPTANCE.md)。
+**S1-08 完成，Stage 1 完成。** Stage 2 前置已满足，但实施尚未授权、未开始。
 2026-08-14
 两份独立数据评审确认的发布前代码缺口已分别并入 S1-07K4 与 S1-08R2，不能由后续真实运行代替修复。
 
@@ -82,7 +82,8 @@ BaoStock A + 腾讯 B → 独立 Raw/质量 → 版本化比较
    [S1-07K4 验收记录](S1-07K4_ACCEPTANCE.md)）。
 2. S1-08R2：**已完成——2026-08-17 独立只读验收通过**（SQLite/幂等/恢复、manifest
    参数化、verifier/DataCenter；详见 [S1-08R2 验收记录](S1-08R2_ACCEPTANCE.md)）。
-3. S1-08R3（下一步）：冻结范围，另行授权唯一正式 Job，独立复验、双幂等、完整门禁和
-   最终提交；网络、正式数据根写入及失败重跑均未授权。
+3. S1-08R3：**已完成——2026-08-18 R3D2-R2 独立终验通过**（见
+   [S1-08 最终验收记录](S1-08_ACCEPTANCE.md)）。
+4. 下一步：仅在用户单独授权后启动 S2-01；Stage 2 实施当前未授权、未开始。
 
-真实网络、旧根读取和正式根写入仍分别另行授权；不得清理失败证据或自动开始 Stage 2。
+真实网络、旧根读取和正式根写入仍分别另行授权；本次验收不自动开始 Stage 2。

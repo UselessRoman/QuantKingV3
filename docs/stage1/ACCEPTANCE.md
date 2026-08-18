@@ -1,9 +1,8 @@
 # Stage 1 验收矩阵
 
-Stage 1 尚未完成。S1-01～S1-06、K1、K2 的历史主验收继续有效；这些证据只证明当时的
-AKShare 三源范围，不证明 2026-08-12 接受的 BaoStock、历史四角色路由或旧数据迁移已经完成，
-也不证明 ADR-021 的三角色目标已经实现。
-2026-08-14 两份独立评审又确认仲裁、交易日完整性、R2 参数化和恢复边界仍有发布前缺口。
+**Stage 1 已于 2026-08-18 完成独立终验。** S1-01～S1-06、K1、K2 的历史主验收继续
+有效；S1-07K4、S1-08R2 与 S1-08R3 的现行闭环由各自独立验收记录证明。最终结论见
+[S1-08 / Stage 1 最终独立验收记录](S1-08_ACCEPTANCE.md)。
 
 ## 任务状态
 
@@ -18,7 +17,7 @@ AKShare 三源范围，不证明 2026-08-12 接受的 BaoStock、历史四角色
 | S1-07K3 | 历史基线完成 | [历史记录](S1-07K3_TASK.md) |
 | S1-07K4 | 已主验收（2026-08-17：**S1-07K4 独立验收通过**，形成单一 K4 提交）：K4A/K4B 离线实现完成；K4C-R1（当时独立验收不通过，历史事实）修复、R2 真实实测、R3（ADR-022 + Phase B 9/9）与 R4（ADR-023）依次交付，**K4C-R4 已于 2026-08-16 独立验收通过**，k4 阈值已按 ADR-024 接受重新冻结；**K4D 真实只读 inventory 已于 2026-08-16 获授权执行一次并成功**（5,208 文件、零读取错误、Stage 0 基线差异 0/0）；**K4D 真实 pilot 两次 attempt 均失败即停（2026-08-16/08-17，ADR-026，数据根零写入、授权已消费）**；**旧 XTQuant 迁移已按 ADR-027 拒绝并完成 K4D 决策收口（第 3 次 pilot、全量诊断与 full 均不执行）** | [验收记录](S1-07K4_ACCEPTANCE.md)、[任务卡](S1-07K4_TASK.md)、[实施记录](S1-07K4_IMPLEMENTATION.md) |
 | S1-08R2 | 已独立验收（2026-08-17：**S1-08R2 独立只读验收通过**）：SQLite BUSY/LOCKED 有界重试、合法空版本幂等收敛、跨进程单发布者锁、硬中断恢复、manifest 驱动（`s1-08r2-release-manifest.v1` + `RELEASE_SAFETY_CAPS`）的范围/预算/血缘、只读 manifest verifier 与 DataCenter 来源投影/逐证券 coverage 均以合成数据验收；R2 零真实网络、零旧根读取、零正式数据根写入、零 F 盘访问 | [验收记录](S1-08R2_ACCEPTANCE.md)、[任务卡](S1-08R2_TASK.md)、[实施记录](S1-08R2_IMPLEMENTATION.md) |
-| S1-08R3 | 开发侧收口完成，待独立终验（2026-08-17：R3A 离线收口、I0 只读清单、C1-R4（第 4 次 attempt SUCCEEDED，发布唯一 PUBLISHED `exchange_calendar` 版本）、**E1 唯一正式 Job SUCCEEDED**（授权一次消费，发布恰好 1 个 PUBLISHED `daily_bar_unadjusted` 版本，授权块内独立只读复验通过）；2026-08-18：**R3C 双幂等探针 SUCCEEDED**（零网络、零新版本）、**E1R 结果证据只读提取 OK**（新基线 `299ccba9…`、发布版本 82 行/2 证券明细冻结）、**R3F-LITE 修复轮完成**（ADR-028 个人本地信任模型：E1 入口内容绑定 token + 边界校验、C1 强类型 plan 校验、R3C 未来探针一次性 ledger（未重跑）、verifier 逐键 `verify_release_row_proof`）、**R3V2 纯只读复验 VERIFIED**（授权一次消费：82/82 行逐键全部 passed、A/B 实际行各 82、PUBLISHED==selected 逐字段相等、OHLC/`pre_close` delta 0、volume≤50、amount<50、零 XTQUANT_LEGACY、前后聚合根指纹全等、网络/写入/checkpoint/新产物全 0）；仅剩 R3D2 独立终验（`S1-08_ACCEPTANCE.md` 须由独立 agent 验收提交，不由开发 agent 执行）） | [任务卡](S1-08R3_TASK.md)、[实施记录](S1-08R3_IMPLEMENTATION.md) |
+| S1-08R3 | **已独立终验（2026-08-18，R3D2-R2 PASS）**：C1-R4 发布唯一 PUBLISHED 日历；E1 唯一正式 Job SUCCEEDED 并发布唯一 PUBLISHED 未复权日线版本；R3C 双幂等、E1R/R3V2 只读复验、82 行 A/B 双实际来源逐键证明与 R3F2 两项精确守卫修复均通过；冻结 evidence 未修改，最终离线门禁全绿 | [最终验收记录](S1-08_ACCEPTANCE.md)、[任务卡](S1-08R3_TASK.md)、[实施记录](S1-08R3_IMPLEMENTATION.md) |
 
 ## S1-07K1 验收
 
@@ -99,21 +98,16 @@ AKShare 三源范围，不证明 2026-08-12 接受的 BaoStock、历史四角色
 - 2026-08-14 FTShare 资格验收失败并由 ADR-020 拒绝；ADR-021 已固定目标路线为 BaoStock A、
   腾讯 B、 新浪 C。东财与 FTShare 均不进入新的正式路线，已提交四角色实现仍待 S1-07K4 重构。
 
-Stage 1 必须依次完成 S1-07K4、S1-08R2、S1-08R3；当前不得执行正式发布 Job。
+Stage 1 已依次完成 S1-07K4、S1-08R2 与 S1-08R3；历史失败 Job 和替代路线事实继续保留。
 
 ## Stage 1 最终完成条件
 
 执行边界见 [S1-08 任务卡](S1-08_TASK.md)。
 
-S1-08 离线实现已完成，首次真实授权也已执行，但唯一正式 Job
-`job:4c7c9ecf-ca97-425a-88f1-cd24d7e7c7b5` 因 `RESOLUTION_BLOCKED` 失败：实际使用
-东财/腾讯/新浪各 4 次 endpoint、零应用重试；82 个决定中 80 个因成交量/成交额舍入差无法
-满足冻结零容差而冲突。失败候选已收束为 `FAILED`，没有真实发布 DatasetVersion，也没有
-`S1-08_ACCEPTANCE.md`。本次授权已经结束，交易日历成员关系与按交易所/证券的预期交易日
-完整性仍未覆盖。随后接受、现已由 ADR-021 替换的 BaoStock+四角色来源与旧 XTQuant
-`DATA_ONLY` 路线见
-[S1-07K3 任务卡](S1-07K3_TASK.md)；离线代码已实现但真实验收仍阻断。以下最终条件均未满足，不得
-以 Raw、旧文件存在或合成证据代替。
+首次正式 Job `job:4c7c9ecf-ca97-425a-88f1-cd24d7e7c7b5` 因 `RESOLUTION_BLOCKED`
+失败且未发布，是保留的历史事实；该次授权已经结束，它未被改写为成功。现行三角色路线随后
+完成 K4、R2 与 R3 闭环。以下最终条件均已由 [最终验收记录](S1-08_ACCEPTANCE.md) 和冻结
+evidence 满足：
 
 - 产生至少一个明确证券范围、日期范围的已发布未复权日线 DatasetVersion。
 - 重跑幂等；失败批次不污染已发布版本。
@@ -134,3 +128,7 @@ S1-08 离线实现已完成，首次真实授权也已执行，但唯一正式 J
 - 已知缺口明确列出，不以合成测试或代码就绪冒充真实覆盖。
 - 数据中心可按显式版本查看来源、批次、质量、差异和失败。
 - Stage 1 最终验收记录、完整质量门和迁移检查通过。
+
+Stage 1 只证明最终验收记录中明确的两证券、日期范围与未复权日线，不证明全 A 股、复权、
+point-in-time 股票池、无幸存者偏差或研究/模型/回测能力。Stage 2 前置已满足，但实施仍未
+获得用户单独授权、尚未开始。

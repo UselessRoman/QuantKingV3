@@ -35,6 +35,8 @@ def _read(relative: str) -> str:
         "S1-07K4_IMPLEMENTATION.md",
         "S1-08R2_IMPLEMENTATION.md",
         "S1-08R2_ACCEPTANCE.md",
+        "S1-08R3_IMPLEMENTATION.md",
+        "S1-08_ACCEPTANCE.md",
     ),
 )
 def test_compact_stage1_documents_exist(name: str) -> None:
@@ -60,7 +62,7 @@ def test_superseded_current_documents_are_removed(name: str) -> None:
     assert not (_STAGE1 / name).exists()
 
 
-def test_current_status_records_commits_without_claiming_stage_completion() -> None:
+def test_current_status_records_stage1_completion_without_starting_stage2() -> None:
     combined = "\n".join(
         _read(relative)
         for relative in (
@@ -77,9 +79,11 @@ def test_current_status_records_commits_without_claiming_stage_completion() -> N
     assert "S1-08 首次" in combined
     assert "RESOLUTION_BLOCKED" in combined
     assert "授权已结束" in combined or "授权已经结束" in combined
-    assert "Stage 1 尚未完成" in combined
-    assert "Stage 2 未开始" in combined
-    assert "Stage 1 已完成验收" not in combined
+    assert "Stage 1 完成" in combined
+    assert "Stage 2 前置已满足" in combined
+    assert "Stage 2" in combined and "未授权" in combined
+    assert "Stage 1 尚未完成" not in combined
+    assert "R3D2 待执行" not in combined
 
 
 def test_single_contract_keeps_history_and_the_accepted_three_role_route() -> None:
@@ -349,15 +353,8 @@ def test_k4d_pilot_dry_run_evidence_is_registered() -> None:
     assert "76e928aa" in text
 
 
-def test_current_status_docs_record_k4e_and_s1_08_r2_acceptance_with_r3_next() -> None:
-    """K4E and S1-08R2 have passed; S1-08R3 is next; Stage 1 remains open.
-
-    Current-status sections must not describe K4E or S1-08R2 as pending
-    acceptance, must not describe K4D as a successful migration, and must keep
-    S1-08R3 as the single next step requiring a new task and authorization.
-    Dated historical sections that carry their own supersession notes may keep
-    the old wording.
-    """
+def test_current_status_docs_record_stage1_acceptance_and_stage2_boundary() -> None:
+    """Current status must close Stage 1 without authorizing Stage 2."""
 
     current_status = " ".join(
         " ".join(_read(relative).split())
@@ -370,16 +367,20 @@ def test_current_status_docs_record_k4e_and_s1_08_r2_acceptance_with_r3_next() -
             "docs/ROADMAP.md",
             "docs/stage1/README.md",
             "docs/stage1/ACCEPTANCE.md",
-            "docs/stage1/S1-07K4_TASK.md",
+            "docs/stage1/S1-08R3_TASK.md",
+            "docs/stage2/README.md",
+            "docs/stage2/TASKS.md",
         )
     )
     for required in (
         "S1-07K4 独立验收通过",
         "形成单一 K4 提交",
         "S1-08R2 独立只读验收通过",
-        "下一步是 S1-08R3",
-        "Stage 1 尚未完成",
-        "Stage 2 未开始",
+        "S1-08R3D2-R2",
+        "Stage 1 完成",
+        "Stage 2 前置已满足",
+        "Stage 2 实施仍未获得用户单独授权",
+        "S2-01",
     ):
         assert required in current_status
     for outdated in (
@@ -394,6 +395,9 @@ def test_current_status_docs_record_k4e_and_s1_08_r2_acceptance_with_r3_next() -
         "K4E 待提交",
         "S1-08R2 待开发",
         "下一步是 S1-08R2",
+        "下一步是 S1-08R3",
+        "Stage 1 尚未完成",
+        "R3D2 待执行",
     ):
         assert outdated not in current_status
 
@@ -456,15 +460,8 @@ def test_s1_08_r2_acceptance_record_is_frozen_with_real_gate_numbers() -> None:
     assert "已验收" in task
 
 
-def test_adr_028_personal_local_trust_model_and_r3f_state_are_recorded() -> None:
-    """ADR-028 and the R3F-LITE state stay auditable without new executions.
-
-    The decision record must carry the personal-local trust model, the R3C
-    deviation ruling and the row-proof requirement; the R3 status docs must
-    state the fixes landed without re-running E1/C1/R3C, keep R3V2 as the
-    single pending data-root access, and keep Stage 1 awaiting the
-    independent R3D2 acceptance.
-    """
+def test_adr_028_personal_local_trust_model_and_final_r3_state_are_recorded() -> None:
+    """ADR-028, R3 fixes and the independent final acceptance stay auditable."""
 
     decisions = _read("docs/DECISIONS.md")
     for phrase in (
@@ -496,19 +493,34 @@ def test_adr_028_personal_local_trust_model_and_r3f_state_are_recorded() -> None
         "2026-08-18 VERIFIED",
         "82/82 全部 passed",
         "E1 未重跑、C1 未重跑、R3C 未重跑",
-        "Stage 1 仍等待独立 R3D2 终验",
+        "R3D2-R2 最终独立验收",
+        "S1-08R3D2-R2 PASS",
+        "Stage 1 完成",
     ):
         assert phrase in implementation
     for forbidden in (
         "R3C 已重跑",
         "E1 已重跑",
         "C1 已重跑",
-        "Stage 1 最终验收通过",
         "Stage 2 已授权",
     ):
         assert forbidden not in implementation
-    # The Stage 1 acceptance record itself must not exist yet (R3D2 pending).
-    assert not (_STAGE1 / "S1-08_ACCEPTANCE.md").exists()
+    acceptance = _read("docs/stage1/S1-08_ACCEPTANCE.md")
+    for phrase in (
+        "S1-08R3D2-R2",
+        "最终判定",
+        "eac4eac10816747dff13002c9fab7655c1bddb27",
+        "d95db32",
+        "58 passed",
+        "1440 passed / 6 skipped / 3 deselected",
+        "1442 passed / 6 skipped / 3 deselected",
+        "82 个唯一",
+        "A/B 实际来源行各 82",
+        "6f7f906e066a3d35fccadb0e2a3bbc52e3575e61612f6a18e92fbbee0e3c686c",
+        "6c96fe46ca1ffffb6259198b686568a31ae08a28437d54a7f8e5d4e4b6929591",
+        "Stage 2 实施仍未获得用户单独授权",
+    ):
+        assert phrase in acceptance
 
     contracts = _read("docs/stage1/CONTRACTS.md")
     assert "个人本地信任模型与正式入口边界" in contracts

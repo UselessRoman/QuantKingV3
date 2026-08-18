@@ -52,11 +52,10 @@ K4D inventory dry-run 已冻结并按其 plan SHA 完成真实只读 inventory�
 重试、合法空版本幂等收敛、跨进程单发布者锁、manifest 驱动的证券集合/coverage/分块/
 预算/血缘、只读 manifest verifier 与 DataCenter 来源投影、逐证券 coverage 分页均以
 合成数据与临时目录验收；R2 零真实网络、零旧根读取、零正式数据根写入。
-Stage 1 现在只按
-`S1-07K4（已完成）→ S1-08R2（已完成）→ S1-08R3（下一步，须由单独任务与新授权启动）`
-顺序收口；旧根已完成只读清单，两次受管导入 attempt 均失败即停，迁移已按 ADR-027 拒绝。
-Stage 1 尚未完成，Stage 2
-未开始。
+S1-08R3 已完成正式发布收口，第一次独立终验发现的两个合同守卫缺口已由 `d95db32` 修复并在
+R3D2-R2 独立复验中通过；见 [Stage 1 最终验收记录](docs/stage1/S1-08_ACCEPTANCE.md)。
+**S1-08 完成，Stage 1 完成。** Stage 2 前置已满足，但其实施尚未获得用户单独授权、未开始；
+下一步只能在用户另行授权后启动 S2-01。
 
 - [总体架构](docs/ARCHITECTURE.md)
 - [架构决策](docs/DECISIONS.md)

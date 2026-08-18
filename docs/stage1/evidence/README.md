@@ -74,3 +74,6 @@
 | `s1_08r3_r3v2_row_proof_2026-08-18.jsonl` | **R3V2 逐键证明 JSONL（82 行，`s1-08r3-row-proof.v1`）**：每行含 code/trade_date、A/B 来源（upstream/batch_id/chunk 文件 SHA）、A/B 规范化七字段与行 SHA、逐字段 delta 与冻结 threshold、passed=true、selected_source、published 字段与行 SHA、DR/Resolution ID；全部 82 行 passed、selected=BAOSTOCK、published==selected 逐字段相等；文件 SHA-256 `6c96fe46…` |
 | `s1_08r3_r3v2_artifact_manifest_2026-08-18.json` | R3V2 证据 manifest（result + row proof 两文件 size/SHA + attempt 目录绑定），文件 SHA-256 `2ca3d1b7…` |
 | `s1_08r3_r3v2_attempt_2026-08-18/S1-08R3-R3V2-7e4c1b9d2a68/` | R3V2 一次性 attempt ledger（attempt-header.json 绑定 plan SHA/marker/幂等键 + completed.json 含 rows_verified=82 与三份证据 SHA；append-only；授权不可重放） |
+
+上述冻结 evidence 未在 R3D2-R2 中修改。其最终独立审阅、82 行逐键复算与质量门禁结论见
+[S1-08 / Stage 1 最终独立验收记录](../S1-08_ACCEPTANCE.md)。

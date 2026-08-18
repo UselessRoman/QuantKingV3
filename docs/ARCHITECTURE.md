@@ -124,11 +124,11 @@ sufficient=false 如实记录），K4C-R3（合同修订 ADR-022 + Phase B 9/9 �
 [实施记录](stage1/S1-08R2_IMPLEMENTATION.md)）：存储重试/幂等/单发布者/恢复合同、
 manifest 驱动的范围与预算、只读 verifier 与 DataCenter 读侧扩展均完成离线验收，
 R2 零真实网络、零正式数据根写入。
-[S1-08R3](stage1/S1-08R3_TASK.md) 已由单独任务执行并完成开发侧收口：R3A 离线收口、
-I0 只读清单、C1-R4 日历引导、E1 唯一正式 Job（2026-08-17 SUCCEEDED，发布首个
-PUBLISHED 日线版本）、R3C 双幂等探针与 E1R 结果证据只读提取（2026-08-18 均成功，
-[实施记录](stage1/S1-08R3_IMPLEMENTATION.md)）。仅剩 R3D 独立终验。
-Stage 1 尚未完成，Stage 2 未开始。
+[S1-08R3](stage1/S1-08R3_TASK.md) 已完成 R3A、I0、C1-R4、E1、R3C、E1R、R3V2 与
+R3F2 合同守卫修复，并于 2026-08-18 通过 R3D2-R2 独立终验（
+[实施记录](stage1/S1-08R3_IMPLEMENTATION.md)、
+[最终验收记录](stage1/S1-08_ACCEPTANCE.md)）。**S1-08 完成，Stage 1 完成。**
 Stage 2 的精简实施路径已规划为 S2-01～S2-06（研究合同 → point-in-time 研究输入 → 股票池/
 标签 → 基础因子 → Qlib/Alpha158/诊断 → 正式终验），见
-[Stage 2 当前入口](stage2/README.md)；规划文档不构成阶段启动或外部操作授权。
+[Stage 2 当前入口](stage2/README.md)；Stage 1 前置已满足，但规划文档不构成阶段启动或
+外部操作授权，Stage 2 尚未获得用户单独授权、未开始。
