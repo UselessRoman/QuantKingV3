@@ -656,6 +656,43 @@ XTQUANT lineage 拒绝、raw 文件篡改拒绝）。聚焦测试 **167 passed**
 未授权；工作区已于 2026-08-18 经用户批准形成单一 S1-08R3 提交（仅本地，未 push，
 R3D2 验收记录将由独立 agent 另行提交）。
 
+## S1-08R3F2 最小修复轮（第一次 R3D2 发现，2026-08-18）
+
+第一次 R3D2 独立终验聚焦测试 168 passed、完整离线门禁通过，但发现两个纯离线 P1
+合同缺口。两项均受 ADR-028 内容 SHA token 绑定，不推翻历史 E1/C1/R3V2，不修改任何
+冻结 evidence，不需要新数据根授权，不重跑任何真实任务：
+
+1. **E1 `allowed_write_paths` 字典比较缺口**（`formal_authorization.py`，
+   `assert_formal_entry_boundary`）：原实现把冻结模板与 envelope 两侧都折叠成
+   `{relative_path: maximum_entries}` 字典再比较，会折叠重复路径并忽略顺序。已改为
+   完整有序元组序列比较——数量、顺序、每个 `relative_path` 与每个 `maximum_entries`
+   必须逐项全等；重复项、缺失项、额外项、乱序项一律拒绝；稳定错误码仍为
+   `ENVELOPE_WRITE_PATHS_INVALID`，拒绝发生在 runtime 构造、provider 调用与 ledger
+   写入之前。
+2. **C1 `network_scope` 仅存在性检查缺口**（`calendar_bootstrap.py`）：原
+   `parse_calendar_bootstrap_plan` 只要求该字段存在，不校验冻结值。已新增集中常量
+   `CALENDAR_BOOTSTRAP_NETWORK_SCOPE = "BaoStock query_trade_dates only; zero HTTP;
+   zero retries"`（与历史冻结 evidence 字节一致，plan SHA 不变），builder 使用该常量，
+   parse 将其纳入冻结字符串字段精确相等检查；任意大小写、空格、endpoint、HTTP、
+   retry 或附加文本漂移均以稳定错误码 `CALENDAR_PLAN_INVALID` 拒绝，先于 token
+   接受、ledger、runtime 与 provider。
+
+**新增测试**（`test_s1_08r3_formal_entry.py` 新增
+`test_formal_entry_refuses_duplicate_and_reordered_write_paths`：合法原始顺序通过 +
+末尾重复现有条目拒绝 + 交换两个合法条目拒绝 + 错误码 + provider 调用 0 + 不创建
+attempt ledger；`test_calendar_bootstrap.py` drift 矩阵新增 `network_scope` 两条
+漂移值："mutated network scope" 与 "BaoStock query_trade_dates only; HTTP allowed;
+retries allowed"，断言 `CALENDAR_PLAN_INVALID`；正常 builder 输出与 token 绑定测试
+继续通过）。定向测试 58 passed；R3 聚焦测试 171 passed（原 168 + 新增 3）；完整
+`scripts\quality.ps1 -UvCacheDirectory .uv-cache` 收口轮通过（详见门禁章节）。
+
+**边界声明**：真实网络、数据根、旧根、F 盘访问均为 0；真实任务重放 0（E1/C1/R3C/
+E1R/I0/R3V2 均未重跑）；evidence 修改 0（R3V2 plan/result/row proof/artifact
+manifest/attempt 与 E1/C1/R3C/E1R/I0 evidence 字节不变）；新 Job/DatasetVersion/
+PUBLISHED/artifact 0；R3V2 的 code tree SHA 是执行时快照，修复后当前代码树 SHA 变化
+属预期，不构成 R3V2 重跑条件；`eac4eac` 作为 R3V2 执行代码的历史提交保留，本修复
+为独立新提交。Stage 1 仍等待独立 R3D2 终验（R3D2-R2 独立复验）；Stage 2 仍未授权。
+
 ## Phase A 离线门禁
 
 Phase A 首轮（1354 passed / 6 skipped / 3 deselected）与 Phase C1 轮完整
@@ -681,6 +718,12 @@ F-LITE + R3V2 收口轮（2026-08-18，提交前复跑）：修复
 frozen sync ✓、Ruff lint/format ✓、mypy（135 源文件）✓、离线 pytest ✓、架构边界 ✓、
 Markdown 链接 ✓、前端 npm ci/typecheck/unit/production build ✓、Playwright E2E
 （1 passed）✓、`git diff --check` ✓（本轮在 quality.ps1 内直接通过，无需旁路复核）。
+
+S1-08R3F2 修复轮（2026-08-18，提交前）：定向测试 58 passed、R3 聚焦测试 171 passed
+（原 168 + 新增 3）后，完整 `scripts\quality.ps1 -UvCacheDirectory .uv-cache`
+再次全绿（lock/Ruff/format/mypy/架构边界/Markdown 链接/前端
+typecheck/unit/build/Playwright E2E 1 passed/`git diff --check` 逐项通过；全量
+离线 pytest 复核数字 **1440 passed / 6 skipped / 3 deselected**）。
 
 ## 外部访问声明（Phase A + I0 + Phase C1 开发）
 

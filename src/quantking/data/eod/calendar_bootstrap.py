@@ -87,6 +87,7 @@ CALENDAR_BOOTSTRAP_EXCHANGES: tuple[str, ...] = ("SH", "SZ")
 CALENDAR_BOOTSTRAP_ENDPOINT_MAX = 1
 CALENDAR_BOOTSTRAP_PROTOCOL_MAX = 4
 CALENDAR_BOOTSTRAP_TIMEOUT_SECONDS = 20.0
+CALENDAR_BOOTSTRAP_NETWORK_SCOPE = "BaoStock query_trade_dates only; zero HTTP; zero retries"
 CALENDAR_BOOTSTRAP_DATASET = DatasetKind.EXCHANGE_CALENDAR.value
 CALENDAR_SCHEMA_VERSION = "exchange_calendar.v1"
 CALENDAR_RAW_RESPONSE_FILE = "responses/query-trade-dates.json"
@@ -195,7 +196,7 @@ def build_calendar_bootstrap_plan(
         "reads_legacy_root": False,
         "accesses_backup_root": False,
         "other_datasets_touched": False,
-        "network_scope": "BaoStock query_trade_dates only; zero HTTP; zero retries",
+        "network_scope": CALENDAR_BOOTSTRAP_NETWORK_SCOPE,
         "code_tree_sha256": code_tree_sha256,
         "data_root_baseline_sha256": data_root_baseline_sha256,
         "requires_new_real_authorization": True,
@@ -312,6 +313,7 @@ def parse_calendar_bootstrap_plan(plan: Mapping[str, object]) -> CheckedCalendar
         ("schema_version_calendar", CALENDAR_SCHEMA_VERSION),
         ("code_version", CALENDAR_BOOTSTRAP_CODE_VERSION),
         ("rule_version", CALENDAR_BOOTSTRAP_RULE_VERSION),
+        ("network_scope", CALENDAR_BOOTSTRAP_NETWORK_SCOPE),
     ):
         if plan[name] != expected:
             _fail("CALENDAR_PLAN_INVALID", f"{name} must equal the frozen C1 value")
@@ -703,6 +705,7 @@ __all__ = [
     "CALENDAR_BOOTSTRAP_DATASET",
     "CALENDAR_BOOTSTRAP_ENDPOINT_MAX",
     "CALENDAR_BOOTSTRAP_EXCHANGES",
+    "CALENDAR_BOOTSTRAP_NETWORK_SCOPE",
     "CALENDAR_BOOTSTRAP_PLAN_SCHEMA_VERSION",
     "CALENDAR_BOOTSTRAP_PROTOCOL_MAX",
     "CALENDAR_BOOTSTRAP_RULE_VERSION",

@@ -56,13 +56,18 @@
   各 82、selected=BAOSTOCK、PUBLISHED==selected 逐字段相等、OHLC/`pre_close`
   最大 delta 0、volume 最大 50、amount 最大 49.72、零 XTQUANT_LEGACY；数据根
   前后聚合根指纹全等、网络 0/写入 0/checkpoint 0/新 Job·版本·产物 0）**；
+  **第一次 R3D2 独立终验发现两个纯离线 P1 合同缺口，S1-08R3F2 修复轮已于 2026-08-18
+  完成：E1 `allowed_write_paths` 改为完整有序元组序列比较（拒绝重复/乱序/缺失/额外
+  项，`ENVELOPE_WRITE_PATHS_INVALID`）；C1 `network_scope` 冻结值精确校验
+  （`CALENDAR_BOOTSTRAP_NETWORK_SCOPE` 常量，漂移即 `CALENDAR_PLAN_INVALID`）。历史
+  E1/C1/R3V2 不受影响、evidence 零修改、真实任务零重跑、外部访问 0，R3 聚焦测试
+  171 passed、完整门禁通过，已形成独立本地修复提交（不 amend `eac4eac`，未 push）**；
   Stage 2 的 S2-01～S2-06
   精简实施路径已完成文档规划，但仍被 Stage 1 最终验收阻断且未获实施授权；S1-08R3
-  开发侧已全部收口并于 2026-08-18 经用户批准形成单一本地提交（完整离线门禁退出码 0
-  全绿，未 push）；S1-08R3
+  开发侧已全部收口；S1-08R3
   仅剩 R3D2 独立终验（`S1-08_ACCEPTANCE.md` 须由独立 agent 验收提交，用户已明确不由
-  开发 agent 执行）；任何新的数据根访问、探针或失败重跑须按任务单独授权；
-  目标架构不代表全链功能已经验收。
+  开发 agent 执行，当前等待 R3D2-R2 独立复验）；任何新的数据根访问、探针或失败重跑
+  须按任务单独授权；目标架构不代表全链功能已经验收。
 - Stage 0 的两次合成备份恢复演练和历史 XTQuant 最小只读探针授权均已使用并结束；XTQuant/QMT
   运行路线已经退役。BaoStock 与 `DATA_ONLY` 导入框架已有离线实现（作为历史审计框架保留）；
   旧 XTQuant 日线已于

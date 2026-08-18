@@ -10,6 +10,7 @@ import pytest
 from quantking.data.adapters.canonical_content import canonical_content_sha256
 from quantking.data.eod.calendar_bootstrap import (
     CALENDAR_BOOTSTRAP_EXCHANGES,
+    CALENDAR_BOOTSTRAP_NETWORK_SCOPE,
     CALENDAR_BOOTSTRAP_PLAN_SCHEMA_VERSION,
     CALENDAR_BOOTSTRAP_PROTOCOL_MAX,
     CalendarBootstrapError,
@@ -62,6 +63,10 @@ def test_plan_freezes_the_c1_budget_and_write_surface() -> None:
     assert "warehouse/exchange_calendar/<version_id>" in write_paths
     assert plan["reads_legacy_root"] is False
     assert plan["accesses_backup_root"] is False
+    assert plan["network_scope"] == CALENDAR_BOOTSTRAP_NETWORK_SCOPE
+    assert CALENDAR_BOOTSTRAP_NETWORK_SCOPE == (
+        "BaoStock query_trade_dates only; zero HTTP; zero retries"
+    )
 
 
 @pytest.mark.parametrize(
@@ -159,6 +164,8 @@ def test_parse_accepts_the_builder_output_and_binds_token() -> None:
         {"rule_version": "other.v1"},
         {"dataset": "daily_bar_unadjusted"},
         {"schema_version_calendar": "other.v1"},
+        {"network_scope": "mutated network scope"},
+        {"network_scope": "BaoStock query_trade_dates only; HTTP allowed; retries allowed"},
     ],
 )
 def test_parse_rejects_any_drift_from_the_frozen_contract(mutate: dict[str, object]) -> None:

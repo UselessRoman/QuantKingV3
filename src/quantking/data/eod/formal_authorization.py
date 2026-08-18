@@ -930,10 +930,10 @@ def assert_formal_entry_boundary(
 
     if not isinstance(envelope, FormalAuthorizationEnvelope):
         raise TypeError("envelope must be a FormalAuthorizationEnvelope")
-    expected_paths = {path: maximum for path, maximum in DEFAULT_ALLOWED_WRITE_PATHS}
-    actual_paths = {
-        entry.relative_path: entry.maximum_entries for entry in envelope.allowed_write_paths
-    }
+    expected_paths = tuple(DEFAULT_ALLOWED_WRITE_PATHS)
+    actual_paths = tuple(
+        (entry.relative_path, entry.maximum_entries) for entry in envelope.allowed_write_paths
+    )
     if actual_paths != expected_paths:
         _fail(
             "ENVELOPE_WRITE_PATHS_INVALID",

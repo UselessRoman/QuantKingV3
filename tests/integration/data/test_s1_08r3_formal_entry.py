@@ -490,6 +490,53 @@ def test_formal_entry_refuses_boundary_drift_before_runtime(
     assert not formal.attempts_root.exists()
 
 
+def test_formal_entry_refuses_duplicate_and_reordered_write_paths(
+    formal: _FormalEnv,
+) -> None:
+    """R3D2 P1: the write-path template comparison must keep the full sequence.
+
+    A dict comparison folds duplicates and ignores order, so an envelope that
+    repeats one allowed entry or swaps two entries would compare equal to the
+    frozen template. The guard must compare the complete ordered tuple
+    sequence instead (S1-08R3F2).
+    """
+
+    from dataclasses import replace as _replace
+
+    from quantking.data.eod.formal_authorization import (
+        FormalAuthorizationError,
+        assert_formal_entry_boundary,
+    )
+
+    gateways, modules = _gateways()
+    good = {
+        "settings_data_root": formal.settings.paths.data_root,
+        "declared_data_root": formal.settings.paths.data_root,
+        "attempts_root": formal.attempts_root,
+        "attempts_root_base": formal.root,
+    }
+    envelope = formal._build_envelope()
+    # The untouched template in its original frozen order still passes.
+    assert_formal_entry_boundary(envelope, **good)
+    # Duplicating an existing entry at the end of the list must be rejected.
+    duplicated = _replace(
+        envelope,
+        allowed_write_paths=(*envelope.allowed_write_paths, envelope.allowed_write_paths[0]),
+    )
+    with pytest.raises(FormalAuthorizationError, match="ENVELOPE_WRITE_PATHS_INVALID"):
+        assert_formal_entry_boundary(duplicated, **good)
+    # Swapping two legitimate entries (same set, different order) must be too.
+    swapped = list(envelope.allowed_write_paths)
+    swapped[0], swapped[1] = swapped[1], swapped[0]
+    reordered = _replace(envelope, allowed_write_paths=tuple(swapped))
+    with pytest.raises(FormalAuthorizationError, match="ENVELOPE_WRITE_PATHS_INVALID"):
+        assert_formal_entry_boundary(reordered, **good)
+    # Every rejection happened before any runtime, provider call or ledger.
+    assert gateways[DataUpstream.BAOSTOCK].calls == []
+    assert all(module.calls == [] for module in modules)
+    assert not formal.attempts_root.exists()
+
+
 def test_replayed_authorization_is_refused_before_any_new_call(
     formal: _FormalEnv,
     tmp_path: Path,
