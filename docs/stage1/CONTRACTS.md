@@ -163,6 +163,27 @@ provider payload、异常栈或完整全市场 DataFrame。R2 的证券集合 SH
 来源健康、新鲜度、迁移/缺口计数和脱敏失败证据。查询期深层 SHA 复验的性能架构仍按 ADR-018
 另行评审，但当前 R2 明确范围必须通过有界查询烟测。
 
+## 个人本地信任模型与正式入口边界（ADR-028 / S1-08R3F）
+
+- QuantKing V3 是单用户本机个人软件：本地用户与其启动的开发 Agent 属同一管理边界；
+  授权机制只做防误执行、防范围扩大、防同任务重放与可审计留痕，不防御本机管理员
+  或恶意本地进程，不引入 PKI/签名服务/HSM/密钥管理或多层 grant 链。
+- 内容 SHA（envelope/plan/manifest）是完整性与漂移检测，不是身份认证。
+- E1 正式入口 token 为 `<marker>:<authorization_id>:<envelope_sha256>`：token 第三段
+  必须等于重算的 envelope 内容 SHA；入口同时校验写入面模板全等、日历来源白名单、
+  声明数据根与 attempts root 边界，全部先于 runtime 构造与 provider 调用。
+- C1 日历引导 plan 必须通过强类型全字段校验（拒绝未知字段），token 同样绑定
+  `<plan_sha256>`。
+- 未来 R3C 类探针必须先消费简单一次性 attempt ledger（绑定 marker/授权 ID/plan
+  SHA/幂等键/开始时间），同 ID 重放与 FAILED 复用即拒；旧 R3C 证据字节不变。
+- 正式发布版本的逐键证明：每个 `(code, trade_date)` 必须有 A/B 两个规范化实际来源
+  行、K4 阈值重算通过（OHLC/`pre_close` 零容差、量额绝对 50/相对 0）、DifferenceReport
+  可由 A/B 值重算、PUBLISHED 行逐字段等于 selected source、零 `XTQUANT_LEGACY`
+  血缘；证据只需保存与该发布直接相关的 artifact SHA 与逐键证明，不保存全根
+  manifest。
+- `E:\QuantKingV3Data` 是公开声明的标准本地数据根：允许出现在内部任务、授权、
+  证据与验收文档中；Web、DataCenter API 与最终用户响应仍不得返回本机绝对路径。
+
 ## 阶段边界
 
 Stage 1 只证明一个明确范围的真实未复权日线版本可取得、核对、发布和查询，不证明数据已

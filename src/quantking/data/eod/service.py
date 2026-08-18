@@ -21,6 +21,7 @@ from quantking.data.eod.contracts import (
     R2_EOD_CONFIG_SCHEMA,
     EodBaseVersion,
     EodDatasetConfig,
+    EodReferenceVersion,
     EodRunRequest,
     canonical_json,
     canonical_request_json,
@@ -302,6 +303,26 @@ class EodExecutionConfig:
         if not isinstance(manifest, ReleaseManifest):
             raise TypeError("manifest must be a ReleaseManifest")
         budgets = manifest.budgets
+        # S1-08R3: the manifest is the single source of the calendar binding
+        # and the frozen per-security exemptions, so a formal entry never has
+        # to hand-assemble dataset references or exception windows. A
+        # manifest that carries a real published calendar version id gets the
+        # reference injected; historical manifests with a static calendar
+        # label keep the pre-R3 shape (the formal entry refuses those).
+        security_exceptions: dict[str, tuple[tuple[str, str], ...]] = {}
+        for plan in manifest.security_coverage:
+            windows = tuple(
+                (start.isoformat(), end.isoformat()) for start, end, _reason in plan.exemptions
+            )
+            if windows:
+                security_exceptions[plan.symbol] = windows
+        references: dict[str, EodReferenceVersion] = {}
+        if manifest.calendar_version_id.startswith("data_version:"):
+            references["exchange_calendar"] = EodReferenceVersion(
+                dataset=DatasetKind.EXCHANGE_CALENDAR.value,
+                version_id=manifest.calendar_version_id,
+                content_sha256=manifest.calendar_sha256,
+            )
         return cls(
             code_version=code_version or manifest.code_version,
             adapter_version=manifest.adapter_version,
@@ -326,7 +347,11 @@ class EodExecutionConfig:
             estimated_baostock_protocol_message_limit=budgets["baostock_protocol_max"],
             legacy_import_manifest_sha256=None,
             datasets={
-                DatasetKind.DAILY_BAR_UNADJUSTED.value: EodDatasetConfig(scope=manifest.symbols),
+                DatasetKind.DAILY_BAR_UNADJUSTED.value: EodDatasetConfig(
+                    scope=manifest.symbols,
+                    references=references,
+                    security_exceptions=security_exceptions,
+                ),
             },
             release_manifest_sha256=manifest.manifest_sha256(),
             a_baostock_endpoint_limit=budgets["a_baostock_endpoints"],

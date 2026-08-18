@@ -35,10 +35,34 @@
   形成单一 K4 提交（`docs/stage1/S1-07K4_ACCEPTANCE.md`）**；**S1-08R2（发布引擎离线
   收口：SQLite 锁重试、空版本幂等、跨进程单发布者、manifest 驱动范围/预算/血缘、
   只读 verifier 与 DataCenter 源投影/逐证券 coverage）已于 2026-08-17 独立只读验收
-  通过（`docs/stage1/S1-08R2_ACCEPTANCE.md`）；下一步是 S1-08R3，须由单独任务与新的
-  用户授权启动（网络、正式数据根写入及失败重跑均未授权）**；Stage 2 的 S2-01～S2-06
-  精简实施路径已完成文档规划，但仍被 Stage 1 最终验收阻断且未获实施授权；S1-08R3 仍
-  待授权，目标架构不代表全链功能已经验收。
+  通过（`docs/stage1/S1-08R2_ACCEPTANCE.md`）；**S1-08R3 已由单独任务启动并执行
+  （`docs/stage1/S1-08R3_IMPLEMENTATION.md`）：R3A 离线收口与 42 项缺口关闭测试、
+  I0 只读 inventory（零阻断、0 个 PUBLISHED 版本）、C1 日历引导（第 1–3 次 attempt
+  失败即停后，第 4 次 attempt 于 2026-08-17 SUCCEEDED：BaoStock `query_trade_dates`
+  恰好 1 次调用，发布唯一 PUBLISHED `exchange_calendar` 版本）、E1 唯一正式 Job 已于
+  2026-08-17 经用户整块批准执行 SUCCEEDED（授权 `S1-08R3-E1-27dec9db8517` 一次消费；
+  2 证券 × `2026-06-11..2026-08-09`；恰好 1 个 PUBLISHED `daily_bar_unadjusted`
+  版本；授权块内独立只读复验通过；**R3C 双幂等探针（2026-08-18，零网络：command
+  幂等返回既有 E1 Job、已发布版本经生产 `_reuse_published` 路径复用短路，零新版本）
+  与 E1R 结果证据只读提取（2026-08-18 OK：420 文件前后完全一致、新基线
+  `299ccba9…`、发布版本 82 行/2 证券明细冻结）均已执行；全部授权不可重放**；
+  **S1-08R3F-LITE 精简修复轮已于 2026-08-18 完成（ADR-028 个人本地信任模型：
+  E1 入口 token 内容绑定 `<marker>:<id>:<envelope_sha256>` + 写入面/日历来源/
+  数据根/attempts-root 边界校验；C1 plan 强类型全字段校验 + plan SHA token；
+  R3C 未来探针一次性 ledger（未重跑，旧证据字节不变）；verifier 新增逐键
+  `verify_release_row_proof`。E1/C1/R3C 均未重跑，新 Job/版本/PUBLISHED 0；
+  **R3V2 纯只读复验已于 2026-08-18 经用户批准执行 VERIFIED（授权
+  `S1-08R3-R3V2-7e4c1b9d2a68` 一次消费：82/82 行逐键全部 passed、A/B 实际行
+  各 82、selected=BAOSTOCK、PUBLISHED==selected 逐字段相等、OHLC/`pre_close`
+  最大 delta 0、volume 最大 50、amount 最大 49.72、零 XTQUANT_LEGACY；数据根
+  前后聚合根指纹全等、网络 0/写入 0/checkpoint 0/新 Job·版本·产物 0）**；
+  Stage 2 的 S2-01～S2-06
+  精简实施路径已完成文档规划，但仍被 Stage 1 最终验收阻断且未获实施授权；S1-08R3
+  开发侧已全部收口并于 2026-08-18 经用户批准形成单一本地提交（完整离线门禁退出码 0
+  全绿，未 push）；S1-08R3
+  仅剩 R3D2 独立终验（`S1-08_ACCEPTANCE.md` 须由独立 agent 验收提交，用户已明确不由
+  开发 agent 执行）；任何新的数据根访问、探针或失败重跑须按任务单独授权；
+  目标架构不代表全链功能已经验收。
 - Stage 0 的两次合成备份恢复演练和历史 XTQuant 最小只读探针授权均已使用并结束；XTQuant/QMT
   运行路线已经退役。BaoStock 与 `DATA_ONLY` 导入框架已有离线实现（作为历史审计框架保留）；
   旧 XTQuant 日线已于

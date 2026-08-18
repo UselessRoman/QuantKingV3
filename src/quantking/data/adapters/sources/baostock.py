@@ -8,11 +8,12 @@ import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from importlib.metadata import version
 
 from quantking.common.time import UtcTimestamp, utc_now
 from quantking.data.adapters.sources.baostock_worker import (
+    BAOSTOCK_CALENDAR_FIELDS,
     BAOSTOCK_DISTRIBUTION_VERSION,
     BAOSTOCK_FIELDS,
 )
@@ -32,6 +33,8 @@ from quantking.data.models import DataProvider, DatasetKind, DataUpstream
 
 BAOSTOCK_ENDPOINT = "query_history_k_data_plus"
 BAOSTOCK_ADAPTER_VERSION = "baostock-daily-bar.v1"
+BAOSTOCK_CALENDAR_ENDPOINT = "query_trade_dates"
+BAOSTOCK_CALENDAR_ADAPTER_VERSION = "baostock-calendar.v1"
 BAOSTOCK_SESSION_TIMEOUT_SECONDS = 20.0
 
 _FIELD_INDEX = {field: index for index, field in enumerate(BAOSTOCK_FIELDS)}
@@ -47,6 +50,142 @@ class BaostockSessionResult:
     logout_messages: int
     complete: bool
     partial_reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BaostockCalendarResult:
+    """One validated ``query_trade_dates`` session for a bounded window."""
+
+    days: tuple[tuple[str, str], ...]
+    login_messages: int
+    query_messages: int
+    logout_messages: int
+
+    @property
+    def protocol_messages(self) -> int:
+        return self.login_messages + self.query_messages + self.logout_messages
+
+
+def _validated_timeout(timeout_seconds: float) -> float:
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(float(timeout_seconds))
+        or timeout_seconds <= 0
+    ):
+        raise ValueError("timeout_seconds must be a positive finite number")
+    return float(timeout_seconds)
+
+
+def _validated_command(command: Sequence[str] | None) -> tuple[str, ...]:
+    if command is not None:
+        if not tuple(command) or any(not isinstance(item, str) or not item for item in command):
+            raise ValueError("command must contain non-empty strings")
+        return tuple(command)
+    return (sys.executable, "-I", "-m", "quantking.data.adapters.sources.baostock_worker")
+
+
+class BaostockCalendarRunner:
+    """Run one isolated BaoStock ``query_trade_dates`` session per window.
+
+    Mirrors :class:`BaostockSessionRunner`: one subprocess, one
+    parent-enforced hard timeout, no retry, and a strictly validated JSON
+    envelope. The window must come back complete — one row per natural day,
+    ``0``/``1`` trading flags — or the session is schema drift.
+    """
+
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = BAOSTOCK_SESSION_TIMEOUT_SECONDS,
+        command: Sequence[str] | None = None,
+    ) -> None:
+        self.timeout_seconds = _validated_timeout(timeout_seconds)
+        self._command = _validated_command(command)
+
+    def run(self, *, start_date: date, end_date: date) -> BaostockCalendarResult:
+        if not isinstance(start_date, date) or not isinstance(end_date, date):
+            raise TypeError("start_date and end_date must be dates")
+        if start_date > end_date:
+            raise ValueError("start_date must not be after end_date")
+        payload = json.dumps(
+            {
+                "mode": "calendar",
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        try:
+            completed = subprocess.run(
+                self._command,
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise SourceAdapterError(SourceErrorCode.BAOSTOCK_TIMEOUT) from error
+        except OSError as error:
+            raise SourceAdapterError(SourceErrorCode.BAOSTOCK_INTERNAL_PROVIDER) from error
+        if completed.returncode != 0:
+            raise SourceAdapterError(SourceErrorCode.BAOSTOCK_INTERNAL_PROVIDER)
+        try:
+            value = json.loads(completed.stdout)
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            raise SourceAdapterError(SourceErrorCode.BAOSTOCK_INTERNAL_PROVIDER) from error
+        if not isinstance(value, dict) or value.get("ok") is not True:
+            raise SourceAdapterError(SourceErrorCode.BAOSTOCK_INTERNAL_PROVIDER)
+        if value.get("fields") != list(BAOSTOCK_CALENDAR_FIELDS):
+            raise SourceAdapterError(SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT)
+        if (
+            value.get("distribution_version") != BAOSTOCK_DISTRIBUTION_VERSION
+            or value.get("runtime_version") != "00.9.30"
+        ):
+            raise SourceAdapterError(SourceErrorCode.BAOSTOCK_INTERNAL_PROVIDER)
+        counts = []
+        for key in ("login_messages", "query_messages", "logout_messages"):
+            item = value.get(key)
+            if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+                raise SourceAdapterError(SourceErrorCode.BAOSTOCK_INTERNAL_PROVIDER)
+            counts.append(item)
+        login_messages, query_messages, logout_messages = counts
+        if login_messages != 1 or query_messages < 1 or logout_messages != 1:
+            raise SourceAdapterError(SourceErrorCode.BAOSTOCK_INTERNAL_PROVIDER)
+        raw_days = value.get("rows")
+        if not isinstance(raw_days, list):
+            raise SourceAdapterError(SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT)
+        days: list[tuple[str, str]] = []
+        for row in raw_days:
+            if (
+                not isinstance(row, list)
+                or len(row) != 2
+                or any(not isinstance(item, str) for item in row)
+                or row[1] not in {"0", "1"}
+            ):
+                raise SourceAdapterError(SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT)
+            try:
+                parsed = datetime.strptime(row[0], "%Y-%m-%d").date()
+            except ValueError as error:
+                raise SourceAdapterError(SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT) from error
+            if parsed.isoformat() != row[0]:
+                raise SourceAdapterError(SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT)
+            days.append((row[0], row[1]))
+        expected = {
+            (start_date + timedelta(days=offset)).isoformat()
+            for offset in range((end_date - start_date).days + 1)
+        }
+        if {day for day, _flag in days} != expected or len(days) != len(expected):
+            raise SourceAdapterError(SourceErrorCode.BAOSTOCK_SCHEMA_DRIFT)
+        days.sort()
+        return BaostockCalendarResult(
+            days=tuple(days),
+            login_messages=login_messages,
+            query_messages=query_messages,
+            logout_messages=logout_messages,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,9 +526,13 @@ class BaostockMarketDataGateway:
 
 __all__ = [
     "BAOSTOCK_ADAPTER_VERSION",
+    "BAOSTOCK_CALENDAR_ADAPTER_VERSION",
+    "BAOSTOCK_CALENDAR_ENDPOINT",
     "BAOSTOCK_ENDPOINT",
     "BAOSTOCK_SESSION_TIMEOUT_SECONDS",
     "BAOSTOCK_UNIT_POLICY_VERSION",
+    "BaostockCalendarResult",
+    "BaostockCalendarRunner",
     "BaostockDailyBarAdapter",
     "BaostockEndpointResponse",
     "BaostockMarketDataGateway",

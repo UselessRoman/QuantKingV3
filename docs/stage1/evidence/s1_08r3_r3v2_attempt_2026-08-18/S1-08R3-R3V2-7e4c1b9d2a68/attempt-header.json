@@ -1,0 +1,1 @@
+{"authorization_id":"S1-08R3-R3V2-7e4c1b9d2a68","authorization_marker":"S1-08R3-R3V2-READONLY-VERIFY-V1","envelope_sha256":"cff0c1a8f791cf80addb2f91c72b85abd2d871f3b34f7f6403cc13a18f7473c4","idempotency_key":"s1-08r3-r3v2-readonly-verify-20260818-v1","schema_version":"s1-08r3-attempt-header.v1","started_at":"2026-08-18T04:33:04.938328+00:00","status":"STARTED"}

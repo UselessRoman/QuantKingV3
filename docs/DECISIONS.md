@@ -546,3 +546,38 @@ failure.json + invocations.jsonl。
 7. **对后续阶段的影响**：旧 XTQuant full 不是 K4E、S1-08R2/R3 或 Stage 1 完成的
    前置条件；Stage 1 对旧迁移的完成条件由"成功迁移并复核"改由"可复验的阻断/拒绝
    结论"满足（本决定即该结论）。下一步是 K4E 独立验收与提交。
+
+## ADR-028：个人本地信任模型与适度授权控制（S1-08R3F-LITE）
+
+**状态：已接受（2026-08-18）**
+
+1. **产品边界**：QuantKing V3 是单用户、本机运行的个人量化软件。本地用户与被
+   用户启动的开发 Agent 属于同一管理边界。
+2. **授权机制的目标**：防止误执行、防止范围意外扩大、防止同一任务意外重放、
+   保留可审计事实。授权机制不以防御本机管理员或恶意本地进程为目标。
+3. **内容 SHA 的角色**：envelope/plan/manifest 的内容 SHA 用于批准内容的完整性
+   与漂移检测，不构成身份认证，不要求 PKI、数字签名服务、HSM、密钥管理系统或
+   多层 authorization request/grant/envelope 签名链，也不为每次普通只读访问建设
+   复杂授权中心。
+4. **历史产物有效性**：E1/C1 各次 attempt header 已证明实际执行使用了批准的
+   envelope/plan SHA（代码树与 git HEAD 亦经复验），因此正式入口此前存在的
+   健壮性缺陷（token 未绑定内容、C1 plan 只校验 schema version）不自动使历史
+   正式产物失效；本 ADR 的修复面向未来执行。
+5. **R3C 流程偏差定性**：旧 R3C 探针第 1 次运行已进入生产 `_reuse_published`
+   路径并创建审计 Job；第 2 次执行零网络调用、零新版本、零新增业务产物。重复
+   执行属于流程偏差，不要求为了修复流程偏差再创建一个真实审计 Job；旧证据字节
+   保持不变。
+6. **未来探针防重放**：未来真实 R3C 或类似探针使用简单的一次性 attempt ledger
+   （绑定 marker、authorization ID、plan SHA、idempotency key 与开始时间），相同
+   authorization ID 已存在即拒绝，FAILED attempt 不可复用；不绑定脚本 SHA、不建
+   设新的授权框架。
+7. **Stage 1 终验要求不变**：Stage 1 最终验收仍必须对正式发布行逐键证明两个
+   实际来源（A/B 规范化实际行、阈值重算、selected source 与 PUBLISHED 行相等）；
+   证据只需保存与 E1 直接相关的 artifact SHA 与逐键证明，不要求保存整个数据根
+   的完整文件 manifest。
+8. **数据根路径披露边界**：`E:\QuantKingV3Data` 是项目公开声明的标准本地数据根，
+   不是密钥或隐私；允许绝对数据根出现在内部任务、授权、证据与验收文档中。Web、
+   DataCenter API 与最终用户响应仍不得返回本机绝对路径。
+9. **不降低数据要求**：本 ADR 不降低行情质量、双来源共识、发布原子性与不可覆盖
+   要求；`comparison-thresholds.daily-bar-unadjusted.k4.v1`（OHLC/`pre_close`
+   零容差、量额绝对 50/相对 0）与其他冻结规则继续有效。

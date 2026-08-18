@@ -42,8 +42,11 @@ K4D 评估已完成并收口（ADR-027）：只读 inventory 已于 2026-08-16 �
 （[S1-08R2 验收记录](stage1/S1-08R2_ACCEPTANCE.md)）：发布范围/预算/血缘由冻结
 release manifest（`s1-08r2-release-manifest.v1` + 独立 `RELEASE_SAFETY_CAPS`）驱动，
 SQLite 锁重试、合法空版本幂等、跨进程单发布者、硬中断恢复、逐证券真实 coverage 与
-只读 verifier 均有合成回归；R2 零真实网络、零正式数据根写入，下一步 S1-08R3 须由
-单独任务与新授权启动。东财和 FTShare 不得进入正式来源。
+只读 verifier 均有合成回归；R2 零真实网络、零正式数据根写入。**S1-08R3 已由单独任务
+执行并完成开发侧收口：C1-R4 发布唯一 PUBLISHED `exchange_calendar` 版本，E1 唯一
+正式 Job 于 2026-08-17 SUCCEEDED，发布首个 PUBLISHED `daily_bar_unadjusted` 版本
+（82 行/2 证券，授权一次消费）；R3C 双幂等探针与 E1R 结果证据只读提取于 2026-08-18
+均成功（新基线 `299ccba9…`）；仅剩 R3D 独立终验。**东财和 FTShare 不得进入正式来源。
 
 ## 分层
 

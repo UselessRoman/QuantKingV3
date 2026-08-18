@@ -50,3 +50,18 @@
 
 R3A dry-run 不授权真实操作。R3B 的网络、正式数据根写入和随后可能的任何失败重跑必须分别
 使用用户批准的固定 marker；一次失败授权不得自动转化为重试、扩容或新的发布任务。
+
+## R3F-LITE 精简修复（2026-08-18，ADR-028）
+
+个人本地信任模型与适度授权控制收口：E1 正式入口 token 升级为内容绑定
+`<marker>:<id>:<envelope_sha256>` 并增加写入面模板/日历来源/数据根/attempts root
+边界校验；C1 plan 改为强类型全字段校验 + `<marker>:<id>:<plan_sha256>` token；
+R3C 未来探针增加简单一次性 attempt ledger（本次不重跑 R3C，旧证据字节不变）；
+verifier 新增正式版本逐键证明（A/B 规范化实际行、K4 阈值重算、DR 重算、
+selected=PUBLISHED、零 XTQUANT_LEGACY）。唯一新数据根访问为 R3V2 纯只读复验
+（marker `S1-08R3-R3V2-READONLY-VERIFY-V1`，已于 2026-08-18 经用户批准执行
+VERIFIED：82/82 行逐键全部 passed、A/B 实际行各 82、PUBLISHED==selected 逐字段
+相等、OHLC/`pre_close` delta 0、volume≤50、amount<50、零 XTQUANT_LEGACY、前后
+聚合根指纹全等、网络/写入/checkpoint/新产物全 0；授权一次消费不可重放）。
+E1/C1 未重跑；Stage 1 仍等待独立 R3D2 终验。详见
+[实施记录](S1-08R3_IMPLEMENTATION.md)与 ADR-028。

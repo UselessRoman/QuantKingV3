@@ -211,6 +211,7 @@ def build_eod_runtime(
         clock=utc_now,
         log_root=data_root,
         reference_loader=reference_loader,
+        expected_release_manifest_sha256=selected_execution_config.release_manifest_sha256,
     )
     registry = WorkerRegistry()
     register_eod_handler(registry, handler)

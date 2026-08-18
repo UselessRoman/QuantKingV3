@@ -12,9 +12,10 @@ import json
 import math
 import sqlite3
 from collections import Counter
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -36,6 +37,7 @@ from quantking.data.adapters.sources.contracts import (
     SupplierResponse,
     VolumeUnit,
 )
+from quantking.data.adapters.sources.normalization import normalize_market_data_response
 from quantking.data.adapters.sources.registry import PRODUCTION_UPSTREAMS
 from quantking.data.adapters.sources.units import (
     AKSHARE_UNIT_POLICY_VERSION,
@@ -54,6 +56,12 @@ from quantking.data.center import (
     CanonicalPreviewPort,
     DataCenterQueryService,
     DifferenceVerifierPort,
+)
+from quantking.data.comparison.thresholds import (
+    ThresholdSpec,
+    canonical_decimal,
+    decimal_difference,
+    k4_evidence_thresholds,
 )
 from quantking.data.comparison.verifier import (
     DifferenceReportVerificationError,
@@ -1615,10 +1623,662 @@ def _verify_manifest_release(
     }
 
 
+# -- S1-08R3F row-by-row release proof (ADR-028 / R3V2) -----------------------
+#
+# The frozen formal E1 identities this proof targets.
+E1_JOB_ID = "job:cd282234-078b-47a9-b17c-12d82e3b7f50"
+E1_PUBLISHED_VERSION_ID = "data_version:f913f915-0a73-476a-9513-ebdca087dd90"
+E1_CALENDAR_VERSION_ID = "data_version:083d7fb7-e268-45a6-8c19-19e144f2d498"
+
+ROW_PROOF_FIELDS: tuple[str, ...] = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "pre_close",
+    "volume",
+    "amount",
+)
+_PRICE_FIELDS: tuple[str, ...] = ("open", "high", "low", "close", "pre_close")
+_TOLERANCE_FIELDS: tuple[str, ...] = ("volume", "amount")
+ROW_PROOF_SCHEMA = "s1-08r3-row-proof.v1"
+
+
+class ReleaseRowProofError(ValueError):
+    """Stable fail-closed violation of the per-key two-source release proof."""
+
+
+def _row_proof_fail(code: str, message: str) -> NoReturn:
+    raise ReleaseRowProofError(f"{code}: {message}")
+
+
+def _row_sha256(code: str, trade_date: str, fields: Mapping[str, object]) -> str:
+    payload = {"code": code, "trade_date": trade_date, **dict(fields)}
+    canonical = json.dumps(
+        payload, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _decimal_text(value: Decimal) -> str:
+    return canonical_decimal(value)
+
+
+def _recompute_field_evidence(
+    primary_value: int | float,
+    fallback_value: int | float,
+    spec: ThresholdSpec,
+) -> tuple[Decimal, Decimal, bool]:
+    """Recompute (absolute, relative, exceeds) exactly like the comparator."""
+
+    diff, relative = decimal_difference(primary_value, fallback_value)
+    return diff, relative, spec.exceeds(primary_value, fallback_value)
+
+
+def compare_row_pair(
+    *,
+    code: str,
+    trade_date: str,
+    primary_row: Mapping[str, object] | None,
+    fallback_row: Mapping[str, object] | None,
+    thresholds: Mapping[str, ThresholdSpec],
+) -> dict[str, object]:
+    """Pure per-key two-source check used by the row proof and unit tests.
+
+    ``primary_row``/``fallback_row`` carry the normalized canonical fields
+    (ROW_PROOF_FIELDS). Raises :class:`ReleaseRowProofError` when either
+    actual source row is missing or when any field exceeds its frozen K4
+    threshold (OHLC/``pre_close`` zero tolerance; volume/amount absolute 50,
+    relative disabled). Returns the recomputed per-field evidence.
+    """
+
+    if primary_row is None and fallback_row is None:
+        _row_proof_fail(
+            "ROW_COMMON_MISSING",
+            f"{code} {trade_date}: both actual sources lack the row; "
+            "a common absence never forms consensus",
+        )
+    if primary_row is None or fallback_row is None:
+        _row_proof_fail(
+            "ROW_SINGLE_SOURCE",
+            f"{code} {trade_date}: only one actual source holds the row",
+        )
+    evidence: dict[str, dict[str, object]] = {}
+    for field_name in ROW_PROOF_FIELDS:
+        spec = thresholds.get(field_name)
+        if spec is None:
+            _row_proof_fail("ROW_THRESHOLD_MISSING", f"{field_name} has no frozen threshold")
+        primary_value = primary_row[field_name]
+        fallback_value = fallback_row[field_name]
+        if isinstance(primary_value, bool) or isinstance(fallback_value, bool):
+            _row_proof_fail("ROW_VALUE_INVALID", f"{field_name} carries a boolean")
+        diff, relative, exceeds = _recompute_field_evidence(
+            cast("int | float", primary_value), cast("int | float", fallback_value), spec
+        )
+        if exceeds:
+            if field_name in _PRICE_FIELDS:
+                _row_proof_fail(
+                    "ROW_PRICE_MISMATCH",
+                    f"{code} {trade_date} {field_name}: zero-tolerance field differs "
+                    f"(absolute={_decimal_text(diff)})",
+                )
+            _row_proof_fail(
+                "ROW_TOLERANCE_EXCEEDED",
+                f"{code} {trade_date} {field_name}: absolute {_decimal_text(diff)} "
+                "exceeds the frozen 50-unit tolerance",
+            )
+        evidence[field_name] = {
+            "absolute": _decimal_text(diff),
+            "relative": _decimal_text(relative),
+            "exceeds": False,
+        }
+    return {"code": code, "trade_date": trade_date, "fields": evidence}
+
+
+def assert_dr_rows_recompute(
+    *,
+    code: str,
+    trade_date: str,
+    primary_row: Mapping[str, object],
+    fallback_row: Mapping[str, object],
+    dr_rows: list[dict[str, object]],
+    thresholds: Mapping[str, ThresholdSpec],
+) -> None:
+    """Every DifferenceReport row for this key must recompute from A/B values.
+
+    The comparator records a row only when a threshold EXCEEDS, so a
+    publishable release must carry no BOTH-class field rows for its keys at
+    all; any recorded row whose evidence cannot be recomputed exactly from
+    the actual A/B values fails closed.
+    """
+
+    for row in dr_rows:
+        if not isinstance(row, dict):
+            _row_proof_fail("DR_ROW_INVALID", "DifferenceReport row is not an object")
+        classification = str(row.get("classification"))
+        field_name = str(row.get("field") or "")
+        if classification in {"PRIMARY_ONLY", "FALLBACK_ONLY"}:
+            _row_proof_fail(
+                "DR_MISSING_ROW_RECORDED",
+                f"{code} {trade_date}: a missing-row difference was recorded",
+            )
+        if classification != "BOTH":
+            _row_proof_fail("DR_ROW_INVALID", f"unknown classification {classification}")
+        if not field_name:
+            _row_proof_fail("DR_ROW_INVALID", "BOTH-class row carries no field")
+        spec = thresholds.get(field_name)
+        if spec is None:
+            _row_proof_fail("DR_ROW_INVALID", f"{field_name} has no frozen threshold")
+        primary_value = primary_row.get(field_name)
+        fallback_value = fallback_row.get(field_name)
+        if not isinstance(primary_value, (int, float)) or not isinstance(
+            fallback_value, (int, float)
+        ):
+            _row_proof_fail("DR_ROW_INVALID", f"{field_name} values are not numeric")
+        diff, relative, exceeds = _recompute_field_evidence(primary_value, fallback_value, spec)
+        if not exceeds:
+            _row_proof_fail(
+                "DR_MISMATCH",
+                f"{code} {trade_date} {field_name}: recorded difference does not "
+                "recompute (threshold not exceeded by the actual values)",
+            )
+        recorded_absolute = row.get("absolute_difference")
+        recorded_relative = row.get("relative_difference")
+        if (
+            recorded_absolute != _decimal_text(diff)
+            or recorded_relative != _decimal_text(relative)
+            or row.get("primary_value") != primary_value
+            or row.get("fallback_value") != fallback_value
+        ):
+            _row_proof_fail(
+                "DR_MISMATCH",
+                f"{code} {trade_date} {field_name}: recorded evidence differs from "
+                "the recomputed A/B values",
+            )
+    # Every recomputed exceeding field must have been recorded; for a
+    # publishable release `compare_row_pair` already failed on any exceeding
+    # field, so at this point there must be no BOTH-class rows at all.
+    if dr_rows:
+        _row_proof_fail(
+            "DR_MISMATCH",
+            f"{code} {trade_date}: DifferenceReport rows exist although no field "
+            "exceeds its threshold",
+        )
+
+
+def assert_published_equals_selected(
+    *,
+    code: str,
+    trade_date: str,
+    selected_upstream: str,
+    selected_row: Mapping[str, object],
+    published_row: Mapping[str, object],
+) -> None:
+    """The PUBLISHED row must equal the selected actual source row exactly."""
+
+    if selected_upstream not in {"BAOSTOCK", "TENCENT"}:
+        _row_proof_fail(
+            "C_SILENT_SUBSTITUTION",
+            f"{code} {trade_date}: selected upstream {selected_upstream} is not a "
+            "consensus primary",
+        )
+    for field_name in ROW_PROOF_FIELDS:
+        if selected_row[field_name] != published_row.get(field_name):
+            _row_proof_fail(
+                "PUBLISHED_NOT_SELECTED",
+                f"{code} {trade_date} {field_name}: published value differs from the "
+                "selected source",
+            )
+
+
+def _normalized_source_rows(
+    *,
+    data_root: Path,
+    batch_rows: list[sqlite3.Row],
+    upstream_value: str,
+) -> dict[tuple[str, str], dict[str, object]]:
+    """Rebuild the normalized per-key rows of one upstream from raw evidence."""
+
+    rows: dict[tuple[str, str], dict[str, object]] = {}
+    for batch in batch_rows:
+        params = _json_object(batch["request_params_json"], label="Raw request parameters")
+        if params.get("upstream") != upstream_value:
+            continue
+        if batch["status"] != "SUCCEEDED":
+            continue
+        scope_value = params.get("scope")
+        try:
+            scope = json.loads(scope_value) if isinstance(scope_value, str) else None
+        except json.JSONDecodeError as error:
+            raise ReleaseRowProofError("raw scope is invalid") from error
+        if not isinstance(scope, list):
+            raise ReleaseRowProofError("raw scope is invalid")
+        plan = build_incremental_plan(
+            IncrementalPlanRequest(
+                batch_id=parse_entity_id(str(batch["batch_id"])),
+                dataset=DatasetKind.DAILY_BAR_UNADJUSTED,
+                scope=tuple(str(item) for item in scope),
+                request_start=TradingDate.from_iso(str(params["request_start"])),
+                request_end=TradingDate.from_iso(str(params["request_end"])),
+                start_inclusive=True,
+                end_inclusive=True,
+                known_coverage=(),
+                lookback_days=0,
+                max_days_per_chunk=31,
+                max_items_per_chunk=1,
+                adapter_version=str(params["adapter_version"]),
+            )
+        )
+        raw_directory = (
+            data_root
+            / "raw"
+            / upstream_value.lower()
+            / _DATASET
+            / path_safe_id(str(batch["batch_id"]))
+        )
+        verified_raw = verify_raw_directory(raw_directory, data_root=data_root)
+        files = verified_raw.manifest.get("files")
+        if not isinstance(files, list):
+            raise ReleaseRowProofError("raw manifest file list is invalid")
+        for sequence, item in enumerate(files):
+            if not isinstance(item, dict) or not isinstance(item.get("relative_path"), str):
+                raise ReleaseRowProofError("raw response entry is invalid")
+            if sequence >= len(plan.chunks):
+                raise ReleaseRowProofError("raw response count exceeds the plan")
+            relative_path = str(item["relative_path"])
+            payload = (raw_directory / Path(relative_path)).read_bytes()
+            if hashlib.sha256(payload).hexdigest() != item["sha256"]:
+                raise ReleaseRowProofError("raw file SHA does not match the manifest")
+            response = SupplierResponse.from_raw_payload(
+                payload,
+                expected_chunk=plan.chunks[sequence],
+            )
+            table = normalize_market_data_response(
+                DatasetKind.DAILY_BAR_UNADJUSTED,
+                response,
+            )
+            chunk_file_sha = str(item["sha256"])
+            for record in table.to_pylist():
+                key = (str(record["code"]), record["trade_date"].isoformat())
+                if key in rows:
+                    raise ReleaseRowProofError("duplicate normalized source row")
+                rows[key] = {
+                    **{field: record[field] for field in ROW_PROOF_FIELDS},
+                    "_batch_id": str(batch["batch_id"]),
+                    "_chunk_file_sha256": chunk_file_sha,
+                }
+    return rows
+
+
+def _job_budget_summary(data_root: Path, job: sqlite3.Row) -> dict[str, object]:
+    log_id = job["log_id"]
+    if not isinstance(log_id, str):
+        raise ReleaseRowProofError("job log id is invalid")
+    try:
+        path = resolve_under(data_root, log_id)
+    except Exception as error:
+        raise ReleaseRowProofError("job log id is not managed") from error
+    if not path.is_file():
+        raise ReleaseRowProofError("job structured log is missing")
+    events: list[dict[str, object]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        value = json.loads(line)
+        if isinstance(value, dict):
+            events.append(value)
+    planned = [item for item in events if item.get("event") == "network_budget_planned"]
+    summaries = [item for item in events if item.get("event") == "network_budget_summary"]
+    if len(planned) != 1 or len(summaries) != 1:
+        raise ReleaseRowProofError("job network budget logs are incomplete")
+    budget = summaries[0].get("network_budget")
+    if not isinstance(budget, dict):
+        raise ReleaseRowProofError("job network budget summary is invalid")
+    actual = budget.get("endpoint_actual")
+    limits = budget.get("endpoint_limits")
+    if (
+        not isinstance(actual, dict)
+        or not isinstance(limits, dict)
+        or budget.get("application_retries") != 0
+    ):
+        raise ReleaseRowProofError("job actual network budget is invalid")
+    per_source = limits.get("per_source")
+    if not isinstance(per_source, dict):
+        raise ReleaseRowProofError("job endpoint limits are invalid")
+    for upstream, count in actual.items():
+        if not isinstance(count, int) or count > int(per_source.get(str(upstream), 0)):
+            raise ReleaseRowProofError("actual endpoint count exceeds its per-source limit")
+    return {
+        "endpoint_actual": dict(sorted((str(k), int(v)) for k, v in actual.items())),
+        "endpoint_limits": limits,
+        "application_retries": 0,
+    }
+
+
+def _verify_release_row_proof(
+    connection: sqlite3.Connection,
+    data_root: Path,
+    version_id: str,
+    job_id: str | None,
+    emit: Callable[[dict[str, object]], None] | None,
+) -> dict[str, object]:
+    from quantking.data.models import DataProvider
+
+    thresholds: Mapping[str, ThresholdSpec] = k4_evidence_thresholds().for_dataset(
+        DatasetKind.DAILY_BAR_UNADJUSTED
+    )
+    # The frozen K4 rule: prices exact, volume/amount absolute 50 / relative 0.
+    for field_name in _PRICE_FIELDS:
+        spec = thresholds[field_name]
+        if spec.absolute != 0 or spec.relative != 0:
+            _row_proof_fail("THRESHOLD_RULE_INVALID", f"{field_name} tolerance is not zero")
+    for field_name in _TOLERANCE_FIELDS:
+        spec = thresholds[field_name]
+        if spec.absolute != 50 or spec.relative != 0:
+            _row_proof_fail(
+                "THRESHOLD_RULE_INVALID",
+                f"{field_name} tolerance is not the frozen 50/0 rule",
+            )
+
+    version = _one(
+        connection,
+        "SELECT * FROM dataset_versions WHERE version_id = ?",
+        (version_id,),
+        label="DatasetVersion",
+    )
+    if version["dataset"] != _DATASET or version["status"] != "PUBLISHED":
+        _row_proof_fail("VERSION_INVALID", "version is not a PUBLISHED daily release")
+    resolution = _one(
+        connection,
+        "SELECT * FROM resolution_runs WHERE candidate_version_id = ?",
+        (version_id,),
+        label="ResolutionRun",
+    )
+    if resolution["conflict_count"] or resolution["blocker_count"]:
+        _row_proof_fail("RESOLUTION_CONFLICT", "resolution carries conflicts or blockers")
+    job = _one(
+        connection,
+        "SELECT * FROM job_runs WHERE job_id = ?",
+        (resolution["created_job_id"],),
+        label="Job",
+    )
+    if job["status"] != "SUCCEEDED" or job["job_type"] != "data.eod.v1":
+        _row_proof_fail("JOB_INVALID", "release job is not SUCCEEDED")
+    if job_id is not None and str(job["job_id"]) != job_id:
+        _row_proof_fail("JOB_INVALID", "release job id differs from the frozen E1 job id")
+    frozen = parse_frozen_eod_command(
+        job_type=str(job["job_type"]),
+        input_manifest=_json_object(job["input_manifest_json"], label="Job input manifest"),
+        config_manifest=_json_object(job["config_manifest_json"], label="Job config manifest"),
+        version_manifest=_json_object(job["version_manifest_json"], label="Job version manifest"),
+    )
+
+    batch_rows = _rows(
+        connection,
+        "SELECT * FROM ingestion_batches WHERE job_run_id = ? ORDER BY batch_id",
+        (job["job_id"],),
+    )
+    if not batch_rows:
+        _row_proof_fail("LINEAGE_EMPTY", "release job has no raw batches")
+    for batch in batch_rows:
+        params = _json_object(batch["request_params_json"], label="Raw request parameters")
+        provider = params.get("provider")
+        upstream = params.get("upstream")
+        if provider == DataProvider.XTQUANT_LEGACY.value or upstream == "XTQUANT":
+            _row_proof_fail("XTQUANT_LINEAGE", "XTQUANT_LEGACY batch entered the release lineage")
+
+    a_rows = _normalized_source_rows(
+        data_root=data_root, batch_rows=batch_rows, upstream_value=DataUpstream.BAOSTOCK.value
+    )
+    b_rows = _normalized_source_rows(
+        data_root=data_root, batch_rows=batch_rows, upstream_value=DataUpstream.TENCENT.value
+    )
+    c_rows = _normalized_source_rows(
+        data_root=data_root, batch_rows=batch_rows, upstream_value=DataUpstream.SINA.value
+    )
+    if not a_rows:
+        _row_proof_fail("SOURCE_A_MISSING", "no actual BaoStock rows back the release")
+    if not b_rows:
+        _row_proof_fail("SOURCE_B_MISSING", "no actual Tencent rows back the release")
+
+    verified_resolution = verify_resolution_artifact(
+        data_root / "artifacts" / str(resolution["artifact_relative_path"]),
+        artifacts_root=data_root / "artifacts",
+    )
+    default_decision = verified_resolution.summary.get("default_decision")
+    if not isinstance(default_decision, dict):
+        _row_proof_fail("RESOLUTION_DEFAULT_INVALID", "resolution default decision is missing")
+    selected_upstream = str(default_decision.get("selected_upstream"))
+    agreeing = default_decision.get("agreeing_upstreams")
+    if (
+        selected_upstream not in {"BAOSTOCK", "TENCENT"}
+        or not isinstance(agreeing, list)
+        or selected_upstream not in {str(item) for item in agreeing}
+    ):
+        _row_proof_fail(
+            "C_SILENT_SUBSTITUTION",
+            "the default selection is not a two-source consensus primary",
+        )
+
+    difference_rows = _rows(
+        connection,
+        "SELECT * FROM difference_reports WHERE version_id = ? ORDER BY report_id",
+        (version_id,),
+    )
+    difference_verifier = DifferenceReportVerifier(artifacts_root=data_root / "artifacts")
+    dr_by_key: dict[tuple[str, str], list[dict[str, object]]] = {}
+    report_ids: list[str] = []
+    for report in difference_rows:
+        report_id = str(report["report_id"])
+        verified_report = difference_verifier.verify(report_id=parse_entity_id(report_id))
+        for row in verified_report.row_differences:
+            if not isinstance(row, dict):
+                _row_proof_fail("DR_ROW_INVALID", "DifferenceReport row is invalid")
+            key_value = row.get("primary_key")
+            if not isinstance(key_value, dict):
+                _row_proof_fail("DR_ROW_INVALID", "DifferenceReport primary key is invalid")
+            trade_date_value = key_value.get("trade_date")
+            if trade_date_value is None:
+                _row_proof_fail("DR_ROW_INVALID", "DifferenceReport primary key lacks a date")
+            trade_date_text = (
+                trade_date_value.isoformat()
+                if hasattr(trade_date_value, "isoformat")
+                else str(trade_date_value)
+            )
+            key = (str(key_value.get("code")), trade_date_text)
+            dr_by_key.setdefault(key, []).append(row)
+        report_ids.append(report_id)
+
+    warehouse_directory = data_root / "warehouse" / _DATASET / path_safe_id(version_id)
+    verified_version = verify_canonical_directory(warehouse_directory, data_root=data_root)
+    published_files = verified_version.files
+    published_table = pa.concat_tables(
+        [
+            pq.ParquetFile(warehouse_directory / file.relative_path).read()  # type: ignore[no-untyped-call]
+            for file in published_files
+        ]
+    )
+    published_rows: dict[tuple[str, str], dict[str, object]] = {}
+    for record in published_table.to_pylist():
+        key = (str(record["code"]), record["trade_date"].isoformat())
+        if key in published_rows:
+            _row_proof_fail("PUBLISHED_KEY_DUPLICATE", f"{key} appears twice")
+        published_rows[key] = {field: record[field] for field in ROW_PROOF_FIELDS}
+
+    if not published_rows:
+        _row_proof_fail("PUBLISHED_EMPTY", "the release published no rows")
+    unexplained = (set(a_rows) | set(b_rows)) - set(published_rows)
+    if unexplained:
+        _row_proof_fail(
+            "SOURCE_ROW_UNPUBLISHED",
+            f"{sorted(unexplained)[:3]}: actual source rows missing from the release",
+        )
+
+    selected_rows = a_rows if selected_upstream == DataUpstream.BAOSTOCK.value else b_rows
+    for key in sorted(published_rows):
+        code, trade_date = key
+        a_row = a_rows.get(key)
+        b_row = b_rows.get(key)
+        pair = compare_row_pair(
+            code=code,
+            trade_date=trade_date,
+            primary_row=a_row,
+            fallback_row=b_row,
+            thresholds=thresholds,
+        )
+        assert_dr_rows_recompute(
+            code=code,
+            trade_date=trade_date,
+            primary_row=a_row or {},
+            fallback_row=b_row or {},
+            dr_rows=dr_by_key.get(key, []),
+            thresholds=thresholds,
+        )
+        assert_published_equals_selected(
+            code=code,
+            trade_date=trade_date,
+            selected_upstream=selected_upstream,
+            selected_row=selected_rows[key],
+            published_row=published_rows[key],
+        )
+        if emit is not None and a_row is not None and b_row is not None:
+            a_fields = {field: a_row[field] for field in ROW_PROOF_FIELDS}
+            b_fields = {field: b_row[field] for field in ROW_PROOF_FIELDS}
+            emit(
+                {
+                    "schema_version": ROW_PROOF_SCHEMA,
+                    "code": code,
+                    "trade_date": trade_date,
+                    "a_source": {
+                        "upstream": "BAOSTOCK",
+                        "batch_id": a_row["_batch_id"],
+                        "chunk_file_sha256": a_row["_chunk_file_sha256"],
+                    },
+                    "b_source": {
+                        "upstream": "TENCENT",
+                        "batch_id": b_row["_batch_id"],
+                        "chunk_file_sha256": b_row["_chunk_file_sha256"],
+                    },
+                    "a_fields": a_fields,
+                    "b_fields": b_fields,
+                    "a_row_sha256": _row_sha256(code, trade_date, a_fields),
+                    "b_row_sha256": _row_sha256(code, trade_date, b_fields),
+                    "deltas": pair["fields"],
+                    "thresholds": {
+                        field_name: {
+                            "absolute": _decimal_text(thresholds[field_name].absolute),
+                            "relative": _decimal_text(thresholds[field_name].relative),
+                        }
+                        for field_name in ROW_PROOF_FIELDS
+                    },
+                    "passed": True,
+                    "selected_source": selected_upstream,
+                    "published_fields": published_rows[key],
+                    "published_row_sha256": _row_sha256(code, trade_date, published_rows[key]),
+                    "difference_report_ids": report_ids,
+                    "resolution_run_id": str(resolution["run_id"]),
+                }
+            )
+
+    calendar_reference = None
+    for dataset in frozen.datasets:
+        reference = dataset.references.get("exchange_calendar")
+        if dataset.dataset.value == _DATASET and reference is not None:
+            calendar_reference = reference
+    if calendar_reference is None:
+        _row_proof_fail("CALENDAR_BINDING_MISSING", "frozen command lacks a calendar reference")
+    calendar_version_id = str(calendar_reference.version_id)
+    calendar_row = _one(
+        connection,
+        "SELECT version_id, dataset, status, content_sha256, row_count FROM dataset_versions"
+        " WHERE version_id = ?",
+        (calendar_version_id,),
+        label="calendar DatasetVersion",
+    )
+    if (
+        calendar_row["dataset"] != DatasetKind.EXCHANGE_CALENDAR.value
+        or calendar_row["status"] != "PUBLISHED"
+        or calendar_row["row_count"] is None
+        or int(calendar_row["row_count"]) <= 0
+        or calendar_row["content_sha256"] != str(calendar_reference.content_sha256)
+    ):
+        _row_proof_fail("CALENDAR_BINDING_INVALID", "published calendar binding is invalid")
+    verify_canonical_directory(
+        data_root
+        / "warehouse"
+        / DatasetKind.EXCHANGE_CALENDAR.value
+        / path_safe_id(calendar_version_id),
+        data_root=data_root,
+    )
+
+    return {
+        "schema_version": ROW_PROOF_SCHEMA,
+        "status": "VERIFIED",
+        "version_id": version_id,
+        "job_id": str(job["job_id"]),
+        "rows_verified": len(published_rows),
+        "a_rows": len(a_rows),
+        "b_rows": len(b_rows),
+        "c_rows": len(c_rows),
+        "selected_upstream": selected_upstream,
+        "threshold_rule_version": k4_evidence_thresholds().rule_version,
+        "difference_report_ids": report_ids,
+        "resolution_run_id": str(resolution["run_id"]),
+        "quality_run_id": str(version["quality_run_id"]),
+        "calendar_version_id": calendar_version_id,
+        "budget": _job_budget_summary(data_root, job),
+        "sqlite_mode": "ro&immutable=1 with query_only and sidecar refusal",
+    }
+
+
+def verify_release_row_proof(
+    *,
+    data_root: Path,
+    version_id: str,
+    job_id: str | None = None,
+    emit: Callable[[dict[str, object]], None] | None = None,
+) -> dict[str, object]:
+    """Verify one PUBLISHED release row by row against its actual A/B sources.
+
+    Strictly read-only (``mode=ro&immutable=1`` + ``query_only``, sidecar
+    refusal, zero checkpoints). For every published ``(code, trade_date)``
+    key the proof requires both actual source rows, recomputes every field
+    delta under the frozen K4 thresholds, re-derives the DifferenceReport
+    evidence, and requires the published row to equal the selected source
+    row exactly. ``emit`` receives one JSONL-ready proof object per key.
+    """
+
+    canonical_id = _release_version_id(version_id)
+    if not isinstance(data_root, Path) or not data_root.is_absolute():
+        raise ReleaseRowProofError("data_root must be an absolute Path")
+    try:
+        with _readonly_database(data_root / "metadata" / "quantking.db") as connection:
+            return _verify_release_row_proof(connection, data_root, canonical_id, job_id, emit)
+    except ReleaseRowProofError:
+        raise
+    except (
+        DifferenceReportVerificationError,
+        FrozenEodCommandError,
+        ManifestIntegrityError,
+        OSError,
+        ResolutionArtifactVerificationError,
+        S108ReleaseVerificationError,
+        pa.ArrowInvalid,
+    ) as error:
+        raise ReleaseRowProofError(f"row proof verification failed: {error}") from error
+
+
 __all__ = [
+    "E1_CALENDAR_VERSION_ID",
+    "E1_JOB_ID",
+    "E1_PUBLISHED_VERSION_ID",
+    "ROW_PROOF_SCHEMA",
     "S108_RELEASE_REVISION",
     "ManifestReleaseVerificationError",
+    "ReleaseRowProofError",
     "S108ReleaseVerificationError",
+    "assert_dr_rows_recompute",
+    "assert_published_equals_selected",
+    "compare_row_pair",
     "verify_manifest_release",
+    "verify_release_row_proof",
     "verify_s108_release",
 ]

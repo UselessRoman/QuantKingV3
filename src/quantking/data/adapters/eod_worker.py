@@ -129,6 +129,7 @@ class EodWorkerHandler:
         log_root: Path | None = None,
         fault_injector: Callable[[str], None] | None = None,
         reference_loader: PublishedReferenceLoader | None = None,
+        expected_release_manifest_sha256: str | None = None,
     ) -> None:
         if set(ingestions) != set(PRODUCTION_UPSTREAMS):
             raise ValueError("EOD requires the exact three-role production ingestions")
@@ -147,6 +148,12 @@ class EodWorkerHandler:
         self._log_root = log_root
         self._fault_injector = fault_injector
         self._reference_loader = reference_loader
+        # S1-08R3 anti-drift: when the frozen command carries a release
+        # manifest SHA, the executing worker must have been built from the
+        # exact same manifest. A worker without an expectation (e.g. one
+        # reconstructed from configs/default.toml in a separate process)
+        # refuses manifest-bound commands instead of silently widening scope.
+        self._expected_release_manifest_sha256 = expected_release_manifest_sha256
 
     def _fault(self, point: str) -> None:
         if self._fault_injector is not None:
@@ -161,6 +168,11 @@ class EodWorkerHandler:
             command = _reconstruct(job)
             if command.resolution_rule_version != K4_RESOLUTION_RULE_VERSION:
                 raise EodExecutionError("FROZEN_SOURCE_ROUTE_INVALID")
+            if (
+                command.release_manifest_sha256 is not None
+                and command.release_manifest_sha256 != self._expected_release_manifest_sha256
+            ):
+                raise EodExecutionError("RELEASE_MANIFEST_DRIFT")
             endpoint_budget = K4EndpointBudget(
                 per_source_limits={
                     DataUpstream.BAOSTOCK: command.a_baostock_endpoint_limit,

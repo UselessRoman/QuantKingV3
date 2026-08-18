@@ -1,0 +1,1 @@
+{"authorization_id":"S1-08R3-C1-87372f9b9c76","detail":{"code":"CALENDAR_RUNTIME_UNAVAILABLE","error_type":"ConfigurationError","message":"[configuration_error] environment contains unknown QUANTKING_ keys (keys=QUANTKING_R3_CALENDAR_AUTHORIZATION)"},"recorded_at":"2026-08-17T14:07:04.063957Z","schema_version":"s1-08r3-attempt-header.v1","status":"FAILED"}

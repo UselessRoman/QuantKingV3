@@ -24,9 +24,12 @@ BAOSTOCK_FIELDS = (
     "tradestatus",
     "isST",
 )
+BAOSTOCK_CALENDAR_FIELDS = ("calendar_date", "is_trading_day")
 BAOSTOCK_DISTRIBUTION_VERSION = "0.9.3"
 BAOSTOCK_RUNTIME_VERSION = "00.9.30"
 BAOSTOCK_PAGE_SIZE = 2000
+_DAILY_REQUEST_KEYS = frozenset({"code", "start_date", "end_date"})
+_CALENDAR_REQUEST_KEYS = frozenset({"mode", "start_date", "end_date"})
 
 
 class _StatusResult(Protocol):
@@ -52,6 +55,8 @@ class _BaostockModule(Protocol):
     def login(self) -> _StatusResult | None: ...
 
     def query_history_k_data_plus(self, *args: object, **kwargs: object) -> _QueryResult | None: ...
+
+    def query_trade_dates(self, *args: object, **kwargs: object) -> _QueryResult | None: ...
 
     def logout(self) -> _StatusResult | None: ...
 
@@ -173,7 +178,17 @@ def run_session(
     *,
     module_loader: Callable[[], _BaostockModule] = _load_baostock,
 ) -> dict[str, object]:
-    """Own exactly one login/query/iterate/logout session in this process."""
+    """Own exactly one login/query/iterate/logout session in this process.
+
+    Two controlled request shapes exist: the daily-bar request
+    (``code``/``start_date``/``end_date``) and the calendar request
+    (``mode="calendar"``/``start_date``/``end_date``). Anything else is a
+    schema failure before any vendor call.
+    """
+    keys = set(request)
+    calendar_mode = keys == _CALENDAR_REQUEST_KEYS and request.get("mode") == "calendar"
+    if not calendar_mode and keys != _DAILY_REQUEST_KEYS:
+        return _failure("BAOSTOCK_SCHEMA_DRIFT")
     primary: dict[str, object] | None = None
     module: _BaostockModule | None = None
     logged_in = False
@@ -190,14 +205,21 @@ def run_session(
             )
         logged_in = True
         query_started = True
-        result = module.query_history_k_data_plus(
-            str(request["code"]),
-            ",".join(BAOSTOCK_FIELDS),
-            start_date=str(request["start_date"]),
-            end_date=str(request["end_date"]),
-            frequency="d",
-            adjustflag="3",
-        )
+        expected_fields = BAOSTOCK_CALENDAR_FIELDS if calendar_mode else BAOSTOCK_FIELDS
+        if calendar_mode:
+            result = module.query_trade_dates(
+                start_date=str(request["start_date"]),
+                end_date=str(request["end_date"]),
+            )
+        else:
+            result = module.query_history_k_data_plus(
+                str(request["code"]),
+                ",".join(BAOSTOCK_FIELDS),
+                start_date=str(request["start_date"]),
+                end_date=str(request["end_date"]),
+                frequency="d",
+                adjustflag="3",
+            )
         if result is None:
             primary = _failure("BAOSTOCK_QUERY_FAILED", login_messages=1, query_messages=1)
         elif str(getattr(result, "error_code", "")) != "0":
@@ -206,7 +228,7 @@ def run_session(
                 login_messages=1,
                 query_messages=1,
             )
-        elif tuple(getattr(result, "fields", ())) != BAOSTOCK_FIELDS:
+        elif tuple(getattr(result, "fields", ())) != expected_fields:
             primary = _failure("BAOSTOCK_SCHEMA_DRIFT", login_messages=1, query_messages=1)
         else:
             rows, page_messages, error_code = _collect_rows(result)
@@ -222,7 +244,7 @@ def run_session(
                     "ok": True,
                     "error_code": "0",
                     "rows": rows,
-                    "fields": list(BAOSTOCK_FIELDS),
+                    "fields": list(expected_fields),
                     "distribution_version": BAOSTOCK_DISTRIBUTION_VERSION,
                     "runtime_version": BAOSTOCK_RUNTIME_VERSION,
                     "login_messages": 1,
@@ -268,7 +290,12 @@ def run_session(
 def main() -> int:
     try:
         request = json.loads(sys.stdin.read())
-        if not isinstance(request, dict) or set(request) != {"code", "start_date", "end_date"}:
+        keys = set(request) if isinstance(request, dict) else set()
+        valid_daily = keys == {"code", "start_date", "end_date"}
+        valid_calendar = (
+            keys == {"mode", "start_date", "end_date"} and request.get("mode") == "calendar"
+        )
+        if not isinstance(request, dict) or not (valid_daily or valid_calendar):
             result = _failure("BAOSTOCK_SCHEMA_DRIFT")
         else:
             # The package prints login/logout status. Suppress it so stdout is
@@ -289,6 +316,7 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "BAOSTOCK_CALENDAR_FIELDS",
     "BAOSTOCK_DISTRIBUTION_VERSION",
     "BAOSTOCK_FIELDS",
     "BAOSTOCK_PAGE_SIZE",

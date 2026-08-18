@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import date
 from pathlib import Path
-from typing import NoReturn, Protocol, TextIO
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol, TextIO
 
 from quantking.common.errors import QuantKingError
 from quantking.data.eod.contracts import EodPublishIntent, EodRunRequest
 from quantking.data.eod.service import EodEnqueueResult
 from quantking.jobs.models import JobRun
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from quantking.common.config import AppSettings
+    from quantking.data.adapters.sources.ingestion import MarketDataGateway
+    from quantking.data.models import DataUpstream
 
 
 class EodCommandPort(Protocol):
@@ -50,6 +58,23 @@ def _parser() -> argparse.ArgumentParser:
     dry_run = commands.add_parser("eod-dry-run")
     dry_run.add_argument("--manifest", required=True)
     dry_run.add_argument("--data-root-label", default=r"E:\QuantKingV3Data")
+    formal = commands.add_parser("eod-formal-run")
+    formal.add_argument("--manifest", required=True)
+    formal.add_argument("--envelope", required=True)
+    formal.add_argument("--attempts-root", required=True)
+    formal.add_argument(
+        "--authorization-env",
+        # Authorization tokens must NOT use the QUANTKING_ namespace:
+        # load_runtime_settings fails closed on unknown QUANTKING_* keys.
+        default="R3_FORMAL_AUTHORIZATION",
+    )
+    calendar = commands.add_parser("eod-calendar-publish")
+    calendar.add_argument("--plan", required=True)
+    calendar.add_argument("--attempts-root", required=True)
+    calendar.add_argument(
+        "--authorization-env",
+        default="R3_CALENDAR_AUTHORIZATION",
+    )
     enqueue = commands.add_parser("eod-enqueue")
     dates = enqueue.add_mutually_exclusive_group(required=True)
     dates.add_argument("--trade-date")
@@ -257,11 +282,313 @@ def run_cli(
         return 1
 
 
+class FormalEntryError(Exception):
+    """Stable refusal/failure code for the single formal R3 entry."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _read_git_head(repository_root: Path) -> str:
+    git_directory = repository_root / ".git"
+    if not git_directory.is_dir():
+        raise FormalEntryError("FORMAL_GIT_HEAD_UNREADABLE")
+    head_file = git_directory / "HEAD"
+    if not head_file.is_file():
+        raise FormalEntryError("FORMAL_GIT_HEAD_UNREADABLE")
+    head = head_file.read_text(encoding="utf-8").strip()
+    if not head.startswith("ref: "):
+        return head
+    reference = git_directory / head[5:].strip()
+    if not reference.is_file():
+        raise FormalEntryError("FORMAL_GIT_HEAD_UNREADABLE")
+    return reference.read_text(encoding="utf-8").strip()
+
+
+def run_formal_entry(
+    *,
+    manifest_path: Path,
+    envelope_path: Path,
+    attempts_root: Path,
+    authorization: str | None,
+    settings: AppSettings,
+    code_root: Path,
+    gateways: Mapping[DataUpstream, MarketDataGateway] | None = None,
+    git_head_reader: Callable[[], str] | None = None,
+    declared_data_root: Path | None = None,
+    attempts_root_base: Path | None = None,
+) -> dict[str, object]:
+    """Execute the one authorized formal R3 release through the shared stack.
+
+    Every guard fails closed with a stable code before the first provider
+    call and before any formal business file is written: the ADR-028 content
+    bound token must match the marker, authorization id and the recomputed
+    envelope SHA, the envelope must match the manifest, the code tree and git
+    HEAD must still match the frozen SHAs, the write-path template, calendar
+    source, data root and attempts root must sit inside the declared entry
+    boundary, and the attempt ledger must prove this authorization id was
+    never used. The default path (no authorization environment) always
+    refuses.
+    """
+    from quantking.data.eod.formal_authorization import (
+        DECLARED_FORMAL_DATA_ROOT_LABEL,
+        FormalAttemptLedger,
+        FormalAuthorizationEnvelope,
+        FormalAuthorizationError,
+        assert_envelope_matches_manifest,
+        assert_formal_entry_boundary,
+        compute_code_tree_sha256,
+    )
+    from quantking.data.eod.release_manifest import ReleaseManifest, ReleaseManifestError
+    from quantking.data.eod.service import EodExecutionConfig
+    from quantking.runtime import build_eod_runtime
+
+    if not isinstance(authorization, str) or len(authorization.split(":")) != 3:
+        raise FormalEntryError("FORMAL_AUTHORIZATION_REQUIRED")
+    try:
+        manifest = ReleaseManifest.from_dict(json.loads(manifest_path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, ReleaseManifestError, TypeError):
+        raise FormalEntryError("FORMAL_MANIFEST_INVALID") from None
+    try:
+        envelope = FormalAuthorizationEnvelope.from_dict(
+            json.loads(envelope_path.read_text(encoding="utf-8"))
+        )
+    except (OSError, ValueError, TypeError):
+        raise FormalEntryError("FORMAL_ENVELOPE_INVALID") from None
+    # ADR-028 content binding: the token must carry the SHA of the exact
+    # envelope content being executed, so any drift in the envelope file
+    # invalidates previously issued marker/id tokens before anything runs.
+    token_marker, token_authorization_id, token_envelope_sha = authorization.split(":")
+    if (
+        token_marker != envelope.authorization_marker
+        or token_authorization_id != envelope.authorization_id
+        or token_envelope_sha != envelope.envelope_sha256()
+    ):
+        raise FormalEntryError("FORMAL_AUTHORIZATION_MISMATCH")
+    try:
+        assert_envelope_matches_manifest(envelope, manifest)
+    except FormalAuthorizationError:
+        raise FormalEntryError("FORMAL_ENVELOPE_MANIFEST_MISMATCH") from None
+    if not envelope.calendar_version_id.startswith("data_version:"):
+        raise FormalEntryError("FORMAL_CALENDAR_BINDING_INVALID")
+    try:
+        actual_tree = compute_code_tree_sha256(code_root / "src" / "quantking")
+    except (OSError, FormalAuthorizationError):
+        raise FormalEntryError("FORMAL_CODE_TREE_UNREADABLE") from None
+    if actual_tree != envelope.code_tree_sha256:
+        raise FormalEntryError("FORMAL_CODE_TREE_DRIFT")
+    try:
+        actual_head = git_head_reader() if git_head_reader else _read_git_head(code_root)
+    except FormalEntryError:
+        raise
+    except OSError:
+        raise FormalEntryError("FORMAL_GIT_HEAD_UNREADABLE") from None
+    if actual_head != envelope.git_head:
+        raise FormalEntryError("FORMAL_GIT_HEAD_DRIFT")
+    boundary_code_map = {
+        "ENVELOPE_WRITE_PATHS_INVALID": "FORMAL_WRITE_PATHS_INVALID",
+        "CALENDAR_SOURCE_INVALID": "FORMAL_CALENDAR_SOURCE_INVALID",
+        "CALENDAR_BINDING_INVALID": "FORMAL_CALENDAR_BINDING_INVALID",
+        "DATA_ROOT_INVALID": "FORMAL_DATA_ROOT_INVALID",
+        "ATTEMPTS_ROOT_INVALID": "FORMAL_ATTEMPTS_ROOT_INVALID",
+    }
+    try:
+        assert_formal_entry_boundary(
+            envelope,
+            settings_data_root=settings.paths.data_root,
+            declared_data_root=(
+                Path(DECLARED_FORMAL_DATA_ROOT_LABEL)
+                if declared_data_root is None
+                else declared_data_root
+            ),
+            attempts_root=attempts_root,
+            attempts_root_base=code_root if attempts_root_base is None else attempts_root_base,
+        )
+    except FormalAuthorizationError as error:
+        raise FormalEntryError(
+            boundary_code_map.get(error.code, "FORMAL_BOUNDARY_INVALID")
+        ) from None
+
+    from quantking.common.time import utc_now
+
+    ledger = FormalAttemptLedger(attempts_root)
+    try:
+        ledger.begin(
+            envelope_sha256=envelope.envelope_sha256(),
+            marker=envelope.authorization_marker,
+            authorization_id=envelope.authorization_id,
+            idempotency_key=envelope.idempotency_key,
+            now_iso=utc_now().to_iso(),
+        )
+    except FormalAuthorizationError:
+        raise FormalEntryError("AUTHORIZATION_ALREADY_CONSUMED") from None
+
+    config = EodExecutionConfig.from_release_manifest(manifest)
+    # The envelope owns the concrete published calendar binding; graft it
+    # into the frozen dataset config so the worker preflight verifies the
+    # exact PUBLISHED calendar version by id and content SHA.
+    from dataclasses import replace as _replace
+
+    from quantking.data.eod.contracts import EodReferenceVersion
+    from quantking.data.models import DatasetKind
+
+    dataset_config = config.datasets["daily_bar_unadjusted"]
+    config = _replace(
+        config,
+        datasets={
+            "daily_bar_unadjusted": _replace(
+                dataset_config,
+                references={
+                    **dict(dataset_config.references),
+                    "exchange_calendar": EodReferenceVersion(
+                        dataset=DatasetKind.EXCHANGE_CALENDAR.value,
+                        version_id=envelope.calendar_version_id,
+                        content_sha256=envelope.calendar_sha256,
+                    ),
+                },
+            ),
+        },
+    )
+    runtime = build_eod_runtime(settings, gateways=gateways, execution_config=config)
+    request = EodRunRequest(
+        start_date=manifest.target_start,
+        end_date=manifest.target_end,
+        datasets=("daily_bar_unadjusted",),
+        publish_intent=EodPublishIntent.PUBLISH_AFTER_QUALITY,
+        base_versions={},
+    )
+    outcome = runtime.eod_commands.enqueue(
+        request,
+        idempotency_key=envelope.idempotency_key,
+        requester="formal-r3",
+    )
+    from quantking.jobs.models import JobStatus
+
+    try:
+        runtime.worker.run(outcome.job_id)
+        final = runtime.jobs.get_job(outcome.job_id)
+        if final.status is not JobStatus.SUCCEEDED:
+            raise RuntimeError("formal job did not succeed")
+        ledger.record(
+            envelope.authorization_id,
+            status="COMPLETED",
+            now_iso=utc_now().to_iso(),
+            detail={"job_id": outcome.job_id},
+        )
+    except Exception:
+        ledger.record(
+            envelope.authorization_id,
+            status="FAILED",
+            now_iso=utc_now().to_iso(),
+            detail={"job_id": outcome.job_id},
+        )
+        raise FormalEntryError("FORMAL_EXECUTION_FAILED") from None
+    return {
+        "job_id": outcome.job_id,
+        "status": "SUCCEEDED",
+        "created": outcome.created,
+        "authorization_id": envelope.authorization_id,
+        "envelope_sha256": envelope.envelope_sha256(),
+        "release_manifest_sha256": envelope.release_manifest_sha256,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the installed local CLI; runtime construction is deferred until after help."""
     arguments = tuple(sys.argv[1:] if argv is None else argv)
     if any(item in {"-h", "--help"} for item in arguments):
         _parser().parse_args(list(arguments))
+        return 0
+    if arguments and arguments[0] == "eod-formal-run":
+        try:
+            parsed = _parser().parse_args(list(arguments))
+            from quantking.cli.eod import FormalEntryError, run_formal_entry
+
+            repository_root = Path(__file__).resolve().parents[3]
+            from quantking.runtime import load_runtime_settings
+
+            payload = run_formal_entry(
+                manifest_path=Path(parsed.manifest),
+                envelope_path=Path(parsed.envelope),
+                attempts_root=Path(parsed.attempts_root),
+                authorization=os.environ.get(parsed.authorization_env),
+                settings=load_runtime_settings(),
+                code_root=repository_root,
+            )
+        except FormalEntryError as error:
+            _write(
+                sys.stdout,
+                {
+                    "error": {
+                        "code": error.code,
+                        "message": "The formal R3 execution was refused or failed.",
+                    }
+                },
+            )
+            return 1
+        except Exception:
+            _write(
+                sys.stdout,
+                {
+                    "error": {
+                        "code": "FORMAL_ENTRY_UNAVAILABLE",
+                        "message": "The formal R3 entry could not be initialized.",
+                    }
+                },
+            )
+            return 1
+        _write(sys.stdout, payload)
+        return 0
+    if arguments and arguments[0] == "eod-calendar-publish":
+        try:
+            parsed = _parser().parse_args(list(arguments))
+            from quantking.common.ids import new_entity_id
+            from quantking.data.adapters.sources.baostock import BaostockCalendarRunner
+            from quantking.data.eod.calendar_bootstrap import (
+                CalendarBootstrapError,
+                execute_calendar_bootstrap,
+            )
+            from quantking.runtime import build_eod_runtime, load_runtime_settings
+
+            repository_root = Path(__file__).resolve().parents[3]
+
+            def _runtime_factory() -> Any:
+                return build_eod_runtime(load_runtime_settings())
+
+            payload = execute_calendar_bootstrap(
+                plan=json.loads(Path(parsed.plan).read_text(encoding="utf-8")),
+                authorization=os.environ.get(parsed.authorization_env),
+                runtime_factory=_runtime_factory,
+                runner=BaostockCalendarRunner(),
+                attempts_root=Path(parsed.attempts_root),
+                code_root=repository_root,
+                version_id=new_entity_id("data_version"),
+                batch_id=new_entity_id("data_batch"),
+            )
+        except CalendarBootstrapError as error:
+            _write(
+                sys.stdout,
+                {
+                    "error": {
+                        "code": error.code,
+                        "message": "The authorized C1 calendar bootstrap was refused or failed.",
+                    }
+                },
+            )
+            return 1
+        except Exception:
+            _write(
+                sys.stdout,
+                {
+                    "error": {
+                        "code": "CALENDAR_BOOTSTRAP_UNAVAILABLE",
+                        "message": "The C1 calendar bootstrap entry could not be initialized.",
+                    }
+                },
+            )
+            return 1
+        _write(sys.stdout, payload)
         return 0
     if arguments and arguments[0] == "eod-dry-run":
         try:

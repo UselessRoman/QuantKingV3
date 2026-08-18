@@ -454,3 +454,73 @@ def test_s1_08_r2_acceptance_record_is_frozen_with_real_gate_numbers() -> None:
     assert "S1-08R2_ACCEPTANCE.md" in matrix
     task = _read("docs/stage1/S1-08R2_TASK.md")
     assert "已验收" in task
+
+
+def test_adr_028_personal_local_trust_model_and_r3f_state_are_recorded() -> None:
+    """ADR-028 and the R3F-LITE state stay auditable without new executions.
+
+    The decision record must carry the personal-local trust model, the R3C
+    deviation ruling and the row-proof requirement; the R3 status docs must
+    state the fixes landed without re-running E1/C1/R3C, keep R3V2 as the
+    single pending data-root access, and keep Stage 1 awaiting the
+    independent R3D2 acceptance.
+    """
+
+    decisions = _read("docs/DECISIONS.md")
+    for phrase in (
+        "ADR-028",
+        "个人本地信任模型与适度授权控制",
+        "同一管理边界",
+        "防止误执行",
+        "不以防御本机管理员或恶意本地进程为目标",
+        "不是密钥或隐私",
+        "流程偏差",
+        "一次性 attempt ledger",
+        "两个\n   实际来源",
+    ):
+        assert phrase in decisions
+
+    implementation = _read("docs/stage1/S1-08R3_IMPLEMENTATION.md")
+    for phrase in (
+        "S1-08R3F-LITE 精简修复轮",
+        "<marker>:<authorization_id>:<envelope_sha256>",
+        "assert_formal_entry_boundary",
+        "parse_calendar_bootstrap_plan",
+        "calendar_bootstrap_token",
+        "本次未重跑 R3C",
+        "verify_release_row_proof",
+        "S1-08R3-R3V2-READONLY-VERIFY-V1",
+        "S1-08R3-R3V2-7e4c1b9d2a68",
+        "R3V2 纯只读复验",
+        "已批准并执行",
+        "2026-08-18 VERIFIED",
+        "82/82 全部 passed",
+        "E1 未重跑、C1 未重跑、R3C 未重跑",
+        "Stage 1 仍等待独立 R3D2 终验",
+    ):
+        assert phrase in implementation
+    for forbidden in (
+        "R3C 已重跑",
+        "E1 已重跑",
+        "C1 已重跑",
+        "Stage 1 最终验收通过",
+        "Stage 2 已授权",
+    ):
+        assert forbidden not in implementation
+    # The Stage 1 acceptance record itself must not exist yet (R3D2 pending).
+    assert not (_STAGE1 / "S1-08_ACCEPTANCE.md").exists()
+
+    contracts = _read("docs/stage1/CONTRACTS.md")
+    assert "个人本地信任模型与正式入口边界" in contracts
+    assert "ADR-028 / S1-08R3F" in contracts
+    assert "不是身份认证" in contracts
+
+    evidence = _read("docs/stage1/evidence/README.md")
+    for phrase in (
+        "s1_08r3_r3v2_plan_2026-08-18.json",
+        "cff0c1a8f791cf80addb2f91c72b85abd2d871f3b34f7f6403cc13a18f7473c4",
+        "s1_08r3_r3v2_result_2026-08-18.json",
+        "82/82 全部 passed",
+        "s1_08r3_r3v2_row_proof_2026-08-18.jsonl",
+    ):
+        assert phrase in evidence
