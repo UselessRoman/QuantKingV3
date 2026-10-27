@@ -58,7 +58,8 @@ from quantking.data.legacy_import.contracts import (
     sha256_bytes,
     validate_idempotency_key,
 )
-from quantking.data.legacy_import.k4d_pilot import (
+from quantking.data.models import DatasetKind, DataUpstream
+from quantking.history.stage1.k4d_pilot import (
     K4D_EXPECTED_CANONICAL_ROW_COUNT,
     K4D_PILOT_SYMBOLS,
     K4DPilotPlan,
@@ -72,7 +73,6 @@ from quantking.data.legacy_import.k4d_pilot import (
     prove_k4d_unadjusted,
     select_k4d_pilot_entries,
 )
-from quantking.data.models import DatasetKind, DataUpstream
 
 LEGACY_PILOT_ADAPTER_VERSION = "xtquant-legacy-pilot.k4d.v1"
 LEGACY_PILOT_MANIFEST_SCHEMA_VERSION = "legacy-pilot-manifest.k4d.v1"

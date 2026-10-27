@@ -45,7 +45,10 @@ def _config(
     *,
     exceptions: dict[str, tuple[tuple[str, str], ...]] | None = None,
 ) -> EodExecutionConfig:
-    config = EodExecutionConfig.production_k4(code_version=S107K4_CODE_VERSION, settings=settings)
+    config = EodExecutionConfig.historical_three_source_config(
+        code_version=S107K4_CODE_VERSION,
+        settings=settings,
+    )
     return replace(
         config,
         datasets={

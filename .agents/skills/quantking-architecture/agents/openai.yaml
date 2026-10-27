@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuantKing 架构设计"
+  short_description: "评估 QuantKing 架构取舍、端到端契约和最小阶段交付方案"
+  default_prompt: "使用 $quantking-architecture，依据当前任务和权威文档评估架构方案，给出取舍及可验证的接受条件。"

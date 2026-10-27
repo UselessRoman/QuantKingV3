@@ -36,7 +36,7 @@ docs/                架构、规范和阶段文档
 
 | 依赖 | 允许位置 |
 |---|---|
-| `akshare` | `data/adapters` |
+| `baostock`、`akshare` | `data/adapters` |
 | Qlib | `research/adapters` 或 `backtest/adapters` |
 | LightGBM | `research/adapters` |
 | Backtrader | `backtest/adapters` |

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from collections.abc import Callable, Sequence
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn, Protocol, TextIO
+from typing import TYPE_CHECKING, NoReturn, Protocol, TextIO
 
 from quantking.common.errors import QuantKingError
 from quantking.data.eod.contracts import EodPublishIntent, EodRunRequest
@@ -58,23 +57,6 @@ def _parser() -> argparse.ArgumentParser:
     dry_run = commands.add_parser("eod-dry-run")
     dry_run.add_argument("--manifest", required=True)
     dry_run.add_argument("--data-root-label", default=r"E:\QuantKingV3Data")
-    formal = commands.add_parser("eod-formal-run")
-    formal.add_argument("--manifest", required=True)
-    formal.add_argument("--envelope", required=True)
-    formal.add_argument("--attempts-root", required=True)
-    formal.add_argument(
-        "--authorization-env",
-        # Authorization tokens must NOT use the QUANTKING_ namespace:
-        # load_runtime_settings fails closed on unknown QUANTKING_* keys.
-        default="R3_FORMAL_AUTHORIZATION",
-    )
-    calendar = commands.add_parser("eod-calendar-publish")
-    calendar.add_argument("--plan", required=True)
-    calendar.add_argument("--attempts-root", required=True)
-    calendar.add_argument(
-        "--authorization-env",
-        default="R3_CALENDAR_AUTHORIZATION",
-    )
     enqueue = commands.add_parser("eod-enqueue")
     dates = enqueue.add_mutually_exclusive_group(required=True)
     dates.add_argument("--trade-date")
@@ -500,96 +482,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if any(item in {"-h", "--help"} for item in arguments):
         _parser().parse_args(list(arguments))
         return 0
-    if arguments and arguments[0] == "eod-formal-run":
-        try:
-            parsed = _parser().parse_args(list(arguments))
-            from quantking.cli.eod import FormalEntryError, run_formal_entry
-
-            repository_root = Path(__file__).resolve().parents[3]
-            from quantking.runtime import load_runtime_settings
-
-            payload = run_formal_entry(
-                manifest_path=Path(parsed.manifest),
-                envelope_path=Path(parsed.envelope),
-                attempts_root=Path(parsed.attempts_root),
-                authorization=os.environ.get(parsed.authorization_env),
-                settings=load_runtime_settings(),
-                code_root=repository_root,
-            )
-        except FormalEntryError as error:
-            _write(
-                sys.stdout,
-                {
-                    "error": {
-                        "code": error.code,
-                        "message": "The formal R3 execution was refused or failed.",
-                    }
-                },
-            )
-            return 1
-        except Exception:
-            _write(
-                sys.stdout,
-                {
-                    "error": {
-                        "code": "FORMAL_ENTRY_UNAVAILABLE",
-                        "message": "The formal R3 entry could not be initialized.",
-                    }
-                },
-            )
-            return 1
-        _write(sys.stdout, payload)
-        return 0
-    if arguments and arguments[0] == "eod-calendar-publish":
-        try:
-            parsed = _parser().parse_args(list(arguments))
-            from quantking.common.ids import new_entity_id
-            from quantking.data.adapters.sources.baostock import BaostockCalendarRunner
-            from quantking.data.eod.calendar_bootstrap import (
-                CalendarBootstrapError,
-                execute_calendar_bootstrap,
-            )
-            from quantking.runtime import build_eod_runtime, load_runtime_settings
-
-            repository_root = Path(__file__).resolve().parents[3]
-
-            def _runtime_factory() -> Any:
-                return build_eod_runtime(load_runtime_settings())
-
-            payload = execute_calendar_bootstrap(
-                plan=json.loads(Path(parsed.plan).read_text(encoding="utf-8")),
-                authorization=os.environ.get(parsed.authorization_env),
-                runtime_factory=_runtime_factory,
-                runner=BaostockCalendarRunner(),
-                attempts_root=Path(parsed.attempts_root),
-                code_root=repository_root,
-                version_id=new_entity_id("data_version"),
-                batch_id=new_entity_id("data_batch"),
-            )
-        except CalendarBootstrapError as error:
-            _write(
-                sys.stdout,
-                {
-                    "error": {
-                        "code": error.code,
-                        "message": "The authorized C1 calendar bootstrap was refused or failed.",
-                    }
-                },
-            )
-            return 1
-        except Exception:
-            _write(
-                sys.stdout,
-                {
-                    "error": {
-                        "code": "CALENDAR_BOOTSTRAP_UNAVAILABLE",
-                        "message": "The C1 calendar bootstrap entry could not be initialized.",
-                    }
-                },
-            )
-            return 1
-        _write(sys.stdout, payload)
-        return 0
     if arguments and arguments[0] == "eod-dry-run":
         try:
             parsed = _parser().parse_args(list(arguments))
@@ -620,6 +512,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 },
             )
             return 1
+    try:
+        _parser().parse_args(list(arguments))
+    except _ArgumentError:
+        _write(
+            sys.stdout,
+            {"error": {"code": "INVALID_ARGUMENT", "message": "CLI arguments are invalid."}},
+        )
+        return 2
     try:
         from quantking.common.time import UtcTimestamp, utc_now
         from quantking.runtime import (

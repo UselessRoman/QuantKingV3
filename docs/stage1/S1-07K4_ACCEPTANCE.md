@@ -40,7 +40,7 @@
    `before_endpoint` 对未计划调用直接拒绝；`test_sina_stays_zero_planned_and_actual_when_a_and_b_agree`
    等测试覆盖）。
 8. endpoint 预算、子进程硬超时、稳定错误码、失败即停均有测试
-   （`test_k4_endpoint_budget.py`、`test_akshare_adapter.py` 硬超时/稳定错误码用例、
+   （`test_endpoint_invocation_budget.py`、`test_akshare_adapter.py` 硬超时/稳定错误码用例、
    `test_eod_worker_k4.py` 预算阻断/失败即停用例；`application_retries` 恒为 0）。
 
 ## 4. K4B 分项结论：仲裁与质量语义——通过
@@ -86,7 +86,7 @@
 - SHA-256：
   `87b04863756a6e92614f62fe26cfb7d8b1b591c101bcc28d902a7fc3c1bdd300`（本次验收独立
   重算一致）。
-- 248 行 held rows 可离线重算（`scripts/build_k4c_composite_evidence.py --schema v2`
+- 248 行 held rows 可离线重算（`scripts/history/stage1/build_composite_evidence.py --schema v2`
   纯离线重算，verifier 通过后才落盘；`test_real_r4_composite_verifies_offline` 通过）。
 - objective 8/8 全部 observed（normal_session、ex_rights_session、suspension_session、
   low_liquidity_session、volume_amount_boundary、missing_or_empty_upstream

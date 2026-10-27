@@ -14,6 +14,16 @@ dist/
 build/
 *.egg-info/
 
+# uv / toolchain caches
+.uv-cache/
+.codex-uv-cache/
+.uv/
+*.tsbuildinfo
+node_modules/
+
+# Local uploads and ad-hoc scratch
+.uploads/
+
 # Frontend
 frontend/node_modules/
 frontend/dist/

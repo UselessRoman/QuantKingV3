@@ -7,8 +7,8 @@ import ast
 from dataclasses import dataclass
 from pathlib import Path
 
-_ACTIVE_DATA_VENDOR = "akshare"
-_RETIRED_VENDORS = frozenset({"baostock", "miniqmt", "qmt", "tushare", "xtquant"})
+_ACTIVE_DATA_VENDORS = frozenset({"akshare", "baostock"})
+_RETIRED_VENDORS = frozenset({"miniqmt", "qmt", "tushare", "xtquant"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +68,7 @@ def _request_allowed(parts: tuple[str, ...]) -> bool:
 def _allowed(top_level: str, parts: tuple[str, ...]) -> tuple[bool, str] | None:
     if top_level in _RETIRED_VENDORS:
         return False, "nowhere in active src (retired vendor)"
-    if top_level == _ACTIVE_DATA_VENDOR:
+    if top_level in _ACTIVE_DATA_VENDORS:
         return _starts_with(parts, ("data", "adapters")), "data/adapters"
     if top_level == "qlib":
         allowed = _starts_with(parts, ("research", "adapters")) or _starts_with(
@@ -95,6 +95,20 @@ def _allowed(top_level: str, parts: tuple[str, ...]) -> tuple[bool, str] | None:
 
 def _imports(tree: ast.AST) -> list[tuple[int, str, bool]]:
     imports: list[tuple[int, str, bool]] = []
+    importlib_names = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+        if alias.name == "importlib"
+    }
+    loader_names = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "importlib"
+        for alias in node.names
+        if alias.name == "import_module"
+    } | {"__import__"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imports.extend(
@@ -105,6 +119,26 @@ def _imports(tree: ast.AST) -> list[tuple[int, str, bool]]:
                 node.module == "fastapi" and any(alias.name == "Request" for alias in node.names)
             )
             imports.append((node.lineno, node.module, request))
+        elif isinstance(node, ast.Call):
+            function = node.func
+            standard_loader = (isinstance(function, ast.Name) and function.id in loader_names) or (
+                isinstance(function, ast.Attribute)
+                and isinstance(function.value, ast.Name)
+                and function.value.id in importlib_names
+                and function.attr == "import_module"
+            )
+            argument = (
+                node.args[0]
+                if node.args
+                else next((item.value for item in node.keywords if item.arg == "name"), None)
+            )
+            if (
+                standard_loader
+                and isinstance(argument, ast.Constant)
+                and isinstance(argument.value, str)
+            ):
+                module = argument.value
+                imports.append((node.lineno, module, module == "fastapi.requests"))
     return imports
 
 

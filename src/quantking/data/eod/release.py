@@ -126,7 +126,10 @@ def build_k4c_representative_dry_run(
     deliberately performs no provider call and cannot be converted into one
     under the same authorization.
     """
-    config = EodExecutionConfig.production_k4(code_version=code_version, settings=settings)
+    config = EodExecutionConfig.historical_three_source_config(
+        code_version=code_version,
+        settings=settings,
+    )
     chunks = _chunks(
         config,
         symbols=K4C_REPRESENTATIVE_SYMBOLS,

@@ -18,7 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from quantking.data.comparison.k4c_evidence import (
+from quantking.data.comparison.thresholds import k4_evidence_thresholds, rows_within_threshold
+from quantking.history.stage1.k4c_evidence import (
     AUTHORIZATION_ALREADY_CONSUMED,
     INVALID_ATTEMPT_INPUT,
     K4C_R2_EVIDENCE_SCHEMA,
@@ -39,8 +40,7 @@ from quantking.data.comparison.k4c_evidence import (
     recompute_comparison_statistics,
     validate_k4c_r2_objective_records,
 )
-from quantking.data.comparison.k4c_probe import fixed_k4c_probe_plan
-from quantking.data.comparison.thresholds import k4_evidence_thresholds, rows_within_threshold
+from quantking.history.stage1.k4c_probe import fixed_k4c_probe_plan
 
 _FROZEN_LIBRARY = {"BAOSTOCK": "0.9.3", "TENCENT": "1.18.83", "SINA": "1.18.83"}
 _FROZEN_CONTRACT = {

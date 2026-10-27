@@ -1,10 +1,9 @@
 """Production source port: Raw first, source quality in memory, no retries.
 
-One three-role port serves the K4 resolution service: A (BaoStock) and B
-(Tencent) are frozen as primary calls per chunk, C (Sina) is preflighted as
-one complete exceptional set and stays zero planned/actual whenever A and B
-agree. Every actual call passes the K4 endpoint budget guard before the first
-vendor invocation, so budget insufficiency is rejected before any call.
+A (BaoStock) and B (Tencent) are primary calls per chunk. C (Sina) is
+preflighted as one complete exceptional set and remains unused whenever A/B
+agree. Every actual call passes the endpoint budget guard before the first
+vendor invocation.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ import pyarrow as pa
 
 from quantking.common.ids import EntityId, new_entity_id
 from quantking.common.time import TradingDate, UtcTimestamp
-from quantking.data.adapters.sources.budget import K4EndpointBudget
+from quantking.data.adapters.sources.budget import EndpointInvocationBudget
 from quantking.data.adapters.sources.ingestion import AkshareIngestionService, ChunkEmptyResolver
 from quantking.data.adapters.sources.registry import PRODUCTION_UPSTREAMS
 from quantking.data.adapters.warehouse.publish_coordinator import compute_content_sha256
@@ -50,7 +49,7 @@ from quantking.data.schemas import descriptor_for
 SecurityExceptions = Mapping[str, tuple[tuple[TradingDate, TradingDate], ...]]
 
 
-class K4ResolutionSourcePort:
+class ResolutionSourcePort:
     """Collect one requested upstream range and retain source quality until version creation.
 
     Raw batches are persisted by ``AkshareIngestionService`` immediately. Quality
@@ -72,7 +71,7 @@ class K4ResolutionSourcePort:
         rule_version: str,
         reference_data: Mapping[str, ReferenceDataBinding],
         clock: Callable[[], UtcTimestamp],
-        endpoint_budget: K4EndpointBudget,
+        endpoint_budget: EndpointInvocationBudget,
         checkpoint: Callable[[], None] | None = None,
         chunk_empty_resolver: ChunkEmptyResolver | None = None,
         security_exceptions: SecurityExceptions | None = None,
@@ -80,7 +79,7 @@ class K4ResolutionSourcePort:
         max_items_per_chunk: int = 1,
     ) -> None:
         if set(ingestions) != set(PRODUCTION_UPSTREAMS):
-            raise ValueError("K4 source port requires exact BAOSTOCK/TENCENT/SINA ingestions")
+            raise ValueError("source port requires exact BAOSTOCK/TENCENT/SINA ingestions")
         if (
             not isinstance(candidate_version_id, EntityId)
             or candidate_version_id.namespace != "data_version"
@@ -88,8 +87,8 @@ class K4ResolutionSourcePort:
             raise ValueError("candidate_version_id must use data_version namespace")
         if not isinstance(created_job_id, EntityId) or created_job_id.namespace != "job":
             raise ValueError("created_job_id must use job namespace")
-        if not isinstance(endpoint_budget, K4EndpointBudget):
-            raise TypeError("endpoint_budget must be K4EndpointBudget")
+        if not isinstance(endpoint_budget, EndpointInvocationBudget):
+            raise TypeError("endpoint_budget must be EndpointInvocationBudget")
         self._ingestions = dict(ingestions)
         self._candidate_version_id = candidate_version_id
         self._created_job_id = created_job_id
@@ -127,7 +126,7 @@ class K4ResolutionSourcePort:
         trigger_reason: str,
     ) -> SourceCandidate:
         if upstream not in PRODUCTION_UPSTREAMS:
-            raise ValueError("K4 source port rejects non-production upstreams")
+            raise ValueError("source port rejects non-production upstreams")
         batch_id = new_entity_id("data_batch")
         plan = self._plan(
             batch_id=batch_id,
@@ -352,6 +351,6 @@ class K4ResolutionSourcePort:
 
 
 __all__ = [
-    "K4ResolutionSourcePort",
+    "ResolutionSourcePort",
     "SecurityExceptions",
 ]

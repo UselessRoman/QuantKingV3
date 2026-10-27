@@ -2,133 +2,92 @@
 
 ## 架构风格
 
-本项目是本地模块化单体。领域和应用逻辑位于一个 Python 包中，FastAPI、CLI 和 Worker 复用同一应用服务；不拆微服务、不引入远程队列。
+系统采用本机模块化单体：一个 Python 应用承载领域与应用服务，FastAPI 提供本机接口，React
+提供界面；长任务通过 SQLite 持久化队列和显式 Worker 执行。模块边界优先于进程拆分，不建设
+微服务、消息中间件或远程控制面。
 
 ```mermaid
 flowchart LR
-    BS["BaoStock / 独立服务"] --> RAW["独立 Raw"]
-    TX["AKShare / 腾讯 B"] --> RAW["独立 Raw"]
-    SN["AKShare / 新浪 C"] --> RAW
-    LEGACY["旧 XTQuant / DATA_ONLY"] --> IMPORT["受管导入 + SHA"]
-    IMPORT --> RAW
-    RAW --> CAN["Canonical 日线"]
-    CAN --> QA["质量与跨源比较"]
-    QA --> PUB["DatasetVersion 原子发布"]
-    PUB --> RESEARCH["Qlib / 因子 / 模型"]
-    RESEARCH --> PORTFOLIO["组合 / 风险 / 回测"]
-    WEB["React Web"] --> APP["FastAPI 应用服务"]
-    CLI["CLI"] --> APP
-    WORKER["Worker"] --> APP
-    APP --> RAW
+    WEB[React / FastAPI] --> APP[应用服务]
+    CLI[CLI] --> APP
+    WORKER[Worker] --> APP
+    APP --> DOMAIN[领域模型与端口]
+    DOMAIN --> ADAPTERS[适配器]
+    ADAPTERS --> SOURCES[BaoStock / 腾讯 / 新浪]
+    ADAPTERS --> META[SQLite]
+    ADAPTERS --> DATA[Parquet / DuckDB]
 ```
 
 ## 依赖方向
+
+依赖只能从入口和适配器指向应用/领域层：
 
 ```text
 Web / CLI / Worker
         ↓
 Application services
         ↓
-Domain
-        ↓
-Ports
-        ↓
-Adapters
+Domain models + ports
+        ↑
+Adapters / persistence / third-party libraries
 ```
 
-- BaoStock、AKShare、Qlib、Backtrader、数据库和文件系统依赖只出现在适配器或入口层。
-- Web 不直接读 SQLite、Parquet、日志或供应商对象。
-- 业务层只处理稳定的 Canonical、DatasetVersion、QualityRun、DifferenceReport 等对象。
+- 业务、研究、组合和 Web 层不得直接导入 BaoStock、AKShare、Qlib 或 Backtrader。
+- FastAPI `Request`、SQLAlchemy、PyArrow 等框架对象不得成为领域契约。
+- 第三方异常在适配器边界转换为稳定、脱敏的项目错误。
 
 ## 主要模块
 
 | 模块 | 职责 |
 |---|---|
-| `common` | 配置、时间、ID、错误 |
-| `data` | 采集、Raw/Canonical/Warehouse、质量、发布、查询 |
-| `jobs` | 持久任务、Worker、事件和日志 |
-| `research` | 数据集、因子、标签、实验 |
-| `portfolio` | 目标权重 |
-| `risk` | 独立风险门禁 |
-| `backtest` | Qlib 与 Backtrader 适配 |
+| `common` | 配置、ID、时间、路径和稳定错误 |
+| `jobs` | 持久化任务、事件、日志、取消、重试与备份 |
+| `data` | 来源适配、Raw、Canonical、质量、比较、仲裁和发布 |
+| `research` | 研究输入、股票池、标签、因子与 Qlib 适配 |
+| `portfolio` | 目标权重和组合约束 |
+| `backtest` | Qlib/Backtrader 适配与统一回测合同 |
+| `risk` | 风险门禁和审批状态 |
 | `signals` | 人工调仓计划 |
-| `web` | 本机 UI 和 API |
+| `trading` | 文件/人工成交与持仓对账，不连接券商 |
+| `web` | 本机 API、SSE 和页面组合 |
+
+后续 Stage 尚未实现的模块可以保留最小边界，但不得提前建设业务状态机。
 
 ## 数据主链
 
 ```text
-手动触发 EOD
-  → BaoStock(A) + 腾讯(B) 独立抓取
-  → Raw 只追加
-  → 统一未复权日线
-  → A/B 比较
-  → 异常时调用新浪(C)
-  → 两源一致才形成候选
-  → ResolutionDecision
-  → 质量门
-  → 临时目录 + manifest + COMPLETE
-  → 原子发布 DatasetVersion
+来源响应
+  → append-only Raw + manifest
+  → Canonical 候选
+  → 单源质量
+  → 跨源比较与 ResolutionDecision
+  → 最终质量
+  → manifest + COMPLETE
+  → 原子发布 PUBLISHED DatasetVersion
 ```
 
-失败任务保留日志、输入和失败目录，不污染已发布版本。来源替换允许细化到证券/交易日，但必须显式记录，禁止静默混合。
-
-Stage 1 的生产主链只处理 `daily_bar_unadjusted`。其他历史 schema 是后续阶段的静态合同，不进入 EOD 默认分支。
-
-## 复杂度边界
-
-- 目标来源模型固定为 `BAOSTOCK`、`AKSHARE/TENCENT|SINA`，以及仅用于受管历史导入
-  的 `XTQUANT_LEGACY`；不恢复候选供应商审批矩阵。
-- A/B/C 仲裁是正常解析，由 `ResolutionDecision` 记录，不经过 `SourceOverride` 审批状态机。
-- EOD 的权威恢复事实只有冻结 `JobRun`、Raw manifest、DatasetVersion manifest 和 JSON Lines。中断任务失败关闭，新 Job 通过输入指纹复用完整发布。
-- K1/K2 不新增 evidence envelope、签名、claim、attempt、forensic/authoritative 双终态或额外 checkpoint 层。
-- Web/CLI/Worker 复用应用服务；内部简单函数不为了测试而机械包装 Protocol。
+正常日线任务调用 BaoStock A 与腾讯 B；只有受影响范围才调用新浪 C。至少两个实际持有同一主键
+行的独立来源在冻结阈值内一致才允许发布。共同缺行不构成值共识；合法整范围空结果必须绑定
+交易日历并使用独立原因码。
 
 ## 存储
 
-| 内容 | 位置 |
-|---|---|
-| SQLite | `E:\QuantKingV3Data\metadata` |
-| Raw | `E:\QuantKingV3Data\raw` |
-| Warehouse | `E:\QuantKingV3Data\warehouse` |
-| Qlib 派生视图 | `E:\QuantKingV3Data\qlib` |
-| 模型、回测、计划 | 对应受管目录 |
-| 日志 | `E:\QuantKingV3Data\logs` |
+- `E:\QuantKingV3`：Git 代码、配置模板和冻结验收证据。
+- `E:\QuantKingV3Data`：运行数据、SQLite、Raw、artifact、Warehouse 和任务日志。
+- `F:\QuantKingV3Backups`：异盘灾难备份。
+- SQLite 保存任务和版本元数据；Parquet 保存批量数据；DuckDB 只读查询 Parquet。
+- 临时目录完成写入、校验和 manifest 后才可原子发布；已发布目录不可修改。
 
 ## 运行与安全边界
 
-- Web 只监听 `127.0.0.1`。
-- 首期任务由 Web 或 CLI 手动触发，不内置调度器。
-- 不连接 QMT，不导入券商交易 SDK，不保存券商账号密码，不提供下单入口。
-- 真实网络和正式数据根写入按任务明确授权；默认测试通过网络与路径守卫保持离线。
-- 安全重点是数据来源、版本、失败隔离、无前视和可恢复性，不建设机构级密码学审批链。
+- Web 只监听 `127.0.0.1`；首期任务由 Web 或 CLI 手动触发，不内置调度器。
+- 不连接 QMT、券商 SDK 或交易账户，不保存券商凭据，不提供下单入口。
+- 真实网络、正式数据根、旧项目读取和 F 盘写入按任务单独授权。
+- 授权机制用于防误执行、范围扩大和意外重放，不建设机构级密码学审批系统。
 
-## 状态
+## 复杂度边界
 
-Stage 0 已完成。Stage 1 的 S1-01～S1-06、K1 和 K2 已主验收；S1-08 首次 AKShare 三源
-正式运行被量额零容差阻断。[S1-07K3](stage1/S1-07K3_TASK.md) 只保留 BaoStock 与历史四角色
-离线基线事实。S1-07K4 已完成三角色离线重构；K4C 第一次代表性真实三源实测经独立验收不通过
-（S1-07K4C-R1），R1 修复后 K4C-R2 真实实测已于 2026-08-16 执行（36/36 成功、
-sufficient=false 如实记录），K4C-R3（合同修订 ADR-022 + Phase B 9/9 成功）与 K4C-R4
-（证据链验证与停牌来源闭链，ADR-023）已交付，**K4C-R4 已于 2026-08-16 独立验收通过**；
-`comparison-thresholds.daily-bar-unadjusted.k4.v1`（OHLC/`pre_close` 零容差、量额绝对
-50/相对 0）**已按用户决定接受重新冻结（ADR-024）**（见
-[S1-07K4 实施记录](stage1/S1-07K4_IMPLEMENTATION.md)）。K4D 只读 inventory 已于 2026-08-16
-获授权执行一次并成功（5,208 文件、零读取错误、Stage 0 基线差异 0/0，ADR-025）；K4D
-真实 pilot 两次 attempt 分别于 2026-08-16/08-17 获授权执行并失败即停（ADR-026，数据根
-零写入、授权已消费）；**旧 XTQuant 日线迁移已按用户决定拒绝并完成 K4D 决策收口
-（ADR-027）：第 3 次 pilot、全量诊断与 full 均不执行，`XTQUANT_LEGACY` 不进入发布链**。
-**S1-07K4 已于 2026-08-17 经 K4E 独立验收通过并形成单一 K4 提交**
-（[S1-07K4 验收记录](stage1/S1-07K4_ACCEPTANCE.md)）。
-**S1-08R2（发布引擎离线收口）已于 2026-08-17 独立只读验收通过**
-（[S1-08R2 验收记录](stage1/S1-08R2_ACCEPTANCE.md)、
-[实施记录](stage1/S1-08R2_IMPLEMENTATION.md)）：存储重试/幂等/单发布者/恢复合同、
-manifest 驱动的范围与预算、只读 verifier 与 DataCenter 读侧扩展均完成离线验收，
-R2 零真实网络、零正式数据根写入。
-[S1-08R3](stage1/S1-08R3_TASK.md) 已完成 R3A、I0、C1-R4、E1、R3C、E1R、R3V2 与
-R3F2 合同守卫修复，并于 2026-08-18 通过 R3D2-R2 独立终验（
-[实施记录](stage1/S1-08R3_IMPLEMENTATION.md)、
-[最终验收记录](stage1/S1-08_ACCEPTANCE.md)）。**S1-08 完成，Stage 1 完成。**
-Stage 2 的精简实施路径已规划为 S2-01～S2-06（研究合同 → point-in-time 研究输入 → 股票池/
-标签 → 基础因子 → Qlib/Alpha158/诊断 → 正式终验），见
-[Stage 2 当前入口](stage2/README.md)；Stage 1 前置已满足，但规划文档不构成阶段启动或
-外部操作授权，Stage 2 尚未获得用户单独授权、未开始。
+- 一个领域概念只拥有一个生产状态机和一个权威契约。
+- 历史 schema、迁移和 evidence 通过兼容读取保留，不进入当前运行时命名和控制面。
+- 当前架构事实写在本文件；阶段状态只在 [路线图](ROADMAP.md) 维护；执行历史只写入对应
+  Stage 的实施与验收记录。

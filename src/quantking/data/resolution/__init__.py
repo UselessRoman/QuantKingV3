@@ -1,4 +1,4 @@
-"""Immutable K4 three-role resolution contracts and artifacts (K2/K3 readable)."""
+"""Immutable three-role resolution contracts and artifacts."""
 
 from quantking.data.resolution.artifacts import (
     ResolutionArtifactConflictError,
@@ -10,6 +10,7 @@ from quantking.data.resolution.artifacts import (
 )
 from quantking.data.resolution.differences import ResolutionDifferenceArtifactRecorder
 from quantking.data.resolution.models import (
+    DAILY_BAR_RESOLUTION_RULE_VERSION,
     K2_RESOLUTION_RULE_VERSION,
     K3_RESOLUTION_RULE_VERSION,
     K4_RESOLUTION_RULE_VERSION,
@@ -36,6 +37,7 @@ from quantking.data.resolution.service import (
 )
 
 __all__ = [
+    "DAILY_BAR_RESOLUTION_RULE_VERSION",
     "K2_RESOLUTION_RULE_VERSION",
     "K3_RESOLUTION_RULE_VERSION",
     "K4_RESOLUTION_RULE_VERSION",

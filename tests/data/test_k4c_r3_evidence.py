@@ -28,7 +28,8 @@ from tests.data.test_k4c_r1_evidence import (
     _synthetic_attempt,
 )
 
-from quantking.data.comparison.k4c_evidence import (
+from quantking.data.comparison.thresholds import k4_evidence_thresholds, rows_within_threshold
+from quantking.history.stage1.k4c_evidence import (
     BLOCKED_MISSING_EMPTY_SAMPLE,
     BLOCKED_SAMPLE_SELECTION,
     COMPONENT_EVIDENCE_SHA_MISMATCH,
@@ -80,7 +81,6 @@ from quantking.data.comparison.k4c_evidence import (
     validate_k4c_r3_objective_records,
     validate_k4c_r3_sample,
 )
-from quantking.data.comparison.thresholds import k4_evidence_thresholds, rows_within_threshold
 
 _ROOT = Path(__file__).resolve().parents[2]
 _R2_ATTEMPT = _ROOT / "docs/stage1/evidence/k4c-r2-attempts/K4C-R2-cab803399515"
@@ -612,7 +612,7 @@ def test_legal_empty_rejects_holiday_without_calendar_proof() -> None:
 
 
 def test_low_liquidity_keeps_the_frozen_amount_bound() -> None:
-    from quantking.data.comparison.k4c_evidence import LOW_LIQUIDITY_AMOUNT_BOUND_YUAN
+    from quantking.history.stage1.k4c_evidence import LOW_LIQUIDITY_AMOUNT_BOUND_YUAN
 
     assert LOW_LIQUIDITY_AMOUNT_BOUND_YUAN == 250_000_000
     rows: dict[str, dict[tuple[str, str], Mapping[str, object]]] = {

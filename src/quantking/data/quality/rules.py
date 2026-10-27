@@ -27,7 +27,7 @@ from quantking.data.adapters.canonical_schema import (
 )
 from quantking.data.models import DatasetKind
 from quantking.data.quality.models import (
-    K4_DAILY_RULE_VERSION,
+    DAILY_BAR_QUALITY_RULE_VERSION,
     S108_DAILY_RULE_VERSION,
     QualityOutcomeResult,
     QualityRequest,
@@ -857,7 +857,7 @@ def s108_daily_rule_set() -> QualityRuleSet:
     )
 
 
-_K4_DAILY_SELECTED = frozenset(
+_DAILY_BAR_SELECTED_RULES = frozenset(
     {
         "schema_conformance",
         "primary_key_uniqueness",
@@ -870,17 +870,19 @@ _K4_DAILY_SELECTED = frozenset(
 )
 
 
-def k4_daily_rule_set() -> QualityRuleSet:
-    """Return the K4 daily rules with the versioned calendar-bound checks.
+def daily_bar_rule_set() -> QualityRuleSet:
+    """Return production daily-bar rules with calendar-bound checks.
 
     The exchange_calendar reference is bound by version and content SHA in the
     frozen request; expected trading days, freshness and pre_close consistency
     are blocking, with explicit listing/suspension exceptions bound in
     ``QualityRequest.security_exceptions``.
     """
-    rules = tuple(rule for rule in default_rule_set().rules if rule.code in _K4_DAILY_SELECTED)
-    if {rule.code for rule in rules} != _K4_DAILY_SELECTED:
-        raise RuntimeError("K4 daily quality catalogue is incomplete")
+    rules = tuple(
+        rule for rule in default_rule_set().rules if rule.code in _DAILY_BAR_SELECTED_RULES
+    )
+    if {rule.code for rule in rules} != _DAILY_BAR_SELECTED_RULES:
+        raise RuntimeError("daily-bar quality catalogue is incomplete")
     scope_rule = QualityRule(
         code="expected_scope_presence",
         applies_to=frozenset({DatasetKind.DAILY_BAR_UNADJUSTED}),
@@ -919,7 +921,7 @@ def k4_daily_rule_set() -> QualityRuleSet:
         ),
     )
     return QualityRuleSet(
-        rule_version=K4_DAILY_RULE_VERSION,
+        rule_version=DAILY_BAR_QUALITY_RULE_VERSION,
         rules=(rules[0], rules[1], scope_rule, *rules[2:], *extra_rules),
     )
 
@@ -928,7 +930,7 @@ __all__: tuple[str, ...] = (
     "RULE_VERSION",
     "QualityRule",
     "QualityRuleSet",
+    "daily_bar_rule_set",
     "default_rule_set",
-    "k4_daily_rule_set",
     "s108_daily_rule_set",
 )

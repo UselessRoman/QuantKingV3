@@ -26,7 +26,7 @@ def _service(tmp_path: Path) -> tuple[EodCommandService, JobService]:
     return (
         EodCommandService(
             jobs,
-            config=EodExecutionConfig.production_k4(
+            config=EodExecutionConfig.historical_three_source_config(
                 code_version="test-code", settings=app_settings(tmp_path)
             ),
         ),
@@ -147,7 +147,7 @@ def _finish(jobs: JobService, job_id: str, status: JobStatus) -> None:
         )
 
 
-def test_production_config_is_r2_capped_and_freezes_roundtrip(tmp_path: Path) -> None:
+def test_production_config_is_manifest_capped_and_freezes_roundtrip(tmp_path: Path) -> None:
     from quantking.data.eod.contracts import R2_EOD_CONFIG_SCHEMA
     from quantking.data.eod.frozen import parse_frozen_eod_command
     from quantking.data.eod.release_manifest import RELEASE_SAFETY_CAPS
@@ -156,7 +156,7 @@ def test_production_config_is_r2_capped_and_freezes_roundtrip(tmp_path: Path) ->
     initialize_database(database)
     jobs = JobService(SqliteUnitOfWorkFactory(create_sqlite_engine(database, busy_timeout_ms=250)))
     config = EodExecutionConfig.production(code_version="test-r2", settings=app_settings(tmp_path))
-    assert config.is_r2
+    assert config.is_manifest_driven
     cap = RELEASE_SAFETY_CAPS["endpoint_invocations_per_role"]
     assert config.a_baostock_endpoint_limit == cap
     assert config.b_tencent_endpoint_limit == cap
@@ -186,7 +186,7 @@ def test_production_config_is_r2_capped_and_freezes_roundtrip(tmp_path: Path) ->
 
 
 def test_production_config_freezes_k4_constants_and_manifest(tmp_path: Path) -> None:
-    config = EodExecutionConfig.production_k4(
+    config = EodExecutionConfig.historical_three_source_config(
         code_version="test-code", settings=app_settings(tmp_path)
     )
     assert config.adapter_version == "baostock-akshare-daily-bar.k4.v1"
@@ -268,7 +268,7 @@ def test_retry_rejects_changed_request_or_execution_versions(tmp_path: Path) -> 
 
     changed = EodCommandService(
         jobs,
-        config=EodExecutionConfig.production_k4(
+        config=EodExecutionConfig.historical_three_source_config(
             code_version="changed-code", settings=app_settings(tmp_path)
         ),
     )

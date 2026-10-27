@@ -1,5 +1,8 @@
 # S1-08R2 实施记录：发布引擎离线收口
 
+> 历史记录：下文状态、授权和“下一步”只描述当时过程；现行合同见
+> [CONTRACTS.md](CONTRACTS.md)，项目状态见 [ROADMAP.md](../ROADMAP.md)。
+
 状态：纯离线实现完成。本轮零真实网络、零 `E:\QuantKing` 访问、零 `E:\QuantKingV3Data`
 写入、零 F 盘访问；未重放任何历史 authorization_id/marker；未执行正式 EOD Job 或真实
 PUBLISHED 版本；未开始 S1-08R3 或 Stage 2。独立验收记录 `S1-08R2_ACCEPTANCE.md` 由独立

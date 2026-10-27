@@ -1,0 +1,30 @@
+{
+  "status": "PASS",
+  "pingan_supported_fields": {
+    "dividRegistDate": "2023-06-13",
+    "dividOperateDate": "2023-06-14",
+    "dividPayDate": "2023-06-14",
+    "dividCashPsBeforeTax": "0.285",
+    "dividStocksPs": "0.000000"
+  },
+  "pufa_supported_fields": {
+    "dividRegistDate": "2023-07-20",
+    "dividCashPsBeforeTax": "0.32"
+  },
+  "do_not_map_to_meeting_date": [
+    {
+      "code": "000001.SZ",
+      "vendor_field": "dividAgmPumDate",
+      "vendor_value": "2023-06-01",
+      "meeting_date": "2023-05-31"
+    },
+    {
+      "code": "600000.SH",
+      "vendor_field": "dividAgmPumDate",
+      "vendor_value": "2023-06-29",
+      "meeting_date": "2023-06-28"
+    }
+  ],
+  "tax_semantics": "Different investor and holding-period conditions; no universal net cash amount",
+  "qualified": false
+}

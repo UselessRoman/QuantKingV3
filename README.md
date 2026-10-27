@@ -1,76 +1,56 @@
 # QuantKing V3
 
-QuantKing V3 是单用户、本机运行的 A 股日频量化研究项目。当前只做可靠日线数据、可复现研究和人工调仓，不做自动下单、分钟/Tick、高频、多用户或云服务。
+QuantKing V3 是单用户、本机运行的 A 股日频量化研究项目。系统当前提供已验收的未复权日线
+采集、跨源核对、版本发布、查询与任务追踪；研究、模型、组合和回测能力按后续 Stage 逐步交付。
 
-## 当前数据路线
-
-- 目标路线固定为 BaoStock(A) 常态供数 + AKShare/腾讯(B) 常态互验；异常范围调用
-  AKShare/新浪(C)。
-- 三个实际来源分别落 Raw；至少两个实际持有同一行的独立来源在冻结规则内一致才可发布。
-- 旧项目 XTQuant 日线只按 `DATA_ONLY` 受管导入，并逐行取得 BaoStock/AKShare 独立复核；
-  不恢复 XTQuant、MiniQMT 或 QMT 运行依赖。
-- 每个证券/交易日的选择来源和原因由 `ResolutionDecision` 追溯；无两源一致时隔离。
-- S1-07K3 的 BaoStock 适配器、历史四角色仲裁、受管旧数据导入器、正式 EOD、DataCenter 与
-  只读 verifier 已完成离线实现；该基线尚未重构为现行三角色路线。
+## 当前能力
 
 ```text
-BaoStock(A) + AKShare/Tencent(B) + AKShare/Sina(C) + XTQuant legacy DATA_ONLY
-    → Raw
-    → Canonical
-    → 质量与跨源比较
-    → 冲突隔离或原子发布
-    → Qlib/因子/模型/回测（后续 Stage）
+BaoStock A + 腾讯 B → 独立 Raw 与质量检查 → 版本化比较
+                                      ├─ 一致：选择 A
+                                      └─ 异常：受影响范围调用新浪 C
+无两个独立来源一致 → 隔离，不发布
 ```
 
-## 项目边界
+- 唯一生产行情数据集是沪深 A 股未复权日线 `daily_bar_unadjusted.v1`。
+- 每个发布行可追溯实际来源、差异、仲裁决定、质量结果和父血缘。
+- Raw 只追加；已发布版本不可原地修改；失败任务不发布半成品。
+- 旧 XTQuant 日线评估已按 ADR-027 以“迁移拒绝”收口，不进入 Raw、Canonical 或 Warehouse。
+- 系统不连接 QMT、券商账号或交易 SDK，不提供自动下单。
 
-- Python 3.12，`uv` 管理依赖。
-- Parquet 保存批量数据，DuckDB 查询，SQLite 保存元数据和任务。
-- Stage 1 生产 EOD 只处理 `daily_bar_unadjusted`，不为其他数据集预建运行分支。
-- FastAPI + React 仅监听 `127.0.0.1`。
+## 项目状态
+
+阶段状态、权威验收与下一步只在 [路线图](docs/ROADMAP.md) 维护；执行细节与历史失败保留在
+对应 Stage 的实施和验收记录中。
+
+## 技术边界
+
+- Python 3.12 与 `uv`；Parquet 批量存储、DuckDB 查询、SQLite 元数据和任务。
+- FastAPI + React 只监听 `127.0.0.1`。
 - Qlib 用于研究，Backtrader 用于正式回测验收。
 - 代码根：`E:\QuantKingV3`；运行数据根：`E:\QuantKingV3Data`。
 
-## 状态
+## 文档入口
 
-Stage 0 已完成。Stage 1 的 S1-01～S1-06、K1 和 K2 已完成主验收；S1-08 首次正式 Job 因
-量额零容差被阻断，没有发布版本。K3 四角色离线基线已完成；东财与 FTShare 已分别由
-ADR-021、ADR-020 退出目标路线。S1-07K4 已完成三角色离线重构；K4C 第一次代表性真实三源
-实测经独立验收不通过（S1-07K4C-R1，历史事实）；此后 R1 修复、K4C-R2 真实实测（36/36
-成功、sufficient=false 如实记录）、K4C-R3（ADR-022 + Phase B 9/9）与 K4C-R4（ADR-023）
-依次交付，**K4C-R4 已于 2026-08-16 独立验收通过**，
-`comparison-thresholds.daily-bar-unadjusted.k4.v1` 已按用户决定接受重新冻结（ADR-024）。
-K4D inventory dry-run 已冻结并按其 plan SHA 完成真实只读 inventory（2026-08-16 一次授权：
-5,208 文件全部可读、零读取错误、与 Stage 0 基线 5,208 文件/527,708,270 字节差异 0/0）；
-**K4D 真实 pilot 两次 attempt 分别于 2026-08-16/08-17 获授权执行并失败即停（ADR-026；
-数据根零写入、授权已消费）**；**旧 XTQuant 日线迁移已按用户决定拒绝并完成 K4D 决策收口
-（ADR-027）：第 3 次 pilot、全量诊断与 full 均不执行，`XTQUANT_LEGACY` 不进入发布链**。
-**S1-07K4 已于 2026-08-17 经 K4E 独立验收通过并形成单一 K4 提交**
-（[S1-07K4 验收记录](docs/stage1/S1-07K4_ACCEPTANCE.md)）。
-**S1-08R2（发布引擎离线收口）已于 2026-08-17 独立只读验收通过**
-（[S1-08R2 验收记录](docs/stage1/S1-08R2_ACCEPTANCE.md)）：SQLite BUSY/LOCKED 有界
-重试、合法空版本幂等收敛、跨进程单发布者锁、manifest 驱动的证券集合/coverage/分块/
-预算/血缘、只读 manifest verifier 与 DataCenter 来源投影、逐证券 coverage 分页均以
-合成数据与临时目录验收；R2 零真实网络、零旧根读取、零正式数据根写入。
-S1-08R3 已完成正式发布收口，第一次独立终验发现的两个合同守卫缺口已由 `d95db32` 修复并在
-R3D2-R2 独立复验中通过；见 [Stage 1 最终验收记录](docs/stage1/S1-08_ACCEPTANCE.md)。
-**S1-08 完成，Stage 1 完成。** Stage 2 前置已满足，但其实施尚未获得用户单独授权、未开始；
-下一步只能在用户另行授权后启动 S2-01。
-
-- [总体架构](docs/ARCHITECTURE.md)
 - [架构决策](docs/DECISIONS.md)
 - [实施计划](docs/IMPLEMENTATION_PLAN.md)
-- [Stage 1 当前入口](docs/stage1/README.md)
-- [Stage 2 实施路径（已规划、未开始）](docs/stage2/README.md)
-- [路线图](docs/ROADMAP.md)
+- [总体架构](docs/ARCHITECTURE.md)
+- [数据架构](docs/DATA_ARCHITECTURE.md)
+- [Stage 1 历史索引](docs/stage1/README.md)
+- [Stage 2 规划入口](docs/stage2/README.md)
+- [Stage 3 模型规划入口](docs/stage3/README.md)
+- [Stage 4 组合回测规划入口](docs/stage4/README.md)
+- [Stage 5 调仓对账规划入口](docs/stage5/README.md)
+- [Stage 6 系统验收规划入口](docs/stage6/README.md)
+- [Stage 7 按需数据扩展入口](docs/stage7/README.md)
 
-默认质量门：
+默认完整离线质量门：
 
 ```powershell
 .\scripts\quality.ps1
 ```
 
-定向开发命令统一通过仓库入口运行，避免依赖当前 PowerShell 的 PATH：
+定向命令统一通过仓库入口运行：
 
 ```powershell
 .\scripts\uv.ps1 run --offline --frozen pytest tests\test_development_tooling.py -q

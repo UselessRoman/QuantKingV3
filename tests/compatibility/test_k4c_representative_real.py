@@ -46,7 +46,9 @@ from quantking.data.adapters.sources.units import (
     AKSHARE_UNIT_POLICY_VERSION,
     BAOSTOCK_UNIT_POLICY_VERSION,
 )
-from quantking.data.comparison.k4c_evidence import (
+from quantking.data.incremental import FetchChunk
+from quantking.data.models import DataProvider, DatasetKind
+from quantking.history.stage1.k4c_evidence import (
     K4C_R2_EVIDENCE_SCHEMA,
     K4C_R2_INVOCATION_BUDGET,
     K4C_R2_MARKER,
@@ -58,12 +60,10 @@ from quantking.data.comparison.k4c_evidence import (
     comparison_rows_payload,
     k4c_r2_plan_sha256,
 )
-from quantking.data.comparison.k4c_probe import (
+from quantking.history.stage1.k4c_probe import (
     K4CProbeInvocation,
     fixed_k4c_probe_plan,
 )
-from quantking.data.incremental import FetchChunk
-from quantking.data.models import DataProvider, DatasetKind
 
 _AKSHARE_LOCKED_LIBRARY_VERSION = "1.18.83"
 _EVIDENCE_PREFIX = "K4C_R2_EVIDENCE_JSON "

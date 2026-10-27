@@ -18,7 +18,10 @@ from quantking.data.models import DatasetKind
 
 THRESHOLD_RULE_VERSION = "comparison-thresholds.daily-bar-unadjusted.k1.v1"
 K3_CANDIDATE_RULE_VERSION = "comparison-thresholds.daily-bar-unadjusted.k3-candidate.v1"
-K4_THRESHOLD_RULE_VERSION = "comparison-thresholds.daily-bar-unadjusted.k4.v1"
+DAILY_BAR_THRESHOLD_RULE_VERSION = "comparison-thresholds.daily-bar-unadjusted.k4.v1"
+# Historical evidence readers retain the original symbol while current code
+# uses a domain name. The serialized protocol value is intentionally frozen.
+K4_THRESHOLD_RULE_VERSION = DAILY_BAR_THRESHOLD_RULE_VERSION
 _K4_VOLUME_AMOUNT_ABSOLUTE = Decimal("50")
 _RELATIVE_BASE_FLOOR = Decimal("0.000000000001")
 _EVIDENCE_CONTEXT = Context(prec=50, rounding=ROUND_HALF_EVEN)
@@ -297,6 +300,11 @@ def k4_evidence_thresholds() -> ThresholdSet:
     )
 
 
+def accepted_daily_bar_thresholds() -> ThresholdSet:
+    """Return the accepted production daily-bar comparison thresholds."""
+    return k4_evidence_thresholds()
+
+
 def k3_threshold_candidate_contract() -> ThresholdEvidenceCandidate:
     return ThresholdEvidenceCandidate(
         thresholds=k3_evidence_candidate_thresholds(),
@@ -382,6 +390,7 @@ def rows_within_threshold(
 
 
 __all__ = [
+    "DAILY_BAR_THRESHOLD_RULE_VERSION",
     "K3_CANDIDATE_RULE_VERSION",
     "K4_THRESHOLD_RULE_VERSION",
     "THRESHOLD_RULE_VERSION",
@@ -389,6 +398,7 @@ __all__ = [
     "ThresholdEvidenceCandidate",
     "ThresholdSet",
     "ThresholdSpec",
+    "accepted_daily_bar_thresholds",
     "canonical_decimal",
     "decimal_difference",
     "decimal_from_number",

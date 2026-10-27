@@ -161,7 +161,7 @@ def test_execution_config_from_manifest_binds_tight_budgets() -> None:
     manifest = _manifest(symbols=("000001.SZ",))
     config = EodExecutionConfig.from_release_manifest(manifest)
 
-    assert config.is_r2
+    assert config.is_manifest_driven
     assert config.release_manifest_sha256 == manifest.manifest_sha256()
     assert config.endpoint_invocation_limit == manifest.budgets["endpoint_total"]
     assert config.c_endpoint_invocation_limit == manifest.budgets["c_sina_max_endpoints"]

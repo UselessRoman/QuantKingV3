@@ -1,4 +1,4 @@
-"""K4 three-role EOD orchestration without a parallel evidence control plane.
+"""Three-role EOD orchestration without a parallel evidence control plane.
 
 Normal tasks collect A (BaoStock) and B (Tencent) over the full range; C
 (Sina) is called only for affected spans and stays zero planned/actual when
@@ -22,13 +22,13 @@ from quantking.common.ids import EntityId, new_entity_id, parse_entity_id
 from quantking.common.time import TradingDate, UtcTimestamp
 from quantking.data.adapters.canonical_schema import canonical_schema, ensure_sorted, validate_table
 from quantking.data.adapters.persistence.sqlite import DataSqliteUnitOfWorkFactory
-from quantking.data.adapters.resolution_sources import K4ResolutionSourcePort
-from quantking.data.adapters.sources.budget import K4EndpointBudget
+from quantking.data.adapters.resolution_sources import ResolutionSourcePort
+from quantking.data.adapters.sources.budget import EndpointInvocationBudget
 from quantking.data.adapters.sources.contracts import SourceAdapterError, SourceErrorCode
 from quantking.data.adapters.sources.ingestion import AkshareIngestionService
 from quantking.data.adapters.sources.legal_empty import (
     CalendarReferenceIncompleteError,
-    K4ExpectedSessionResolver,
+    ExpectedSessionResolver,
 )
 from quantking.data.adapters.sources.registry import PRODUCTION_UPSTREAMS
 from quantking.data.adapters.warehouse.manifest import path_safe_id
@@ -39,7 +39,7 @@ from quantking.data.adapters.warehouse.publish_coordinator import (
 )
 from quantking.data.adapters.warehouse.query import CanonicalQueryAdapter
 from quantking.data.adapters.warehouse.verifier import verify_raw_directory
-from quantking.data.comparison.thresholds import k4_evidence_thresholds
+from quantking.data.comparison.thresholds import accepted_daily_bar_thresholds
 from quantking.data.comparison.verifier import DifferenceReportVerifier
 from quantking.data.eod.contracts import EOD_JOB_TYPE, EodReferenceVersion
 from quantking.data.eod.fingerprint import eod_input_fingerprint
@@ -78,7 +78,10 @@ from quantking.data.resolution.artifacts import (
     verify_resolution_artifact,
 )
 from quantking.data.resolution.differences import ResolutionDifferenceArtifactRecorder
-from quantking.data.resolution.models import K4_RESOLUTION_RULE_VERSION, ResolutionRunRecord
+from quantking.data.resolution.models import (
+    DAILY_BAR_RESOLUTION_RULE_VERSION,
+    ResolutionRunRecord,
+)
 from quantking.data.resolution.service import ResolutionRequest, SourceResolutionService
 from quantking.jobs.jsonl import JsonLinesHandler
 from quantking.jobs.models import JobRun, JobStatus
@@ -113,7 +116,7 @@ def _reconstruct(job: JobRun) -> FrozenEodCommand:
 
 
 class EodWorkerHandler:
-    """Execute one daily-bar K4 command from frozen JobRun manifests."""
+    """Execute one daily-bar command from frozen JobRun manifests."""
 
     def __init__(
         self,
@@ -148,7 +151,7 @@ class EodWorkerHandler:
         self._log_root = log_root
         self._fault_injector = fault_injector
         self._reference_loader = reference_loader
-        # S1-08R3 anti-drift: when the frozen command carries a release
+        # Anti-drift: when the frozen command carries a release
         # manifest SHA, the executing worker must have been built from the
         # exact same manifest. A worker without an expectation (e.g. one
         # reconstructed from configs/default.toml in a separate process)
@@ -163,17 +166,17 @@ class EodWorkerHandler:
         job = context.service.get_job(context.job_id)
         logger, handler = self._job_logger(job)
         candidate_id: EntityId | None = None
-        endpoint_budget: K4EndpointBudget | None = None
+        endpoint_budget: EndpointInvocationBudget | None = None
         try:
             command = _reconstruct(job)
-            if command.resolution_rule_version != K4_RESOLUTION_RULE_VERSION:
+            if command.resolution_rule_version != DAILY_BAR_RESOLUTION_RULE_VERSION:
                 raise EodExecutionError("FROZEN_SOURCE_ROUTE_INVALID")
             if (
                 command.release_manifest_sha256 is not None
                 and command.release_manifest_sha256 != self._expected_release_manifest_sha256
             ):
                 raise EodExecutionError("RELEASE_MANIFEST_DRIFT")
-            endpoint_budget = K4EndpointBudget(
+            endpoint_budget = EndpointInvocationBudget(
                 per_source_limits={
                     DataUpstream.BAOSTOCK: command.a_baostock_endpoint_limit,
                     DataUpstream.TENCENT: command.b_tencent_endpoint_limit,
@@ -213,7 +216,7 @@ class EodWorkerHandler:
             created_job_id = parse_entity_id(context.job_id)
             difference_recorder = ResolutionDifferenceArtifactRecorder(
                 artifacts_root=self._resolution_root,
-                thresholds=k4_evidence_thresholds(),
+                thresholds=accepted_daily_bar_thresholds(),
             )
             resolution_request = ResolutionRequest(
                 created_job_id=created_job_id,
@@ -224,7 +227,7 @@ class EodWorkerHandler:
                 start_date=command.request.start_date,
                 end_date=command.request.end_date,
             )
-            source_port = K4ResolutionSourcePort(
+            source_port = ResolutionSourcePort(
                 ingestions=self._ingestions,
                 candidate_version_id=candidate_id,
                 created_job_id=created_job_id,
@@ -245,7 +248,7 @@ class EodWorkerHandler:
             resolution = SourceResolutionService(
                 sources=source_port,
                 differences=difference_recorder,
-                thresholds=k4_evidence_thresholds(),
+                thresholds=accepted_daily_bar_thresholds(),
             ).resolve(resolution_request)
             actual_batch_ids = tuple(
                 sorted(
@@ -346,7 +349,7 @@ class EodWorkerHandler:
             context.activity(
                 stage="eod:daily_bar_unadjusted:published",
                 progress=1.0,
-                summary="K4 resolved daily bars published",
+                summary="resolved daily bars published",
                 audit_action="eod_dataset_published",
             )
             logger.info(
@@ -373,7 +376,7 @@ class EodWorkerHandler:
         finally:
             if endpoint_budget is not None:
                 logger.info(
-                    "S1-08 endpoint budget summary",
+                    "endpoint budget summary",
                     extra={
                         "event": "network_budget_summary",
                         "job_id": context.job_id,
@@ -747,7 +750,7 @@ class EodWorkerHandler:
     def _resolved_empty_result(
         *,
         table: pa.Table,
-        source_port: K4ResolutionSourcePort,
+        source_port: ResolutionSourcePort,
     ) -> EmptyResultInfo | None:
         if table.num_rows:
             return None
@@ -902,7 +905,7 @@ class EodWorkerHandler:
         # verified at publish time).
         calendar_table = loaded.table.cast(canonical_schema(DatasetKind.EXCHANGE_CALENDAR.value))
         try:
-            resolver = K4ExpectedSessionResolver(
+            resolver = ExpectedSessionResolver(
                 calendar_table=calendar_table,
                 expected_securities=plan.scope,
                 security_exceptions=plan.security_exceptions,

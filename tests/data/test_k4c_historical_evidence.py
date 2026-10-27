@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from quantking.data.comparison.k4c_probe import fixed_k4c_probe_plan
+from quantking.history.stage1.k4c_probe import fixed_k4c_probe_plan
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -55,7 +55,7 @@ def test_k4c_r2_attempt_artifacts_are_present_and_complete() -> None:
 
 
 def test_k4c_r2_evidence_recomputes_offline() -> None:
-    from quantking.data.comparison.k4c_evidence import K4CVerifier
+    from quantking.history.stage1.k4c_evidence import K4CVerifier
 
     attempt = _ROOT / "docs/stage1/evidence/k4c-r2-attempts/K4C-R2-cab803399515"
     outcome = K4CVerifier().recompute(attempt)

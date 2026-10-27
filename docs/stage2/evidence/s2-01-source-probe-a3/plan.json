@@ -1,0 +1,26 @@
+{
+  "attempt": "s2-01-source-probe-a3",
+  "authorization": "User approved execution after reviewing A3 plan",
+  "started_at": "2026-09-10T10:05:48.077Z",
+  "queries": [
+    "浦发银行 600000 2022年年度权益分派实施公告 2023年7月13日",
+    "平安银行 000001 2022年年度权益分派实施公告 2023年6月7日",
+    "ST中利 002309 2024年4月24日 停牌 4月25日",
+    "中利集团 002309 2023 实施退市风险警示 公告",
+    "科林退 002499 2023 股票终止上市暨摘牌 公告",
+    "2022 年年度权益分派实施结果暨股份上市公告 2023年5月30日 0.4",
+    "2023年部分节假日休市安排 深圳证券交易所 2022年12月27日"
+  ],
+  "domains": [
+    "sse.com.cn",
+    "szse.cn",
+    "cninfo.com.cn"
+  ],
+  "budget": {
+    "search": 7,
+    "open": 10,
+    "screenshot": 4,
+    "scheduling_seconds": 900,
+    "saved_bytes": 8388608
+  }
+}

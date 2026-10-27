@@ -1,0 +1,91 @@
+{
+  "schema": "tool-evidence-sha256.v1",
+  "files": [
+    {
+      "path": "calls.jsonl",
+      "bytes": 3275,
+      "sha256": "7b7195b8f99047362c3456e4e6ce866baf35d9831d71f3c5e16ffe068ba62314"
+    },
+    {
+      "path": "field-comparison.json",
+      "bytes": 808,
+      "sha256": "7b3a34e3d3376a314f6744ed05ef9c81f36978c894c43527e6a3e53df2e8daac"
+    },
+    {
+      "path": "open-01.json",
+      "bytes": 4099,
+      "sha256": "b70c03cd249546fc5d670a0645bb4753c32e62f453ab33865db6c752d3b8d2b8"
+    },
+    {
+      "path": "open-02.json",
+      "bytes": 5236,
+      "sha256": "dd869bdb528431a7c09f32142b426dad00a4dcd24d65817baac976c5f60017f8"
+    },
+    {
+      "path": "open-03.json",
+      "bytes": 650,
+      "sha256": "2cb96496fa32b8fbe82e1512889cb197da9a49a319c569b43e9a8918a2739612"
+    },
+    {
+      "path": "open-04.json",
+      "bytes": 7883,
+      "sha256": "71749f36da686bac3aae106273789c8357099d9c7a5d63c1b240c98ccc67c2f7"
+    },
+    {
+      "path": "open-05.json",
+      "bytes": 632,
+      "sha256": "873e5e401a04c05a2871dea543a69bb9b0fe1537e4d1c2d5d21988ffe6f61413"
+    },
+    {
+      "path": "open-06.json",
+      "bytes": 653,
+      "sha256": "640ce0ed51f114d3c902182724af4a51e12c7e8c599f580fa665763e741baf85"
+    },
+    {
+      "path": "plan.json",
+      "bytes": 896,
+      "sha256": "cd89a41fb7ae028b984ada0e819fed77ec0c39edd84309022b834d3fbaa12938"
+    },
+    {
+      "path": "result.json",
+      "bytes": 983,
+      "sha256": "459381442d07218a51915bedc8aa8658bfba05da0c85ee41322b2e112036b302"
+    },
+    {
+      "path": "search-01.json",
+      "bytes": 26414,
+      "sha256": "acd6a5247a9fe269570c4c77e0d5df73160060422942d300b9e0387eed14562b"
+    },
+    {
+      "path": "search-02.json",
+      "bytes": 28950,
+      "sha256": "27db57133c12b97d4823cf8838e76df5be6529e2961f31be09a75fe9d569872b"
+    },
+    {
+      "path": "search-03.json",
+      "bytes": 30098,
+      "sha256": "a96da0c17cb68626fab6203d68a5ac5c27364b75f005aee3382cd33ab3d5d090"
+    },
+    {
+      "path": "search-04.json",
+      "bytes": 30470,
+      "sha256": "62d1769cad544f36f6f3243feb686a2bca9ba9daec25073dc274c48a3853fb47"
+    },
+    {
+      "path": "search-05.json",
+      "bytes": 31471,
+      "sha256": "80d6e0073ba17d6a6645a7964ebd7365f48fa213ce3e31bc264e6bcb8d556963"
+    },
+    {
+      "path": "search-06.json",
+      "bytes": 29402,
+      "sha256": "735c6c0254af2121d461790cbbac904cc50983837c4e1eb773f84770bfeaa848"
+    },
+    {
+      "path": "search-07.json",
+      "bytes": 28300,
+      "sha256": "83d2cf9c7b44a0181bd812acda0d029fc1457d0945e6feaf46f66299aa8bdf99"
+    }
+  ],
+  "total_bytes": 230220
+}

@@ -43,14 +43,14 @@ from quantking.data.legacy_import.contracts import (
     LegacyImportMode,
     inventory_from_payload,
 )
-from quantking.data.legacy_import.k4d_pilot import (
+from quantking.data.models import DataProvider, DatasetKind, DataUpstream
+from quantking.history.stage1.k4d_pilot import (
     K4D_ENDPOINT_CALL_BUDGET,
     K4D_PILOT_SYMBOLS,
     K4D_RECHECK_WINDOW_END,
     K4D_RECHECK_WINDOW_START,
     K4DPilotPlan,
 )
-from quantking.data.models import DataProvider, DatasetKind, DataUpstream
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PLAN_FILE = _ROOT / "docs/stage1/evidence/k4d_pilot_dry_run_2026-08-16.json"

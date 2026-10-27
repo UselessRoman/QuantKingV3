@@ -45,7 +45,8 @@ from quantking.data.legacy_import.contracts import (
     canonical_json_bytes,
     sha256_bytes,
 )
-from quantking.data.legacy_import.k4d_pilot import (
+from quantking.data.models import DatasetKind, DataUpstream
+from quantking.history.stage1.k4d_pilot import (
     K4D_EXPECTED_CANONICAL_ROW_COUNT,
     K4D_EXPECTED_FIRST_ROW_EXCLUSIONS,
     K4D_PILOT_SYMBOLS,
@@ -62,7 +63,6 @@ from quantking.data.legacy_import.k4d_pilot import (
     prove_k4d_unadjusted,
     select_k4d_pilot_entries,
 )
-from quantking.data.models import DatasetKind, DataUpstream
 
 _ROOT = Path(__file__).resolve().parents[2]
 _FROZEN_PLAN = _ROOT / "docs/stage1/evidence/k4d_pilot_dry_run_2026-08-16.json"
@@ -968,7 +968,7 @@ def test_pilot_executor_rejects_plan_inventory_or_threshold_tampering(
     fixture = _PilotFixture(tmp_path)
     tampered_payload = dict(fixture.plan.payload)
     tampered_payload["source_fingerprint"] = "0" * 64
-    from quantking.data.legacy_import.k4d_pilot import K4DPilotPlan
+    from quantking.history.stage1.k4d_pilot import K4DPilotPlan
 
     tampered = K4DPilotPlan(payload=tampered_payload)
     with pytest.raises(LegacyPilotError, match="PILOT_PLAN_SHA_INVALID"):

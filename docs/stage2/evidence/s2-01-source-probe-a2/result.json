@@ -1,0 +1,33 @@
+{
+  "attempt": "s2-01-source-probe-a2",
+  "status": "PARTIAL_EVIDENCE_TOOL_ERROR",
+  "qualified": false,
+  "started_at": "2026-09-09 10:02:44 UTC",
+  "finished_at": "2026-09-09 10:04:34 UTC",
+  "operations": {
+    "search_queries": 8,
+    "open_pages": 5,
+    "pdf_screenshots": 0,
+    "tool_calls": 6
+  },
+  "errors": [
+    {
+      "url": "https://static.cninfo.com.cn/finalpage/2023-10-20/1218094566.PDF",
+      "reason": "Failed to fetch: Cache miss"
+    },
+    {
+      "url": "https://www.szse.cn/disclosure/notice/general/t20221227_598022.html",
+      "reason": "(400) Timeout fetching"
+    }
+  ],
+  "stop_reason": "First returned open batch contained errors; no further network operations issued. All five opens were submitted in one batch before any error was known.",
+  "gaps": [
+    "BANK_DIVIDEND_NOT_LOCATED",
+    "ST_CHANGE_NOT_LOCATED",
+    "BONUS_ORIGINAL_NOT_RETRIEVED",
+    "DELISTING_FINAL_DATE_NOT_CONFIRMED",
+    "FACTOR_MAPPING_UNQUALIFIED",
+    "HISTORICAL_SCOPE_UNFROZEN"
+  ],
+  "storage_semantics": "Tool extracted text only; original PDF bytes and original PDF SHA unavailable"
+}

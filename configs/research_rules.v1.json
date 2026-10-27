@@ -1,0 +1,10 @@
+{
+  "version": "research-rules.v1",
+  "minimum_listing_sessions": 120,
+  "liquidity_window": 20,
+  "liquidity_minimum_observations": 20,
+  "liquidity_median_cny": "10000000",
+  "signal_rule": "ISO_WEEK_LAST_SESSION",
+  "label_rule": "NEXT_OPEN_TO_NEXT_WEEK_NEXT_OPEN",
+  "price_rule": "FIXED_ANCHOR_FORWARD_MULTIPLIER"
+}

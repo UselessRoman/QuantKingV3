@@ -30,8 +30,8 @@ class NetworkBudgetExceededError(RuntimeError):
         super().__init__(self.code)
 
 
-class K4EndpointBudget:
-    """Frozen three-role endpoint budget with separate protocol/HTTP evidence."""
+class EndpointInvocationBudget:
+    """Three-role endpoint budget with separate protocol/HTTP evidence."""
 
     def __init__(
         self,
@@ -40,7 +40,7 @@ class K4EndpointBudget:
         total_limit: int,
     ) -> None:
         if set(per_source_limits) != set(PRODUCTION_UPSTREAMS):
-            raise ValueError("K4 budget requires exact production upstream limits")
+            raise ValueError("endpoint budget requires exact production upstream limits")
         if isinstance(total_limit, bool) or not isinstance(total_limit, int) or total_limit < 0:
             raise ValueError("total_limit must be a non-negative integer")
         limits = dict(per_source_limits)
@@ -150,4 +150,4 @@ class K4EndpointBudget:
             raise NetworkBudgetExceededError
 
 
-__all__ = ["K4EndpointBudget", "NetworkBudgetExceededError"]
+__all__ = ["EndpointInvocationBudget", "NetworkBudgetExceededError"]

@@ -4,7 +4,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).parents[2] / "scripts" / "check_architecture_boundaries.py"
+
+_VENDOR_IMPORT_FORMS = (
+    "import {vendor}.client\n",
+    "from {vendor} import client\n",
+    'import importlib\nimportlib.import_module("{vendor}.client")\n',
+    'import importlib as loader\nloader.import_module(name="{vendor}")\n',
+    'from importlib import import_module\nimport_module("{vendor}")\n',
+    'from importlib import import_module as load\nload(name="{vendor}")\n',
+    '__import__("{vendor}.client")\n',
+    '__import__(name="{vendor}")\n',
+)
 
 
 def _write(root: Path, relative: str, source: str) -> None:
@@ -67,9 +80,7 @@ def test_checker_rejects_import_and_from_import_with_stable_sorted_output(tmp_pa
 
 def test_checker_rejects_retired_vendors_everywhere_in_active_source(tmp_path: Path) -> None:
     violations = {
-        "data/adapters/retired.py": (
-            "import xtquant.xtdata\nfrom baostock import query_history_k_data_plus\n"
-        ),
+        "data/adapters/retired.py": "import xtquant.xtdata\n",
         "research/retired.py": "import tushare\nfrom qmt import Client\nimport miniqmt\n",
     }
     for relative, source in violations.items():
@@ -79,10 +90,70 @@ def test_checker_rejects_retired_vendors_everywhere_in_active_source(tmp_path: P
 
     assert result.returncode == 1
     lines = [line for line in result.stdout.splitlines() if ": forbidden import " in line]
-    assert len(lines) == 5
+    assert len(lines) == 4
     assert all("nowhere in active src (retired vendor)" in line for line in lines)
-    for vendor in ("baostock", "miniqmt", "qmt", "tushare", "xtquant"):
+    for vendor in ("miniqmt", "qmt", "tushare", "xtquant"):
         assert any(f"forbidden import {vendor} " in line for line in lines)
+
+
+@pytest.mark.parametrize("vendor", ("baostock", "akshare"))
+@pytest.mark.parametrize("source", _VENDOR_IMPORT_FORMS)
+def test_data_vendors_are_allowed_only_in_data_adapters(
+    tmp_path: Path, vendor: str, source: str
+) -> None:
+    source = source.format(vendor=vendor)
+    _write(tmp_path, "data/adapters/sources/vendor.py", source)
+    allowed = _run(tmp_path)
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+
+    forbidden_paths = (
+        "data/service.py",
+        "data/adapters_extra/vendor.py",
+        "research/adapters/vendor.py",
+        "portfolio/service.py",
+        "web/api.py",
+    )
+    for relative in forbidden_paths:
+        _write(tmp_path, relative, source)
+
+    rejected = _run(tmp_path)
+    assert rejected.returncode == 1
+    lines = rejected.stdout.splitlines()
+    assert len(lines) == len(forbidden_paths)
+    for relative in forbidden_paths:
+        assert any(
+            line.startswith(f"src/quantking/{relative}:")
+            and f"forbidden import {vendor} (allowed: data/adapters)" in line
+            for line in lines
+        )
+
+
+@pytest.mark.parametrize("source", _VENDOR_IMPORT_FORMS)
+def test_retired_vendor_literal_loads_are_rejected_even_in_adapters(
+    tmp_path: Path, source: str
+) -> None:
+    for vendor in ("miniqmt", "qmt", "tushare", "xtquant"):
+        _write(tmp_path, f"data/adapters/{vendor}.py", source.format(vendor=vendor))
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 1
+    assert len(result.stdout.splitlines()) == 4
+    assert result.stdout.count("nowhere in active src (retired vendor)") == 4
+
+
+def test_dynamic_analysis_is_limited_to_literal_standard_import_loaders(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "research/service.py",
+        "import importlib\nimportlib.import_module(variable_name)\n"
+        'importlib.import_module(f"{variable_name}")\n'
+        'custom.import_module("baostock")\n',
+    )
+
+    result = _run(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_fastapi_request_is_not_allowed_in_schema_or_web_business_module(tmp_path: Path) -> None:

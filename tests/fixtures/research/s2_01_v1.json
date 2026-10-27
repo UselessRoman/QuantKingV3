@@ -1,0 +1,63 @@
+{
+  "fixture_version": "s2-01.synthetic.v1",
+  "synthetic_only": true,
+  "calendar": {
+    "sessions": ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08", "2026-01-09", "2026-01-12", "2026-01-13", "2026-01-14", "2026-01-15", "2026-01-19", "2026-01-20", "2026-01-21", "2026-01-22", "2026-01-23", "2026-01-26"],
+    "synthetic_holidays": ["2026-01-16"],
+    "weekly_signals": ["2026-01-09", "2026-01-15", "2026-01-23"],
+    "knowledge_cutoff_utc": "07:00:00Z"
+  },
+  "prices": [
+    {"date": "2026-01-05", "open": "10", "close": "10", "factor": "1", "research_close": "10"},
+    {"date": "2026-01-06", "open": "11", "close": "11", "factor": "1", "research_close": "11"},
+    {"date": "2026-01-07", "open": "12", "close": "12", "factor": "1", "research_close": "12"},
+    {"date": "2026-01-08", "open": "13", "close": "13", "factor": "1", "research_close": "13"},
+    {"date": "2026-01-09", "open": "14", "close": "14", "factor": "1", "research_close": "14"},
+    {"date": "2026-01-12", "open": "7", "close": "7", "factor": "2", "research_close": "14"},
+    {"date": "2026-01-13", "open": "7.5", "close": "7.5", "factor": "2", "research_close": "15"},
+    {"date": "2026-01-14", "open": "8", "close": "8", "factor": "2", "research_close": "16"},
+    {"date": "2026-01-15", "open": "8.5", "close": "8.5", "factor": "2", "research_close": "17"},
+    {"date": "2026-01-19", "open": "8.75", "close": "8.75", "factor": "2", "research_close": "17.5"},
+    {"date": "2026-01-20", "open": "9", "close": "9", "factor": "2", "research_close": "18"},
+    {"date": "2026-01-21", "open": "9.5", "close": "9.5", "factor": "2", "research_close": "19"},
+    {"date": "2026-01-22", "open": "10", "close": "10", "factor": "2", "research_close": "20"},
+    {"date": "2026-01-23", "open": "10.5", "close": "10.5", "factor": "2", "research_close": "21"},
+    {"date": "2026-01-26", "open": "10.5", "close": "10.5", "factor": "2", "research_close": "21"}
+  ],
+  "rolling_expected": {"factor": "ma_gap_5", "date": "2026-01-13", "inputs": ["12", "13", "14", "14", "15"], "mean": "13.6", "value_fraction": [7, 68]},
+  "labels": [
+    {"signal": "2026-01-09", "entry": "2026-01-12", "exit": "2026-01-19", "holding_sessions": 4, "value": "0.25", "reason": null},
+    {"signal": "2026-01-15", "entry": "2026-01-19", "exit": "2026-01-26", "holding_sessions": 5, "value": "0.2", "reason": null},
+    {"signal": "2026-01-23", "entry": "2026-01-26", "exit": null, "holding_sessions": null, "value": null, "reason": "LABEL_TAIL_INSUFFICIENT"}
+  ],
+  "liquidity_amounts_cny": ["9000000", "9000000", "9000000", "9000000", "9000000", "9000000", "9000000", "9000000", "9000000", "9000000", "11000000", "11000000", "11000000", "11000000", "11000000", "11000000", "11000000", "11000000", "11000000", "11000000"],
+  "liquidity_expected_median_cny": "10000000",
+  "universe_cases": [
+    {"case": "normal_120", "listing_session_ordinal": 1, "as_of_session_ordinal": 120, "status": "NORMAL", "suspended": false, "active": true, "observations": 20, "median_cny": "10000000", "reasons": []},
+    {"case": "young_119", "listing_session_ordinal": 2, "as_of_session_ordinal": 120, "status": "NORMAL", "suspended": false, "active": true, "observations": 20, "median_cny": "10000000", "reasons": ["LISTING_AGE"]},
+    {"case": "st", "listing_session_ordinal": 1, "as_of_session_ordinal": 120, "status": "ST", "suspended": false, "active": true, "observations": 20, "median_cny": "10000000", "reasons": ["ST"]},
+    {"case": "star_st", "listing_session_ordinal": 1, "as_of_session_ordinal": 120, "status": "STAR_ST", "suspended": false, "active": true, "observations": 20, "median_cny": "10000000", "reasons": ["STAR_ST"]},
+    {"case": "delisting_period", "listing_session_ordinal": 1, "as_of_session_ordinal": 120, "status": "DELISTING", "suspended": false, "active": true, "observations": 20, "median_cny": "10000000", "reasons": ["DELISTING"]},
+    {"case": "suspension", "listing_session_ordinal": 1, "as_of_session_ordinal": 120, "status": "NORMAL", "suspended": true, "active": true, "observations": 20, "median_cny": "10000000", "reasons": ["SUSPENDED"]},
+    {"case": "delisted", "listing_session_ordinal": 1, "as_of_session_ordinal": 120, "status": "NORMAL", "suspended": false, "active": false, "observations": 20, "median_cny": "10000000", "reasons": ["OUTSIDE_LIFECYCLE"]},
+    {"case": "missing_row", "listing_session_ordinal": 1, "as_of_session_ordinal": 120, "status": "NORMAL", "suspended": false, "active": true, "observations": 19, "median_cny": null, "reasons": ["WINDOW_INCOMPLETE"]},
+    {"case": "missing_status", "listing_session_ordinal": 1, "as_of_session_ordinal": 120, "status": null, "suspended": null, "active": true, "observations": 20, "median_cny": "10000000", "reasons": ["STATUS_UNKNOWN"]},
+    {"case": "illiquid", "listing_session_ordinal": 1, "as_of_session_ordinal": 120, "status": "NORMAL", "suspended": false, "active": true, "observations": 20, "median_cny": "9999999", "reasons": ["ILLIQUID"]}
+  ],
+  "execution_cases": [
+    {"case": "one_price_limit_up", "ohlc": ["11", "11", "11", "11"], "upper": "11", "lower": "9", "buy_blocked": true, "sell_blocked": false, "assumption": true},
+    {"case": "one_price_limit_down", "ohlc": ["9", "9", "9", "9"], "upper": "11", "lower": "9", "buy_blocked": false, "sell_blocked": true, "assumption": true},
+    {"case": "touch_only", "ohlc": ["10", "11", "9.5", "10.5"], "upper": "11", "lower": "9", "buy_blocked": false, "sell_blocked": false, "assumption": true},
+    {"case": "unknown_limits", "ohlc": ["11", "11", "11", "11"], "upper": null, "lower": null, "buy_blocked": null, "sell_blocked": null, "assumption": false}
+  ],
+  "corporate_actions": [
+    {"event_id": "synthetic-cash-1", "kind": "CASH_DIVIDEND", "record_date": "2026-01-09", "ex_date": "2026-01-12", "pay_date": "2026-01-14", "shares_available_date": null, "cash_per_share": "1", "shares_per_share": null, "reference_price": "4", "pre_close": "5", "factor_before": "1", "factor_after": "1.25", "tax_policy": "SYNTHETIC_ZERO_TAX", "held_shares": 100, "cash_before": "0", "expected_ex_shares": 100, "expected_ex_cash": "0", "expected_receivable": "100", "expected_pay_cash": "100", "expected_equity": "500", "execution_gaps": []},
+    {"event_id": "synthetic-bonus-1", "kind": "BONUS_SHARES", "record_date": "2026-01-09", "ex_date": "2026-01-12", "pay_date": null, "shares_available_date": "2026-01-15", "cash_per_share": null, "shares_per_share": "0.5", "reference_price": "4", "pre_close": "6", "factor_before": "1", "factor_after": "1.5", "tax_policy": "SYNTHETIC_ZERO_TAX", "held_shares": 100, "cash_before": "0", "expected_ex_shares": 150, "expected_ex_sellable": 100, "expected_available_sellable": 150, "expected_bonus_pending": 50, "expected_ex_cash": "0", "expected_receivable": "0", "expected_equity": "600", "execution_gaps": []},
+    {"event_id": "synthetic-cash-missing", "kind": "CASH_DIVIDEND", "record_date": "2026-01-09", "ex_date": "2026-01-12", "pay_date": null, "shares_available_date": null, "cash_per_share": "1", "shares_per_share": null, "reference_price": null, "tax_policy": null, "execution_gaps": ["cash_pay_date", "reference_price", "tax_policy"]}
+  ],
+  "future_perturbations": [
+    {"change": "2026-01-20 risk status NORMAL to ST", "unchanged_through": "2026-01-19", "targets": ["universe", "features"]},
+    {"change": "2026-01-20 new corporate action factor 3", "unchanged_through": "2026-01-19", "targets": ["research_price", "features", "label_of_2026-01-09"]},
+    {"change": "source revision observed later without provable historical availability", "expected": "FUTURE_KNOWLEDGE"}
+  ]
+}

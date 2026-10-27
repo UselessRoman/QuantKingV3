@@ -1,0 +1,28 @@
+{
+  "attempt": "s2-01-source-probe-a2",
+  "started_at": "2026-09-09 10:02:44 UTC",
+  "authorization": "User approved second-round collection in current thread",
+  "queries": [
+    "600000 2022年年度权益分派实施公告 2023",
+    "000001 2022年年度权益分派实施公告 2023",
+    "002309 2024年4月24日 停牌 风险警示",
+    "002309 2023 股票交易 实施 其他风险警示 退市风险警示",
+    "688469 首次公开发行 股票 科创板 上市公告书 2023年5月",
+    "2023 终止上市 摘牌 退市整理期 最后交易日",
+    "2023 权益分派实施公告 转增 股份 上市流通日",
+    "2023 交易所 休市安排 全年"
+  ],
+  "domains": [
+    "sse.com.cn",
+    "szse.cn",
+    "cninfo.com.cn"
+  ],
+  "budget": {
+    "search_queries": 8,
+    "open_pages": 12,
+    "pdf_screenshots": 4,
+    "scheduling_seconds": 900,
+    "saved_bytes": 8388608
+  },
+  "artifact_semantics": "Tool extracted text, not original PDF bytes; no production qualification implied"
+}

@@ -1,4 +1,4 @@
-"""K4 legal empty-result classification against the bound published calendar.
+"""Legal empty-result classification against the bound published calendar.
 
 A supplier zero-row outcome is legal only when the frozen, published
 exchange_calendar (bound by version id and content SHA) proves that every
@@ -39,7 +39,7 @@ class CalendarReferenceIncompleteError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class K4ExpectedSessionResolver:
+class ExpectedSessionResolver:
     """Classify whole-range zero-row supplier outcomes per requested chunk.
 
     The calendar table must already be loaded through the published-version
@@ -152,4 +152,4 @@ class K4ExpectedSessionResolver:
         )
 
 
-__all__ = ["CalendarReferenceIncompleteError", "K4ExpectedSessionResolver"]
+__all__ = ["CalendarReferenceIncompleteError", "ExpectedSessionResolver"]

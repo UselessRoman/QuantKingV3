@@ -42,7 +42,7 @@ from quantking.data.legacy_import.contracts import (
     semantics_from_payload,
     sha256_bytes,
 )
-from quantking.data.legacy_import.k4d_pilot import build_k4d_pilot_plan
+from quantking.history.stage1.k4d_pilot import build_k4d_pilot_plan
 
 _MARKERS = {
     (LegacyImportMode.INVENTORY, "synthetic"): K4D_INVENTORY_SYNTHETIC_MARKER,

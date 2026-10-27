@@ -54,7 +54,7 @@ from quantking.data.models import DataUpstream
 from quantking.data.quality.artifacts import QualityArtifactWriter
 from quantking.data.quality.engine import QualityEngine
 from quantking.data.quality.references import PublishedReferenceLoader
-from quantking.data.quality.rules import k4_daily_rule_set
+from quantking.data.quality.rules import daily_bar_rule_set
 from quantking.data.quality.runner import QualityRunner
 from quantking.data.resolution.artifacts import ResolutionArtifactVerifier
 from quantking.jobs.adapters.persistence.sqlite import (
@@ -69,10 +69,10 @@ from quantking.web.app import create_app
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = _REPOSITORY_ROOT / "configs" / "default.toml"
-EOD_CODE_VERSION = "s1-08r2.v1"
+CURRENT_EOD_CODE_VERSION = "daily-bar-eod.20260819"
 EXPECTED_DATABASE_REVISION = "20260810_0014"
 WORKER_LEASE_TIMEOUT = timedelta(minutes=2)
-_S108_BUSINESS_ROOTS = ("metadata", "raw", "artifacts", "warehouse")
+_BUSINESS_ROOTS = ("metadata", "raw", "artifacts", "warehouse")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +105,7 @@ def _gateways() -> Mapping[DataUpstream, MarketDataGateway]:
 
 
 def _preflight_initial_data_root(data_root: Path) -> None:
-    """Refuse unknown business state before the first S1-08 database is created."""
+    """Refuse unknown business state before the first runtime database is created."""
     if not data_root.exists():
         return
     if not data_root.is_dir():
@@ -113,10 +113,10 @@ def _preflight_initial_data_root(data_root: Path) -> None:
     database = data_root / "metadata" / "quantking.db"
     if database.is_file():
         return
-    unexpected = tuple(name for name in _S108_BUSINESS_ROOTS if (data_root / name).exists())
+    unexpected = tuple(name for name in _BUSINESS_ROOTS if (data_root / name).exists())
     if unexpected:
         raise ConfigurationError(
-            "initial S1-08 data root contains unknown business state",
+            "initial data root contains unknown business state",
             context={"roots": ",".join(unexpected)},
         )
 
@@ -171,9 +171,9 @@ def build_eod_runtime(
     jobs = JobService(SqliteUnitOfWorkFactory(jobs_engine), retry_policy=retry)
     data_uow = DataSqliteUnitOfWorkFactory(data_engine)
     if gateway is not None:
-        raise ConfigurationError("K4 runtime requires an explicit three-role gateways mapping")
+        raise ConfigurationError("runtime requires an explicit three-role gateways mapping")
     selected_execution_config = execution_config or EodExecutionConfig.production(
-        code_version=EOD_CODE_VERSION,
+        code_version=CURRENT_EOD_CODE_VERSION,
         settings=settings,
     )
     selected_gateways = dict(gateways or _gateways())
@@ -195,7 +195,7 @@ def build_eod_runtime(
         uow_factory=data_uow,
     )
     selected_quality_runner = quality_runner or QualityRunner(
-        engine=QualityEngine(rule_set=k4_daily_rule_set()),
+        engine=QualityEngine(rule_set=daily_bar_rule_set()),
         reference_loader=reference_loader,
     )
     handler = EodWorkerHandler(
@@ -260,8 +260,8 @@ def build_eod_runtime(
 
 
 __all__ = [
+    "CURRENT_EOD_CODE_VERSION",
     "DEFAULT_CONFIG_PATH",
-    "EOD_CODE_VERSION",
     "EXPECTED_DATABASE_REVISION",
     "WORKER_LEASE_TIMEOUT",
     "EodRuntime",

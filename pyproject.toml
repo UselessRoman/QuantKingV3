@@ -25,7 +25,6 @@ dependencies = [
 
 [project.scripts]
 quantking-data = "quantking.cli.eod:main"
-quantking-legacy-import = "quantking.cli.legacy_import:main"
 quantking-web = "quantking.web.main:main"
 
 [dependency-groups]

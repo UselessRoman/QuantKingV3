@@ -44,13 +44,20 @@ from quantking.data.adapters.sources.contracts import (
     SourceAdapterError,
     VolumeUnit,
 )
-from quantking.data.adapters.sources.legal_empty import K4ExpectedSessionResolver
+from quantking.data.adapters.sources.legal_empty import ExpectedSessionResolver
 from quantking.data.adapters.sources.normalization import normalize_market_data_response
 from quantking.data.adapters.sources.units import (
     AKSHARE_UNIT_POLICY_VERSION,
     BAOSTOCK_UNIT_POLICY_VERSION,
 )
-from quantking.data.comparison.k4c_evidence import (
+from quantking.data.incremental import FetchChunk
+from quantking.data.models import (
+    DataProvider,
+    DatasetKind,
+    EmptyResultInfo,
+    LegalEmptyClassification,
+)
+from quantking.history.stage1.k4c_evidence import (
     K4C_R3_EVIDENCE_SCHEMA,
     K4C_R3_INVOCATION_BUDGET,
     K4C_R3_MARKER,
@@ -63,14 +70,7 @@ from quantking.data.comparison.k4c_evidence import (
     k4c_r3_plan_invocations,
     k4c_r3_plan_sha256,
 )
-from quantking.data.comparison.k4c_probe import K4CProbeInvocation
-from quantking.data.incremental import FetchChunk
-from quantking.data.models import (
-    DataProvider,
-    DatasetKind,
-    EmptyResultInfo,
-    LegalEmptyClassification,
-)
+from quantking.history.stage1.k4c_probe import K4CProbeInvocation
 
 _AKSHARE_LOCKED_LIBRARY_VERSION = "1.18.83"
 _EVIDENCE_PREFIX = "K4C_R3_EVIDENCE_JSON "
@@ -204,7 +204,7 @@ def _calendar_classification(
         DatasetKind.EXCHANGE_CALENDAR.value,
         pa.Table.from_pylist(rows, schema=canonical_schema(DatasetKind.EXCHANGE_CALENDAR.value)),
     )
-    resolver = K4ExpectedSessionResolver(
+    resolver = ExpectedSessionResolver(
         calendar_table=table,
         expected_securities=(_LEGAL_EMPTY_SYMBOL,),
         security_exceptions={

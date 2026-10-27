@@ -10,7 +10,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-from scripts.verify_s1_08_release import _parser, main
+from scripts.history.stage1.verify_fixed_release import _parser, main
 from tests.data.adapters.test_akshare_adapter import FakeRunner
 from tests.integration.data.test_eod_worker_k4 import (
     _NOW,

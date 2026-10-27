@@ -1,0 +1,16 @@
+{
+  "status": "fulfilled",
+  "value": {
+    "request": {
+      "open": [
+        {
+          "ref_id": "https://static.cninfo.com.cn/finalpage/2024-04-24/1219775285.PDF"
+        }
+      ],
+      "response_length": "long"
+    },
+    "started_at": "2026-09-10T10:06:47.183Z",
+    "finished_at": "2026-09-10T10:06:49.948Z",
+    "response": "Internal Error ()\nciteturn18view0 [wordlim: 200] Source: open({\"ref_id\":\"https://static.cninfo.com.cn/finalpage/2024-04-24/1219775285.PDF\",\"lineno\":null}); Total lines: 1\nL0: URL https://static.cninfo.com.cn/finalpage/2024-04-24/1219775285.PDF is not safe to open (non-retryable error)\n"
+  }
+}

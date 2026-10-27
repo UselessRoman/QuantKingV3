@@ -22,6 +22,10 @@ LEGACY_EOD_CONFIG_SCHEMA = "eod-execution-config.v2"
 EOD_CONFIG_SCHEMA = "eod-execution-config.v3"
 K4_EOD_CONFIG_SCHEMA = "eod-execution-config.v4"
 R2_EOD_CONFIG_SCHEMA = "eod-execution-config.r2.v5"
+# Domain names for current code. Serialized values and historical aliases
+# remain frozen for existing Job manifests.
+THREE_SOURCE_EOD_CONFIG_SCHEMA = K4_EOD_CONFIG_SCHEMA
+MANIFEST_EOD_CONFIG_SCHEMA = R2_EOD_CONFIG_SCHEMA
 
 _DATASET_ORDER = (
     DatasetKind.EXCHANGE_CALENDAR,
@@ -547,6 +551,9 @@ __all__ = [
     "EOD_REQUEST_SCHEMA",
     "K4_EOD_CONFIG_SCHEMA",
     "LEGACY_EOD_CONFIG_SCHEMA",
+    "MANIFEST_EOD_CONFIG_SCHEMA",
+    "R2_EOD_CONFIG_SCHEMA",
+    "THREE_SOURCE_EOD_CONFIG_SCHEMA",
     "EodBaseVersion",
     "EodDatasetConfig",
     "EodPublishIntent",

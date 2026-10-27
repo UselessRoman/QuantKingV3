@@ -28,7 +28,9 @@ from quantking.data.models import (
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _MANAGED_RELATIVE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./=-]*\Z")
 S108_DAILY_RULE_VERSION = "quality-rules.daily-bar-first-release.v1"
-K4_DAILY_RULE_VERSION = "quality-rules.daily-bar-unadjusted.k4.v1"
+DAILY_BAR_QUALITY_RULE_VERSION = "quality-rules.daily-bar-unadjusted.k4.v1"
+# Historical readers use this alias to reproduce frozen Stage 1 artifacts.
+K4_DAILY_RULE_VERSION = DAILY_BAR_QUALITY_RULE_VERSION
 
 
 def _sha256(value: str, *, field_name: str) -> str:
@@ -404,6 +406,7 @@ class QualityRunArtifact:
 
 
 __all__: tuple[str, ...] = (
+    "DAILY_BAR_QUALITY_RULE_VERSION",
     "K4_DAILY_RULE_VERSION",
     "S108_DAILY_RULE_VERSION",
     "QualityOutcomeResult",

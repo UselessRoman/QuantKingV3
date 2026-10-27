@@ -1,0 +1,31 @@
+{
+  "attempt": "s2-01-source-probe-a3",
+  "status": "PARTIAL_EVIDENCE_TOOL_REJECTION",
+  "qualified": false,
+  "started_at": "2026-09-10T10:05:48.077Z",
+  "finished_at": "2026-09-10T10:07:59.563Z",
+  "elapsed_seconds": 131,
+  "operations": {
+    "search_queries": 7,
+    "open_pages": 6,
+    "pdf_screenshots": 0,
+    "tool_calls": 13
+  },
+  "errors": [
+    {
+      "file": "open-03.json",
+      "reason": "URL is not safe to open (non-retryable error)"
+    },
+    {
+      "file": "open-05.json",
+      "reason": "Failed to fetch: Cache miss"
+    },
+    {
+      "file": "open-06.json",
+      "reason": "(400) Timeout fetching"
+    }
+  ],
+  "stop_reason": "Non-retryable URL safety refusal in returned open batch treated conservatively as plan permission-stop condition. Six independent opens already submitted; no new operations, retries or alternate access after refusal.",
+  "actual_documents_read": 3,
+  "storage_semantics": "Tool-extracted text, not original PDF bytes or SHA"
+}

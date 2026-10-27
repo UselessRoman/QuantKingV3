@@ -10,7 +10,9 @@ from quantking.data.adapters.sources.units import (
     AKSHARE_UNIT_POLICY_VERSION,
     BAOSTOCK_UNIT_POLICY_VERSION,
 )
-from quantking.data.comparison.k4c_probe import (
+from quantking.data.eod.release import K4C_REPRESENTATIVE_SYMBOLS
+from quantking.data.models import DataProvider, DataUpstream
+from quantking.history.stage1.k4c_probe import (
     K4C_MAX_REPORTED_DIVERGENCES,
     K4C_PROBE_MARKER,
     K4CProbeInvocation,
@@ -19,8 +21,6 @@ from quantking.data.comparison.k4c_probe import (
     k4c_probe_dry_run_payload,
     summarize_k4c_probe,
 )
-from quantking.data.eod.release import K4C_REPRESENTATIVE_SYMBOLS
-from quantking.data.models import DataProvider, DataUpstream
 
 _ROLE_BY_UPSTREAM = {
     DataUpstream.BAOSTOCK: "A",

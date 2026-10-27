@@ -1,5 +1,8 @@
 # S1-08R3 实施记录：正式发布与 Stage 1 终验
 
+> 历史记录：下文状态、授权和“下一步”只描述当时过程；现行合同见
+> [CONTRACTS.md](CONTRACTS.md)，项目状态见 [ROADMAP.md](../ROADMAP.md)。
+
 状态：**R3A（Phase A）完成；I0 只读 inventory 已执行；C1 第 1–3 次 attempt 失败即停
 （均零网络/零业务写入，根因为授权 env 占用 `QUANTKING_` 命名空间，已修复）；C1-R4
 第 4 次 attempt 于 2026-08-17 **SUCCEEDED**：真实 BaoStock `query_trade_dates` 恰好 1 次
@@ -171,7 +174,7 @@ code_tree_sha256=5a0437ab3fe42b898c83daf1e7fe6fcf1b1407d1f582423aef931d07667f55c
 失败策略=发现 stale .incomplete/活锁/WAL/SHM/损坏立即停止；恢复须单独精确授权
 ```
 
-**执行结果**（用户批准后一次消费；执行器 `scripts/s1_08r3_i0_inventory.py`，
+**执行结果**（用户批准后一次消费；执行器 `scripts/history/stage1/inventory_release_data_root.py`，
 证据 [evidence/s1_08r3_inventory_2026-08-17.json](evidence/s1_08r3_inventory_2026-08-17.json)，
 SHA-256 `19444e551d113b8119a503ba9fc4dabe213f6e86190af4f71455757414df3947`）：
 
@@ -453,7 +456,7 @@ dry-run SHA、数据根 C1 后基线 `7f4dcb74…`、marker/authorization_id/ide
 
 用户于 2026-08-18 授权执行（E1 授权块已声明的 `command_idempotency_probe`/
 `published_version_reuse_probe`）。执行器
-`scripts/s1_08r3_r3c_idempotency_probe.py`：从冻结 manifest/envelope 原路径重建
+`scripts/history/stage1/probe_release_idempotency.py`：从冻结 manifest/envelope 原路径重建
 与 `run_formal_entry` 逐字节相同的冻结命令（preflight 复验代码树 `ed904a37…` 与
 git HEAD `9f5b9ea…`），注入三角色**零网络探针网关**（计数并立即抛
 `SourceAdapterError`，任何 provider 调用都会同时被计数并致命）：
@@ -522,7 +525,7 @@ evidence_out=docs/stage1/evidence/s1_08r3_e1_result_2026-08-18.json（仅仓内�
 
 ### E1R 执行结果（授权 `S1-08R3-E1R-9c42e7a1b6d8` 一次消费，2026-08-18 OK）
 
-执行器 `scripts/s1_08r3_e1r_result_evidence.py`，证据
+执行器 `scripts/history/stage1/extract_release_result_evidence.py`，证据
 [evidence/s1_08r3_e1_result_2026-08-18.json](evidence/s1_08r3_e1_result_2026-08-18.json)：
 
 - **不可变证明**：数据根 420 文件 / 4,480,964 字节全量逐文件 SHA-256，运行前后
@@ -585,7 +588,7 @@ envelope/plan SHA，入口健壮性缺陷不使历史正式产物失效。
    legacy/backup/other_datasets 全 false、双 SHA 格式、requires_new_real_authorization。
    token 为 `<marker>:<authorization_id>:<plan_sha256>`（`calendar_bootstrap_token`），
    任意字段变化即失效。原仅查 schema version 的 `_require_plan` 已移除。
-3. **R3C 未来探针防重放**（`scripts/s1_08r3_r3c_idempotency_probe.py`）：新增简单
+3. **R3C 未来探针防重放**（`scripts/history/stage1/probe_release_idempotency.py`）：新增简单
    一次性 attempt ledger（复用 `FormalAttemptLedger`），绑定 marker、authorization
    ID、probe plan SHA（manifest/envelope 文件 SHA + 幂等键的规范 SHA）、idempotency
    key 与开始时间；在**任何数据根访问之前**消费，token

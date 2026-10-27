@@ -334,7 +334,9 @@ def test_published_calendar_binds_into_the_formal_entry(
     assert modules[1].calls == []  # C is never invoked when A/B agree
 
 
-def test_cli_without_authorization_never_touches_the_data_root(tmp_path: Path) -> None:
+def test_retired_calendar_cli_is_not_installed_and_never_touches_data_root(
+    tmp_path: Path,
+) -> None:
     repo = _FakeRepo(tmp_path)
     plan = build_calendar_bootstrap_plan(
         marker=_MARKER,
@@ -372,6 +374,6 @@ def test_cli_without_authorization_never_touches_the_data_root(tmp_path: Path) -
         env=environment,
     )
     payload = json.loads(completed.stdout)
-    assert completed.returncode == 1
-    assert payload["error"]["code"] == "CALENDAR_AUTHORIZATION_REQUIRED"
+    assert completed.returncode == 2
+    assert payload["error"]["code"] == "INVALID_ARGUMENT"
     assert not data_root.exists()

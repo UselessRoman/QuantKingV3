@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuantKing 编码交付"
+  short_description: "按已授权任务卡完成 QuantKing 编码、缺陷修复与证据验证"
+  default_prompt: "使用 $quantking-implement，在现有授权范围内完成当前任务的实现、验证和文档更新。"

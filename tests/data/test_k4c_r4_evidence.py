@@ -17,7 +17,13 @@ from pathlib import Path
 import pytest
 from tests.data.test_k4c_r1_evidence import _ROLES, _row
 
-from quantking.data.comparison.k4c_evidence import (
+from quantking.data.comparison.thresholds import (
+    K4_THRESHOLD_RULE_VERSION,
+    k4_evidence_thresholds,
+    k4_threshold_acceptance,
+)
+from quantking.data.models import DatasetKind
+from quantking.history.stage1.k4c_evidence import (
     COMPOSITE_CONTRACT_VERSION_MISMATCH,
     COMPOSITE_SCHEMA_MISMATCH,
     EVIDENCE_ARTIFACT_ROOT_MISMATCH,
@@ -53,12 +59,6 @@ from quantking.data.comparison.k4c_evidence import (
     rows_from_comparison_payload,
     validate_k4c_r4_suspension_reference,
 )
-from quantking.data.comparison.thresholds import (
-    K4_THRESHOLD_RULE_VERSION,
-    k4_evidence_thresholds,
-    k4_threshold_acceptance,
-)
-from quantking.data.models import DatasetKind
 
 _ROOT = Path(__file__).resolve().parents[2]
 _R3_ATTEMPT = _ROOT / "docs/stage1/evidence/k4c-r3-attempts/K4C-R3-2b8e5f14a6c9"

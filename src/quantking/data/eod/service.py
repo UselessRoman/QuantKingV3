@@ -17,8 +17,8 @@ from quantking.data.eod.contracts import (
     EOD_CONFIG_SCHEMA,
     EOD_JOB_TYPE,
     EOD_REQUEST_MANIFEST_SCHEMA,
-    K4_EOD_CONFIG_SCHEMA,
-    R2_EOD_CONFIG_SCHEMA,
+    MANIFEST_EOD_CONFIG_SCHEMA,
+    THREE_SOURCE_EOD_CONFIG_SCHEMA,
     EodBaseVersion,
     EodDatasetConfig,
     EodReferenceVersion,
@@ -34,11 +34,11 @@ from quantking.data.eod.release_manifest import (
     ReleaseManifest,
 )
 from quantking.data.models import DatasetKind
-from quantking.data.quality.models import K4_DAILY_RULE_VERSION
+from quantking.data.quality.models import DAILY_BAR_QUALITY_RULE_VERSION
 from quantking.data.resolution.models import (
+    DAILY_BAR_RESOLUTION_RULE_VERSION,
     K2_RESOLUTION_RULE_VERSION,
     K3_RESOLUTION_RULE_VERSION,
-    K4_RESOLUTION_RULE_VERSION,
 )
 from quantking.data.schemas import descriptor_for
 from quantking.jobs.models import JobStatus
@@ -77,13 +77,15 @@ class EodExecutionConfig:
     b_tencent_endpoint_limit: int | None = None
 
     def __post_init__(self) -> None:
-        r2 = (
+        manifest_driven = (
             self.release_manifest_sha256 is not None
             or self.a_baostock_endpoint_limit is not None
             or self.b_tencent_endpoint_limit is not None
         )
-        if r2 and (self.a_baostock_endpoint_limit is None or self.b_tencent_endpoint_limit is None):
-            raise ValueError("R2 execution config requires both per-role endpoint limits")
+        if manifest_driven and (
+            self.a_baostock_endpoint_limit is None or self.b_tencent_endpoint_limit is None
+        ):
+            raise ValueError("manifest-driven config requires both per-role endpoint limits")
         for field in (
             "code_version",
             "adapter_version",
@@ -124,14 +126,14 @@ class EodExecutionConfig:
             or _SHA256.fullmatch(self.release_manifest_sha256) is None
         ):
             raise ValueError("release_manifest_sha256 must be lowercase SHA-256 or None")
-        if r2:
+        if manifest_driven:
             caps = RELEASE_SAFETY_CAPS
-            if self.resolution_rule_version != K4_RESOLUTION_RULE_VERSION:
-                raise ValueError("R2 execution config is bound to the K4 resolution rule")
+            if self.resolution_rule_version != DAILY_BAR_RESOLUTION_RULE_VERSION:
+                raise ValueError("manifest-driven config is bound to the daily-bar resolution rule")
             if self.d_endpoint_invocation_limit != 0:
-                raise ValueError("R2 execution config keeps the D role retired")
+                raise ValueError("manifest-driven config keeps the D role retired")
             if self.legacy_import_manifest_sha256 is not None:
-                raise ValueError("R2 execution config keeps legacy import manifest SHA null")
+                raise ValueError("manifest-driven config keeps legacy import manifest SHA null")
             assert self.a_baostock_endpoint_limit is not None
             assert self.b_tencent_endpoint_limit is not None
             for name, value in (
@@ -148,21 +150,21 @@ class EodExecutionConfig:
                 + self.b_tencent_endpoint_limit
                 + self.c_endpoint_invocation_limit
             ):
-                raise ValueError("R2 endpoint total must equal the sum of the role limits")
+                raise ValueError("endpoint total must equal the sum of the role limits")
             if self.endpoint_invocation_limit > caps["endpoint_invocations_total"]:
-                raise ValueError("R2 endpoint total exceeds the safety cap")
+                raise ValueError("endpoint total exceeds the safety cap")
             if self.estimated_http_request_limit != (
                 self.b_tencent_endpoint_limit * 3 + self.c_endpoint_invocation_limit * 2
             ):
-                raise ValueError("R2 HTTP budget must be derived from the role limits")
+                raise ValueError("HTTP budget must be derived from the role limits")
             if self.estimated_http_request_limit > caps["akshare_http_requests"]:
-                raise ValueError("R2 HTTP budget exceeds the safety cap")
+                raise ValueError("HTTP budget exceeds the safety cap")
             if self.estimated_baostock_protocol_message_limit != (
                 self.a_baostock_endpoint_limit * 3
             ):
-                raise ValueError("R2 protocol budget must be derived from the A role limit")
+                raise ValueError("protocol budget must be derived from the A role limit")
             if self.estimated_baostock_protocol_message_limit > caps["baostock_protocol_messages"]:
-                raise ValueError("R2 protocol budget exceeds the safety cap")
+                raise ValueError("protocol budget exceeds the safety cap")
         elif self.resolution_rule_version == K2_RESOLUTION_RULE_VERSION:
             if (
                 self.endpoint_invocation_limit != 12
@@ -181,7 +183,7 @@ class EodExecutionConfig:
                 or self.estimated_baostock_protocol_message_limit != 12
             ):
                 raise ValueError("S1-07K3 network budget must remain 16/4/4/24/12")
-        elif self.resolution_rule_version == K4_RESOLUTION_RULE_VERSION:
+        elif self.resolution_rule_version == DAILY_BAR_RESOLUTION_RULE_VERSION:
             if (
                 self.endpoint_invocation_limit != 12
                 or self.c_endpoint_invocation_limit != 4
@@ -208,11 +210,16 @@ class EodExecutionConfig:
         object.__setattr__(self, "datasets", MappingProxyType(dict(sorted(normalized.items()))))
 
     @classmethod
-    def production_k4(cls, *, code_version: str, settings: AppSettings) -> EodExecutionConfig:
+    def historical_three_source_config(
+        cls,
+        *,
+        code_version: str,
+        settings: AppSettings,
+    ) -> EodExecutionConfig:
         """Freeze the historical K4-route config (frozen 12/4/0/20/12 budget).
 
         Retained for the frozen K4 evidence/probe route and its regression
-        tests; new releases use the R2 manifest-driven configs
+        tests; new releases use the manifest-driven configs
         (``production`` / ``from_release_manifest``).
         """
         if not isinstance(settings, AppSettings):
@@ -220,8 +227,8 @@ class EodExecutionConfig:
         return cls(
             code_version=code_version,
             adapter_version="baostock-akshare-daily-bar.k4.v1",
-            rule_version=K4_DAILY_RULE_VERSION,
-            resolution_rule_version=K4_RESOLUTION_RULE_VERSION,
+            rule_version=DAILY_BAR_QUALITY_RULE_VERSION,
+            resolution_rule_version=DAILY_BAR_RESOLUTION_RULE_VERSION,
             source_route_version="BAO-TX-SINA.k4.v1",
             baostock_version=BAOSTOCK_DISTRIBUTION_VERSION,
             baostock_unit_policy_version=BAOSTOCK_UNIT_POLICY_VERSION,
@@ -245,10 +252,10 @@ class EodExecutionConfig:
 
     @classmethod
     def production(cls, *, code_version: str, settings: AppSettings) -> EodExecutionConfig:
-        """Freeze the R2 production scope from validated application settings.
+        """Freeze the production scope from validated application settings.
 
         The production config no longer hardcodes the historical first-release
-        budgets: per-role budgets are bounded by the independent R2 safety hard
+        budgets: per-role budgets are bounded by independent safety hard
         caps, and the worker preflight freezes the actual planned counts from
         the deterministic chunk inventory before the first provider call. A
         release manifest (``from_release_manifest``) tightens these bounds to
@@ -261,8 +268,8 @@ class EodExecutionConfig:
         return cls(
             code_version=code_version,
             adapter_version="baostock-akshare-daily-bar.k4.v1",
-            rule_version=K4_DAILY_RULE_VERSION,
-            resolution_rule_version=K4_RESOLUTION_RULE_VERSION,
+            rule_version=DAILY_BAR_QUALITY_RULE_VERSION,
+            resolution_rule_version=DAILY_BAR_RESOLUTION_RULE_VERSION,
             source_route_version="BAO-TX-SINA.k4.v1",
             baostock_version=BAOSTOCK_DISTRIBUTION_VERSION,
             baostock_unit_policy_version=BAOSTOCK_UNIT_POLICY_VERSION,
@@ -303,7 +310,7 @@ class EodExecutionConfig:
         if not isinstance(manifest, ReleaseManifest):
             raise TypeError("manifest must be a ReleaseManifest")
         budgets = manifest.budgets
-        # S1-08R3: the manifest is the single source of the calendar binding
+        # The manifest is the single source of the calendar binding
         # and the frozen per-security exemptions, so a formal entry never has
         # to hand-assemble dataset references or exception windows. A
         # manifest that carries a real published calendar version id gets the
@@ -359,8 +366,8 @@ class EodExecutionConfig:
         )
 
     @property
-    def is_r2(self) -> bool:
-        """Whether this config uses the R2 manifest-driven schema."""
+    def is_manifest_driven(self) -> bool:
+        """Whether this config uses the manifest-driven schema."""
         return (
             self.release_manifest_sha256 is not None
             or self.a_baostock_endpoint_limit is not None
@@ -376,12 +383,12 @@ class EodExecutionConfig:
         missing = set(selected) - set(self.datasets)
         if missing:
             raise ValueError("selected dataset has no frozen execution config")
-        if self.is_r2:
-            config_schema = R2_EOD_CONFIG_SCHEMA
+        if self.is_manifest_driven:
+            config_schema = MANIFEST_EOD_CONFIG_SCHEMA
         else:
             config_schema = (
-                K4_EOD_CONFIG_SCHEMA
-                if self.resolution_rule_version == K4_RESOLUTION_RULE_VERSION
+                THREE_SOURCE_EOD_CONFIG_SCHEMA
+                if self.resolution_rule_version == DAILY_BAR_RESOLUTION_RULE_VERSION
                 else EOD_CONFIG_SCHEMA
             )
         datasets: dict[str, dict[str, object]] = {}
@@ -391,7 +398,10 @@ class EodExecutionConfig:
                 known_coverage=(),
                 base_version=bases.get(key),
             ).to_dict()
-            if config_schema not in {K4_EOD_CONFIG_SCHEMA, R2_EOD_CONFIG_SCHEMA}:
+            if config_schema not in {
+                THREE_SOURCE_EOD_CONFIG_SCHEMA,
+                MANIFEST_EOD_CONFIG_SCHEMA,
+            }:
                 # Historical v2/v3 configs never carried security_exceptions.
                 dataset.pop("security_exceptions", None)
             datasets[key] = dataset
@@ -419,9 +429,9 @@ class EodExecutionConfig:
             "datasets": datasets,
             "schema_versions": {key: descriptor_for(key).schema_version for key in selected},
         }
-        if config_schema is K4_EOD_CONFIG_SCHEMA or config_schema is R2_EOD_CONFIG_SCHEMA:
+        if config_schema in {THREE_SOURCE_EOD_CONFIG_SCHEMA, MANIFEST_EOD_CONFIG_SCHEMA}:
             payload["akshare_unit_policy_version"] = self.akshare_unit_policy_version
-        if config_schema is R2_EOD_CONFIG_SCHEMA:
+        if config_schema == MANIFEST_EOD_CONFIG_SCHEMA:
             payload["release_manifest_sha256"] = self.release_manifest_sha256
             payload["a_baostock_endpoint_limit"] = self.a_baostock_endpoint_limit
             payload["b_tencent_endpoint_limit"] = self.b_tencent_endpoint_limit
@@ -522,7 +532,7 @@ class EodCommandService:
                 )
             ),
         }
-        if self._config.resolution_rule_version == K4_RESOLUTION_RULE_VERSION:
+        if self._config.resolution_rule_version == DAILY_BAR_RESOLUTION_RULE_VERSION:
             version_manifest["akshare_unit_policy_version"] = (
                 self._config.akshare_unit_policy_version
             )
@@ -552,12 +562,12 @@ class EodCommandService:
         }
         if retry_of_job_id is not None:
             input_manifest["retry_of_job_id"] = retry_of_job_id
-        if self._config.is_r2:
-            config_manifest_schema = R2_EOD_CONFIG_SCHEMA
+        if self._config.is_manifest_driven:
+            config_manifest_schema = MANIFEST_EOD_CONFIG_SCHEMA
         else:
             config_manifest_schema = (
-                K4_EOD_CONFIG_SCHEMA
-                if self._config.resolution_rule_version == K4_RESOLUTION_RULE_VERSION
+                THREE_SOURCE_EOD_CONFIG_SCHEMA
+                if self._config.resolution_rule_version == DAILY_BAR_RESOLUTION_RULE_VERSION
                 else EOD_CONFIG_SCHEMA
             )
         outcome = self._jobs.create_job_result(

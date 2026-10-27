@@ -16,7 +16,13 @@ from pathlib import Path
 
 import pytest
 
-_SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "s1_08r3_r3c_idempotency_probe.py"
+_SCRIPT = (
+    Path(__file__).resolve().parents[3]
+    / "scripts"
+    / "history"
+    / "stage1"
+    / "probe_release_idempotency.py"
+)
 _SPEC = importlib.util.spec_from_file_location("s1_08r3_r3c_probe", _SCRIPT)
 probe = importlib.util.module_from_spec(_SPEC)
 assert _SPEC.loader is not None

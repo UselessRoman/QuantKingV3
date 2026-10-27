@@ -18,10 +18,13 @@ from quantking.data.models import DatasetKind, DataUpstream
 
 K2_RESOLUTION_RULE_VERSION = "source-resolution.daily-bar-unadjusted.k2.v1"
 K3_RESOLUTION_RULE_VERSION = "source-resolution.daily-bar-unadjusted.k3.v1"
-K4_RESOLUTION_RULE_VERSION = "source-resolution.daily-bar-unadjusted.k4.v1"
+DAILY_BAR_RESOLUTION_RULE_VERSION = "source-resolution.daily-bar-unadjusted.k4.v1"
+# Frozen historical readers retain the original alias; current runtime code
+# uses the domain-level name above.
+K4_RESOLUTION_RULE_VERSION = DAILY_BAR_RESOLUTION_RULE_VERSION
 # K4 is the active writer/service rule; K2/K3 remain readable for historical
 # Raw, migrations and immutable evidence, never for new Jobs.
-RESOLUTION_RULE_VERSION = K4_RESOLUTION_RULE_VERSION
+RESOLUTION_RULE_VERSION = DAILY_BAR_RESOLUTION_RULE_VERSION
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _K2_SOURCE_ORDER = (
     DataUpstream.EASTMONEY,
@@ -877,6 +880,7 @@ def json_key(binding: ResolutionSourceBinding) -> tuple[str, str, str, str]:
 
 
 __all__ = [
+    "DAILY_BAR_RESOLUTION_RULE_VERSION",
     "K2_RESOLUTION_RULE_VERSION",
     "K3_RESOLUTION_RULE_VERSION",
     "K4_RESOLUTION_RULE_VERSION",

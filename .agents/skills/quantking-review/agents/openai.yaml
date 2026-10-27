@@ -1,0 +1,4 @@
+interface:
+  display_name: "QuantKing 独立审查"
+  short_description: "审查 QuantKing 指定差异、架构契约与验收证据中的实际缺陷"
+  default_prompt: "使用 $quantking-review，对指定范围做只读独立审查，报告可复现发现、依据和未覆盖项。"

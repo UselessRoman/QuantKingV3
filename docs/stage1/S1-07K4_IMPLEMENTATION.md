@@ -1,5 +1,8 @@
 # S1-07K4 实施记录：三角色重构与仲裁/质量语义
 
+> 历史记录：下文状态、授权和“下一步”只描述当时过程；现行合同见
+> [CONTRACTS.md](CONTRACTS.md)，项目状态见 [ROADMAP.md](../ROADMAP.md)。
+
 状态：K4A/K4B 离线实现完成并通过完整离线门禁；K4C 第一次代表性真实三源实测（2026-08-15）
 经独立验收**不通过**（S1-07K4C-R1），K4C-R1 已完成证据合同与探针执行器修复并生成新零网络
 dry-run；**K4C-R2 真实实测已于 2026-08-16 获授权执行完毕**（36/36 成功、证据可离线复算、
@@ -138,7 +141,7 @@ full；**K4E 独立验收已于 2026-08-17 通过并形成单一 K4 提交
     （后经 K4C-R2/R3/R4 证据链，已于 2026-08-16 经 K4C-R4 独立验收通过并按用户决定
     接受重新冻结——见 ADR-024。）新真实证据通过离线 verifier 前不得宣称独立验收通过，
     不得作为 K4E/S1-08 前置。
-  - 新零网络 dry-run：`scripts/probe_s1_07k4c_r2_dry_run.py` →
+  - 新零网络 dry-run：`scripts/history/stage1/probe_representative_dry_run.py` →
     [evidence/k4c_r2_probe_dry_run_2026-08-16.json](evidence/k4c_r2_probe_dry_run_2026-08-16.json)
     （新 marker `K4C-REPRESENTATIVE-R2-2026-08-16-v1`、plan_sha256
     `8ea2ea1f470d781309a59e4526deffe9e36dded6f6146daa29db72c4e64b3e65`、36 次调用预算、
@@ -245,7 +248,7 @@ full；**K4E 独立验收已于 2026-08-17 通过并形成单一 K4 提交
     688825.SH 三源零行+日历证明 → `LEGAL_EMPTY_PRE_LISTING_OBSERVED` ✓；停牌在 R3 本地
     无横截面反例，如实 `SUSPENSION_NOT_OBSERVED`（sufficient=false 如实记录）。
   - **composite evidence**（`docs/stage1/evidence/k4c_composite_evidence_2026-08-16.json`，
-    SHA `910010da…`，`scripts/build_k4c_composite_evidence.py` 离线构建并经
+    SHA `910010da…`，`scripts/history/stage1/build_composite_evidence.py` 离线构建并经
     `K4CCompositeVerifier` 验证）：合并行再观测用不可变 R2 行（其六只证券持有 07-16）作
     反例观测停牌 → **8/8 objective 成立、`representative_evidence_sufficient=true`、
     `threshold_reacceptance_eligible=true`**（held_rows 248 = R2 246 + R3 2；金额差异
@@ -302,7 +305,7 @@ full；**K4E 独立验收已于 2026-08-17 通过并形成单一 K4 提交
   `merge_objective_records_with_r3_reobservation` 透传（再观测失败的具体来源码进入
   merged 汇总，不再被通用码吞掉）。
 - **R4 v2 composite**：`docs/stage1/evidence/k4c_r4_composite_evidence_2026-08-16.json`
-  （SHA `87b04863…`，`scripts/build_k4c_composite_evidence.py --schema v2` 离线构建+验证）
+  （SHA `87b04863…`，`scripts/history/stage1/build_composite_evidence.py --schema v2` 离线构建+验证）
   只经 SHA 引用不可变 R2/R3；声明“offline acceptance repair layer, not a new real
   network attempt”；重算 248 个三源共同持有行、8/8 objective、全部字段
   exact/divergent、最大绝对/相对差与 0/50 阈值覆盖；输出 `representative_evidence_sufficient=
